@@ -12,6 +12,8 @@ import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
 import { createFakeBridge } from './helpers/session-fakes.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
+import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
+import { runBinary } from '../src/media/ffmpeg.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
 const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-simulator-'));
@@ -78,7 +80,7 @@ const invokeOf = ({ bridge }, channel) => bridge.invokeList.find((call) => call.
 test('시작: 꺼 둔 분류 → 세션 시작 순서로 알리고, 화면 전환 기준 시각·실험 차례를 세우고 제품 문구로 캡처 시작을 남긴다', async () => {
   const harness = setupSimulator();
   await harness.simulator.start();
-  const { ctx } = harness.simulator;
+  const { debugCtx: ctx } = harness.simulator;
   assert.deepEqual(harness.bridge.invokeList.map(({ channel }) => channel), ['pipeline-feature-toggles', 'pipeline-session-start']);
   assert.deepEqual(harness.bridge.invokeList[0].payload.disabledClassList, ['page_transition', 'speaker_identity']);
   assert.deepEqual(harness.bridge.invokeList[1].payload, { mode: 'delayed', asrLanguage: 'ko' });
@@ -118,7 +120,9 @@ test('배수 상한은 실험실 규칙(영상 끝 + 지연 10초 + 대기 줄 T
   assert.equal(result.isDrainTimedOut, true);
   assert.equal(invokeOf(harness, 'pipeline-session-end').atElapsedMs, 6000 + DRAIN_LIMIT_AFTER_END_MS);
   assert.equal(result.drainEndAfterVideoMs, DRAIN_LIMIT_AFTER_END_MS);
-  assert.equal(harness.simulator.ctx.state.isSessionActive, false);
+  assert.equal(harness.simulator.debugCtx.state.isSessionActive, false);
+  assert.deepEqual([result.remainingTaskCount, result.inFlightCallCount], [1, 0], '상한에서 남은 렌더러 작업·진행 중 외부 호출 수');
+  assert.equal(result.appendedTailMs, 0, '원음은 이미 끝까지 틀었다');
 });
 
 test('상한에 닿아도 AD 가 재생 중이면 끝날 때까지 기다리고, 그때 남은 영상 안 예약은 drain_timeout·영상 끝 뒤 예약은 after_end 로 남긴다', async () => {
@@ -136,8 +140,52 @@ test('상한에 닿아도 AD 가 재생 중이면 끝날 때까지 기다리고,
   assert.deepEqual(result.dropRecordList.map(({ text, reason }) => [text, reason]), [
     ['영상 안 해설', 'drain_timeout'], ['영상 끝 뒤 해설', 'after_end'],
   ]);
-  assert.ok(summarizeTimeline(result.pieceList).sourceMediaMs < 6000, '실험실처럼 상한에서 원음도 끊긴다');
-  assert.deepEqual(harness.warnList, ['[factory] 배수 상한(영상 끝 + 33000ms)에 닿아 멈춘다 — 남은 영상 안 해설은 drain_timeout 으로 기록']);
+  // AD 판단·드롭은 실험실처럼 상한에서 멈추지만, 남은 원음은 1배속으로 조각표 끝에 붙여 끝까지 담는다.
+  assert.equal(Math.round(summarizeTimeline(result.pieceList).sourceMediaMs), 6000);
+  const tailPiece = result.pieceList.at(-1);
+  assert.equal(tailPiece.kind, 'source');
+  assert.equal(tailPiece.srcEndMs, 6000);
+  assert.ok(result.appendedTailMs > 2000, `붙인 원음 ${result.appendedTailMs}ms`);
+  assert.ok(Math.abs(tailPiece.srcEndMs - tailPiece.srcStartMs - result.appendedTailMs) < 1);
+  assert.ok(Math.abs((tailPiece.outEndMs - tailPiece.outStartMs) - (tailPiece.srcEndMs - tailPiece.srcStartMs)) < 1, '1배속');
+  assert.deepEqual([result.remainingTaskCount, result.inFlightCallCount], [0, 0]);
+  assert.deepEqual(harness.warnList, [
+    '[factory] 배수 상한(영상 끝 + 33000ms)에 닿아 멈춘다 — 남은 영상 안 해설은 drain_timeout 으로 기록',
+    `[factory] 지연 재생이 영상 끝에 닿기 전에 멈춰 남은 원음 ${result.appendedTailMs}ms 를 1배속으로 결과 끝에 붙인다`,
+  ]);
+});
+
+test('배수 상한에서 멈춰도 결과 mp3 에는 원음이 끝까지 들어가고 길이 공식(원음 + AD + 무음 − 회수)이 맞는다', { timeout: 60000 }, async () => {
+  const toneClipPath = await createTestClip({ dirPath, fileName: 'tone.mp4', colorTimeline: [['gray', 6]], audioExpr: '0.3*sin(2*PI*330*t)' });
+  const harness = setupSimulator({ filePath: toneClipPath });
+  harness.deliverCaptionAt(2000, buildCaption({ text: '긴 해설', eventVideoTimeMs: 1000, durationMs: 40000 }));
+  await harness.simulator.start();
+  const result = await harness.simulator.runToEnd();
+  assert.equal(result.isDrainTimedOut, true);
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-simulator-render-'));
+  const recordBySeq = new Map(result.captionRecordList.map((record) => [record.captionSeq, record]));
+  const adPathByRef = new Map();
+  for (const adPlay of result.adPlayList) {
+    const adPath = path.join(workDir, `ad-${adPlay.captionSeq}.wav`);
+    fs.writeFileSync(adPath, recordBySeq.get(adPlay.captionSeq).wavBytes);
+    adPathByRef.set(adPlay.captionSeq, adPath);
+  }
+  const outPath = path.join(workDir, 'out.mp3');
+  await renderOutputMp3({
+    sourcePath: toneClipPath, hasSourceAudio: true, pieceList: result.pieceList, adPathByRef, outPath, workDir, sampleRate: 48000, channelCount: 2, ffmpegPath,
+  });
+  const summary = summarizeTimeline(result.pieceList);
+  assert.equal(Math.round(summary.sourceMediaMs), 6000);
+  const mp3Ms = Number((await runBinary({ binaryPath: ffprobePath, argList: ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', outPath] })).toString()) * 1000;
+  const formulaMs = summary.sourceMediaMs + summary.adTotalMs + summary.silenceTotalMs - summary.recoveredMs;
+  assert.ok(Math.abs(mp3Ms - formulaMs) < 150, `mp3 ${mp3Ms} / 공식 ${formulaMs}`);
+  // 끝 0.5초는 붙인 원음 꼬리(330Hz)다. 무음이면 꼬리를 빼먹은 것이다.
+  const tailBytes = new Uint8Array(await runBinary({
+    binaryPath: ffmpegPath, argList: ['-v', 'error', '-sseof', '-0.5', '-i', outPath, '-ac', '1', '-f', 'f32le', 'pipe:1'],
+  }));
+  const tailSampleList = new Float32Array(tailBytes.buffer, 0, Math.floor(tailBytes.length / 4));
+  const rms = Math.sqrt(tailSampleList.reduce((sum, sample) => sum + sample * sample, 0) / tailSampleList.length);
+  assert.ok(rms > 0.1, `끝 원음 RMS ${rms}`);
 });
 
 test('세션은 지연 재생이 끝난 뒤에도 남은 연결 작업이 끝날 때까지 살아 있다', async () => {
@@ -147,7 +195,7 @@ test('세션은 지연 재생이 끝난 뒤에도 남은 연결 작업이 끝날
     segmentBufferMap: new Map([[1000, Buffer.from('voice')]]),
     handlerMap: {
       'pipeline-audio': () => new Promise((resolve) => {
-        harness.clock.setTimeout(() => { activeAtResolve = harness.simulator.ctx.state.isSessionActive; resolve({ isOk: true }); }, 20000);
+        harness.clock.setTimeout(() => { activeAtResolve = harness.simulator.debugCtx.state.isSessionActive; resolve({ isOk: true }); }, 20000);
       }),
     },
   });
@@ -171,7 +219,7 @@ test('영상 끝 직전 400ms 안에 바뀐 화면도 끝 뒤 두 tick(마지막
   } finally {
     realReader.close();
   }
-  const { state } = harness.simulator.ctx;
+  const { state } = harness.simulator.debugCtx;
   assert.ok(state.slideEventVideoTimeMap.get('2') >= durationMs, `끝 뒤 확정한 슬라이드 2: ${state.slideEventVideoTimeMap.get('2')}`);
   const lastGridMs = Math.floor((durationMs - 1) / 400) * 400;
   assert.deepEqual(requestList.slice(-3), [lastGridMs, lastGridMs, lastGridMs]);

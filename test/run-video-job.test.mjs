@@ -45,6 +45,10 @@ test('프레임 읽기가 중간에 실패하면 mp3·JSON 은 남기되 JSON �
   assert.deepEqual(report.stats.frame.sourceError, { message: FRAME_ERROR_MESSAGE, videoTimeMs: 2000 });
   assert.equal(report.stats.frame.captureFailCount, 0);
   assert.equal(report.session.isDrainTimedOut, false);
+  assert.deepEqual(
+    [report.session.appendedTailMs, report.session.remainingTaskCount, report.session.inFlightCallCount], [0, 0, 0],
+    '정상 배수: 붙인 원음·남은 작업·진행 중 호출이 없다',
+  );
   assert.ok(fs.existsSync(path.join(outDir, 'broken_SEEON_AD.mp3')));
   assert.equal(isVideoDone({ outDir, outStem: 'broken' }), false, '다시 돌리면 이 영상을 다시 처리한다');
   assert.equal(JSON.stringify(report).includes('bedrockApiKey'), false);

@@ -107,6 +107,7 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
     incompleteReasonList,
     session: {
       isDrainTimedOut: sessionResult.isDrainTimedOut, drainLimitMs: sessionResult.drainLimitMs, drainEndAfterVideoMs: sessionResult.drainEndAfterVideoMs,
+      appendedTailMs: sessionResult.appendedTailMs, remainingTaskCount: sessionResult.remainingTaskCount, inFlightCallCount: sessionResult.inFlightCallCount,
       recordFile: sessionResult.recordPath ? path.relative(outDir, sessionResult.recordPath) : null, endResult: sessionResult.endResult,
     },
   };

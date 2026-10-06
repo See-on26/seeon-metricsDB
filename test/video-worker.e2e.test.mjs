@@ -7,6 +7,7 @@ import { fork, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startMockServices } from './helpers/mock-services.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
+import { waitRealUntil } from './helpers/real-wait.mjs';
 import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
 
 const { ffprobePath } = resolveFfmpegPaths({ env: process.env });
@@ -76,15 +77,6 @@ function listProcessByArg(text) {
   return execFileSync('ps', ['-ax', '-o', 'pid=,command=']).toString().split('\n').filter((line) => line.includes(text) && !line.includes(' ps '));
 }
 
-async function waitRealUntil(isDone, limitMs = 10000) {
-  const startedAt = performance.now();
-  while (!isDone()) {
-    if (performance.now() - startedAt > limitMs) return false;
-    await new Promise((resolve) => { setTimeout(resolve, 50); });
-  }
-  return true;
-}
-
 test('워커는 SIGTERM 을 받으면 띄운 ffmpeg·ffprobe 를 죽이고 143 으로 끝난다', { timeout: 60000 }, async () => {
   const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-sigterm-'));
   // 쓰는 쪽이 없는 FIFO 를 영상으로 주면 ffprobe 가 열다가 멈춘다.
@@ -95,8 +87,8 @@ test('워커는 SIGTERM 을 받으면 띄운 ffmpeg·ffprobe 를 죽이고 143 �
   });
   const exitPromise = new Promise((resolve) => { child.once('exit', (code, signal) => resolve({ code, signal })); });
   child.send({ type: 'run', job: { videoId: 'stuck', filePath: fifoPath, outStem: 'stuck', language: 'ko', isPageTransitionIncluded: false }, outDir: path.join(dirPath, 'out') });
-  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length > 0), 'ffprobe 가 떠 있어야 한다');
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length > 0, { limitMs: 10000, pollMs: 50 }), 'ffprobe 가 떠 있어야 한다');
   child.kill('SIGTERM');
   assert.deepEqual(await exitPromise, { code: 143, signal: null });
-  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, 3000), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
 });

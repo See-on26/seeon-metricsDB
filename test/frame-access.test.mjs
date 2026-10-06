@@ -8,6 +8,7 @@ import { createFrameAccess } from '../src/session/frame-access.mjs';
 import { openSampleFrameReader } from '../src/media/frame-source.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
+import { waitRealUntil } from './helpers/real-wait.mjs';
 
 const { ffmpegPath } = resolveFfmpegPaths({ env: process.env });
 const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-frame-access-'));
@@ -50,15 +51,6 @@ function isProcessAlive(pid) {
   } catch {
     return false;
   }
-}
-
-async function waitRealUntil(isDone, limitMs = 3000) {
-  const startedAt = performance.now();
-  while (!isDone()) {
-    if (performance.now() - startedAt > limitMs) return false;
-    await new Promise((resolve) => { setTimeout(resolve, 20); });
-  }
-  return true;
 }
 
 test('영상 stream 이 끝난 뒤 시각은 마지막으로 받은 프레임을 주고, JPEG 캡처는 마지막 프레임 시각으로 다시 떠 null 을 내지 않는다', async () => {

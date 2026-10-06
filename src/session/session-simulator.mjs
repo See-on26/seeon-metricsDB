@@ -12,7 +12,7 @@ import { createSlideGlue } from './slide-glue.mjs';
 import { createOutputGlue } from './output-glue.mjs';
 import { createFrameAccess, FRAME_IO_TIMEOUT_MS } from './frame-access.mjs';
 import { startPlaybackChain } from './playback-chain.mjs';
-import { createPlaybackRecorder, compactPieceList } from './playback-recorder.mjs';
+import { createPlaybackRecorder, compactPieceList, PIECE_KIND_MAP } from './playback-recorder.mjs';
 
 const PROGRESS_INTERVAL_MS = 10000;
 // 실험실 배수 규칙(lab drain-policy.js)과 같다: 영상 끝 + 모드 지연 + 대기 줄 TTL + 여유 15초까지 기다리고, 해설이 재생 중이면
@@ -24,6 +24,8 @@ const DRAIN_TAIL_MS = 1000;
 const END_FRAME_TICK_COUNT = 2;
 const SESSION_START_LIMIT_MS = 30000;
 const SESSION_END_LIMIT_MS = 30000;
+// 이보다 짧은 원음 꼬리는 표본 하나도 안 되어 붙이지 않는다.
+const MIN_SOURCE_TAIL_MS = 1;
 
 // main.js:929-937 describeBeforeWindow
 function describeBeforeWindow({ policy, anchorTs, nowPerf }) {
@@ -34,6 +36,16 @@ function describeBeforeWindow({ policy, anchorTs, nowPerf }) {
     return `화면 전환 후 ${sinceSec}초${capText}`;
   }
   return `최근 ${Math.round((beforeMs ?? 60000) / 1000)}초`;
+}
+
+// 배수 상한에서 지연 재생이 영상 끝(D)에 닿기 전에 멈추면 남은 원음 [멈춘 위치, D] 를 1배속으로 조각표 끝에 붙인다.
+// AD 판단·드롭 기록은 실험실처럼 상한에서 멈춘 그대로 두고, 결과 mp3 에는 원음을 끝까지 담는다(그 꼬리에는 AD 가 없다).
+function appendSourceTail({ pieceList, fromMediaMs, toMediaMs }) {
+  const tailMs = toMediaMs - fromMediaMs;
+  if (!pieceList.length || !(tailMs >= MIN_SOURCE_TAIL_MS)) return { pieceList, appendedTailMs: 0 };
+  const outStartMs = pieceList[pieceList.length - 1].outEndMs;
+  const tailPiece = { kind: PIECE_KIND_MAP.source, srcStartMs: fromMediaMs, srcEndMs: toMediaMs, outStartMs, outEndMs: outStartMs + tailMs };
+  return { pieceList: [...pieceList, tailPiece], appendedTailMs: tailMs };
 }
 
 // main.js 의 attemptStartExperiment(1683-1788)·stopExperiment(1794-1848)·finalizeSession(1850-1866) 을 영상 하나의 세션으로 옮긴다.
@@ -207,9 +219,16 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     }
     if (isTimedOut) log.warn(`[factory] 배수 상한(영상 끝 + ${drainLimitMs}ms)에 닿아 멈춘다 — 남은 영상 안 해설은 drain_timeout 으로 기록`);
     const drainEndAfterVideoMs = Math.round(clock.elapsedMs() - videoEndElapsedMs);
+    // 상한에서 멈추면 아직 끝나지 않은 렌더러 작업·외부 호출(생성 중 해설)은 기록 없이 사라진다. 그 양을 남긴다.
+    const remainingTaskCount = ctx.getTaskCount();
+    const inFlightCallCount = clock.inFlightCount;
     clock.clearInterval(progressTimer);
     // 재생 조각을 먼저 닫는다. 그 뒤 narrator.stop 이 알리는 정지는 조각표에 남지 않는다.
-    recorder.close({ atElapsedMs: clock.elapsedMs(), mediaMs: ctx.core.delayBuffer.getDelayedTimeMs() });
+    const stopMediaMs = ctx.core.delayBuffer.getDelayedTimeMs();
+    recorder.close({ atElapsedMs: clock.elapsedMs(), mediaMs: stopMediaMs });
+    const tail = appendSourceTail({ pieceList: recorder.getPieceList(), fromMediaMs: stopMediaMs, toMediaMs: mediaDurationMs });
+    const appendedTailMs = Math.round(tail.appendedTailMs);
+    if (appendedTailMs > 0) log.warn(`[factory] 지연 재생이 영상 끝에 닿기 전에 멈춰 남은 원음 ${appendedTailMs}ms 를 1배속으로 결과 끝에 붙인다`);
     outputGlue.dropPendingAfterEnd({ isDrainTimedOut: isTimedOut });
     // stopExperiment 정리. 세션은 배수가 끝나야(연결 작업이 다 빠져야) 닫히고, 상한에 닿으면 실험실처럼 그 자리에서 닫힌다.
     stopFrameCapture();
@@ -225,13 +244,14 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     // runUntil 이 돌아와도 제품의 기록 파일 쓰기는 끝나지 않았을 수 있다. 결과를 읽기 전에 정착시킨다.
     await clock.settle();
     return {
-      pieceList: compactPieceList(recorder.getPieceList()),
+      pieceList: compactPieceList(tail.pieceList),
       captionRecordList: outputGlue.getCaptionRecordList(), dropRecordList: outputGlue.getDropRecordList(), adPlayList: outputGlue.getAdPlayList(),
       recordPath: ctx.state.recordPath, sessionStartWallMs: ctx.state.sessionStartWall,
-      isDrainTimedOut: isTimedOut, drainLimitMs, drainEndAfterVideoMs, endResult,
+      isDrainTimedOut: isTimedOut, drainLimitMs, drainEndAfterVideoMs, appendedTailMs, remainingTaskCount, inFlightCallCount, endResult,
       frameSourceError: ctx.state.frameSourceError ?? null, frameStats: frameAccess.getStats(),
     };
   }
 
-  return { start, runToEnd, ctx };
+  // debugCtx 는 진단·테스트 전용이다. 세션 상태를 읽기만 하고 바꾸지 않는다.
+  return { start, runToEnd, debugCtx: ctx };
 }
