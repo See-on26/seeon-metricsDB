@@ -1,0 +1,111 @@
+{
+  "adList": [
+    {
+      "id": "ad-001",
+      "narrationClass": "deixis",
+      "type": "deixis",
+      "aid": "A2",
+      "text": "2022년 1월부터 현재까지의 제도 변경 보며 설명함",
+      "eventMediaMs": 17467,
+      "playedMediaMs": 21787,
+      "outputMs": 32233,
+      "durationMs": 2858,
+      "slideLabel": "2",
+      "rationale": {
+        "utterance": "빨간 막대들을 보시면 제도가",
+        "subKind": null,
+        "summary": "근거 표현=(없음)"
+      },
+      "trigger": {
+        "utterance": "빨간 막대들을 보시면 제도가",
+        "anchor": null,
+        "judgeReason": null
+      },
+      "latencyMs": 4320,
+      "overlapSpeechMs": 0,
+      "heardMediaRange": {
+        "startMs": 21787,
+        "endMs": 21787
+      },
+      "interruptedReason": null
+    },
+    {
+      "id": "ad-002",
+      "narrationClass": "silence_based",
+      "type": "visual_description",
+      "aid": "A4",
+      "text": "이미지 제시, 여행 일기 형식의 사진과 글이 나열된 페이지",
+      "eventMediaMs": 42394,
+      "playedMediaMs": 42441,
+      "outputMs": 52931,
+      "durationMs": 2997,
+      "slideLabel": "4",
+      "rationale": {
+        "subKind": "reaction",
+        "summary": "발표자가 화면을 보라고 한 뒤 5초 침묵"
+      },
+      "trigger": {
+        "utterance": "이 그래프를 보시면 하반기에 250이 올랐습니다. 결국 1년 총액이 더 높 는 겁니다. 여러분, 이 사진들을 한번 보시죠.",
+        "anchor": null,
+        "judgeReason": null
+      },
+      "latencyMs": 47,
+      "overlapSpeechMs": 0,
+      "heardMediaRange": {
+        "startMs": 42441,
+        "endMs": 42441
+      },
+      "interruptedReason": null
+    }
+  ],
+  "droppedList": [
+    {
+      "text": "슬라이드 105: 공정한 보상을 받는다는 내용과 기회와 보상 설명 카드",
+      "type": "page_transition",
+      "narrationClass": "page_transition",
+      "slideLabel": "1",
+      "eventMediaMs": 12233,
+      "reason": "feature_off"
+    },
+    {
+      "text": "슬라이드 107: 팀과 구성원이 Win-Win 할 수 있는 보상구조",
+      "type": "page_transition",
+      "narrationClass": "page_transition",
+      "slideLabel": "2",
+      "eventMediaMs": 16648,
+      "reason": "feature_off"
+    },
+    {
+      "text": "PDF 문서, 반기와 수시 연봉 조정 제도를 설명한 본문과 그래프",
+      "type": "page_transition",
+      "narrationClass": "page_transition",
+      "slideLabel": "3",
+      "eventMediaMs": 27424,
+      "reason": "feature_off"
+    },
+    {
+      "text": "반기 연봉 조정 2회 그래프를 보는 중",
+      "type": "deixis",
+      "narrationClass": null,
+      "slideLabel": "3",
+      "eventMediaMs": 34670,
+      "reason": "rate-limited"
+    },
+    {
+      "text": "PDF, 여행과 일상을 공유하는 사진과 문구",
+      "type": "page_transition",
+      "narrationClass": "page_transition",
+      "slideLabel": "4",
+      "eventMediaMs": 38248,
+      "reason": "feature_off"
+    },
+    {
+      "text": "PDF 문서, 에이블리다운 사람에게 더 많은 보상이 주어지는 평가",
+      "type": "page_transition",
+      "narrationClass": "page_transition",
+      "slideLabel": "5",
+      "eventMediaMs": 53031,
+      "reason": "feature_off"
+    }
+  ]
+}
