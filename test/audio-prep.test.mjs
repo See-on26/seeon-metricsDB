@@ -130,8 +130,9 @@ test('모노 96kHz 오디오도 48kHz 미터 격자로 같은 레벨을 낸다',
   assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 1000 }) - 0.354) < 0.06);
 });
 
+// LFE 칸은 60Hz 다. AAC 는 LFE 를 저역만 담아 440Hz 를 −46dB 로 깎으므로, 440Hz 로는 LFE 를 섞는 잘못도 무음처럼 보인다.
 test('5.1 은 Web Audio speakers 다운믹스(√½·L + C + ½·SL, LFE 제외)대로 레벨을 낸다', async () => {
-  const exprList = [`${TONE_EXPR}*lt(t,1)`, '0', `${TONE_EXPR}*between(t,1,2)`, `${TONE_EXPR}*between(t,3,4)`, `${TONE_EXPR}*between(t,2,3)`, '0'];
+  const exprList = [`${TONE_EXPR}*lt(t,1)`, '0', `${TONE_EXPR}*between(t,1,2)`, '0.5*sin(2*PI*60*t)*between(t,3,4)', `${TONE_EXPR}*between(t,2,3)`, '0'];
   const filePath = await createTestClip({ dirPath, fileName: 'surround.mp4', colorTimeline: [['black', 4]], audioExpr: exprList, audioChannelCount: 6 });
   const probe = await probeVideo({ filePath, ffprobePath });
   assert.equal(probe.audioChannelCount, 6);
