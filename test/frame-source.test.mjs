@@ -95,8 +95,13 @@ test('JPEG 캡처: 전체 프레임·crop 크기, 영상 끝 뒤 시각은 마�
   assert.deepEqual(readJpegSize(full), { width: 320, height: 180 });
   const cropped = await captureJpeg({ filePath: deckPath, timeMs: 1200, durationMs: 4000, normRect: { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, ffmpegPath });
   assert.deepEqual(readJpegSize(cropped), { width: 160, height: 90 });
+  // 제품 canvas 크기는 Math.max(2, Math.round(영역 화소))다(main.js:596-597). 4:2:0 영상이어도 홀수 크기를 그대로 낸다.
+  const oddCropped = await captureJpeg({ filePath: deckPath, timeMs: 1200, durationMs: 4000, normRect: { x: 0.11, y: 0.11, w: 0.36, h: 0.35 }, ffmpegPath });
+  assert.deepEqual(readJpegSize(oddCropped), { width: Math.round(320 * 0.36), height: Math.round(180 * 0.35) });
   const late = await captureJpeg({ filePath: deckPath, timeMs: 99_000, durationMs: 4000, ffmpegPath });
   assert.ok(late && late.length > 100);
+  const [r, , b] = await readJpegColor(late);
+  assert.ok(b > 200 && r < 80, `끝 뒤 JPEG 는 마지막 프레임(파랑): ${r},${b}`);
 });
 
 test('4:3 영상도 480×270 으로 늘려 샘플링한다(제품 drawImage 와 같다)', async () => {
@@ -190,7 +195,25 @@ test('홀수 해상도도 480×270 으로 샘플링하고 JPEG 는 원본 화소
   const cropped = await captureJpeg({
     filePath, timeMs: 400, durationMs: 1000, ffmpegPath, normRect: narrowToPointingRegion({ sub: { x: 0.05, y: 0.5, w: 0.2, h: 0.6 } }),
   });
-  assert.deepEqual(readJpegSize(cropped), { width: 118, height: 112 });
+  // 제품 값: round(321×0.37)=119, round(181×0.62)=112
+  assert.deepEqual(readJpegSize(cropped), { width: 119, height: 112 });
+});
+
+test('격자 밖 시각은 그 시각 이하의 마지막 격자 칸을 준다(미래 칸을 당겨 오지 않는다)', async () => {
+  // 0.6s 에 파랑으로 바뀐다. 650ms 는 400ms 칸(빨강)이고 800ms 칸(파랑)이 아니다.
+  const filePath = await createTestClip({ dirPath, fileName: 'off-grid.mp4', colorTimeline: [['red', 0.6], ['blue', 1]], hasAudio: false });
+  const reader = openReader(filePath);
+  assert.ok(isRed(await reader.readFrameAt(650)), '650ms → 400ms 칸 빨강');
+  assert.ok(isBlue(await reader.readFrameAt(800)), '800ms 칸 파랑');
+  assert.ok(isBlue(await reader.readFrameAt(1199.9999999)), '나눗셈 오차로 1200ms 칸이 한 칸 아래로 떨어지지 않는다');
+});
+
+test('RGBA 색이 원래 색과 1 단계 안이다(swscale 정확 반올림·전체 크로마 보간)', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'tone.mp4', colorTimeline: [['0xC86432', 1]], hasAudio: false });
+  const { data } = await openReader(filePath).readFrameAt(400);
+  const offset = (135 * 480 + 240) * 4;
+  const rgb = [data[offset], data[offset + 1], data[offset + 2]];
+  [200, 100, 50].forEach((expected, index) => assert.ok(Math.abs(rgb[index] - expected) <= 1, `${rgb} ≈ 200,100,50`));
 });
 
 test('ffmpeg 가 실패하면 null 대신 오류를 내고, 겹친 읽기는 거부한다', async () => {

@@ -11,10 +11,13 @@ const STDERR_TAIL_LENGTH = 2000;
 // fps 필터 round=up 이 그 프레임을 고른다(기본 near 는 반 칸 안의 다음 프레임을 당겨 온다). start_time=0 은 영상 stream 이
 // 늦게 시작해도 격자를 컨테이너 시작(영상 시각 0)에 붙이고 그 앞을 첫 프레임으로 채운다. fps_mode passthrough 는 출력 쪽에서
 // 프레임을 더 복제하거나 버리지 않게 해 fps 필터가 낸 격자를 그대로 둔다. 0:V 는 표지 그림이 아닌 첫 영상 stream 이다.
+// swscale 기본 반올림·크로마 처리는 YUV→RGB 값을 2~3 단계 낮게 내서, accurate_rnd·full_chroma_int 로 원래 색에 맞춘다.
+const SAMPLE_SCALE_FLAGS = 'bilinear+accurate_rnd+full_chroma_int';
+
 export function buildSampleFrameArgList({ filePath, sampleMs, width, height }) {
   return [
     '-v', 'error', '-i', filePath, '-map', '0:V:0',
-    '-vf', `fps=fps=1000/${sampleMs}:start_time=0:round=up,scale=${width}:${height}:flags=bilinear,format=rgba`,
+    '-vf', `fps=fps=1000/${sampleMs}:start_time=0:round=up,scale=${width}:${height}:flags=${SAMPLE_SCALE_FLAGS},format=rgba`,
     '-fps_mode', 'passthrough', '-f', 'rawvideo', 'pipe:1',
   ];
 }
@@ -87,7 +90,8 @@ export function openSampleFrameReader({
     if (streamError) throw streamError;
     if (isClosed) throw new Error('닫힌 프레임 리더에서 읽었다');
     if (isReading) throw new Error('프레임 리더는 동시에 읽을 수 없다(앞 요청을 기다린 뒤 읽는다)');
-    const targetIndex = Math.round(timeMs / sampleMs);
+    // 격자 밖 시각은 그 시각 이하의 마지막 칸이다(그 시각에 보이는 프레임 규칙). 1e-6 은 나눗셈 오차로 격자 시각이 한 칸 아래로 떨어지지 않게 한다.
+    const targetIndex = Math.floor(timeMs / sampleMs + 1e-6);
     if (targetIndex < lastRequestedIndex) throw new Error(`프레임 요청 시각이 줄어들었다: ${timeMs}ms`);
     lastRequestedIndex = targetIndex;
     isReading = true;
