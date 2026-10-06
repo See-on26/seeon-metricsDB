@@ -4,9 +4,14 @@ import { buildOutputPathMap } from '../../src/runner/output-paths.mjs';
 // video-worker.mjs 와 같은 메시지 규약으로 도는 가짜 워커. 제품 파이프라인 없이 videoId 에 든 낱말로 결과를 고른다.
 // crash → 결과 없이 종료 코드 137, fail → failed 메시지 뒤 종료 1,
 // stubborn → SIGTERM 을 무시하고 끝나지 않음, hang → 끝나지 않다가 SIGTERM 에 정리하고 종료 1,
+// linger → hang 과 같되 SIGTERM 뒤 정리에 LINGER_MS 가 걸림(정리 중에 신호가 더 오는 상황),
 // slow → 영상 길이 1000ms 를 알린 뒤 500ms 지나 done, 그 밖 → progress 뒤 mp3·JSON 을 쓰고 done.
 // 끝나지 않는 워커도 HANG_LIMIT_MS 뒤에는 스스로 끝내, 멈추기가 회귀해도 테스트 프로세스가 영영 남지 않게 한다.
 const HANG_LIMIT_MS = 30000;
+const LINGER_MS = 400;
+
+// 실제 워커처럼 터미널 Ctrl-C 가 그룹에 보낸 SIGINT 로는 죽지 않는다. 멈춤은 부모가 SIGTERM 으로 보낸다.
+process.on('SIGINT', () => console.log('[fake-worker] SIGINT 무시 — 멈춤은 부모가 SIGTERM 으로 보낸다'));
 
 function hangUntilLimit() {
   setTimeout(() => {
@@ -45,6 +50,14 @@ process.on('message', (message) => {
   }
   if (job.videoId.includes('stubborn')) {
     process.on('SIGTERM', () => console.log('[fake-worker] SIGTERM 무시'));
+    hangUntilLimit();
+    return;
+  }
+  if (job.videoId.includes('linger')) {
+    process.on('SIGTERM', () => {
+      console.log('[fake-worker] SIGTERM 받음 — 정리하고 끝낸다');
+      setTimeout(() => process.exit(1), LINGER_MS);
+    });
     hangUntilLimit();
     return;
   }

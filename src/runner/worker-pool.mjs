@@ -60,6 +60,15 @@ export function forkVideoWorker({
     graceTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
   }
 
+  // 사람이 중단을 한 번 더 요청하면 정리 유예를 기다리지 않고 바로 죽인다. 이미 멈추는 중이면 그 이유를 그대로 둔다.
+  function forceStop(reason) {
+    if (isClosed) return;
+    stopReason ??= reason;
+    clearTimeout(timeoutTimer);
+    clearTimeout(graceTimer);
+    child.kill('SIGKILL');
+  }
+
   function armTimeout() {
     clearTimeout(timeoutTimer);
     if (!limitMs || stopReason) return;
@@ -100,18 +109,26 @@ export function forkVideoWorker({
     });
   });
   child.send({ type: 'run', job, outDir });
-  return { promise, kill: ({ reason = '중단됨' } = {}) => stop(reason) };
+  return {
+    promise,
+    kill: ({ reason = '중단됨', isForced = false } = {}) => (isForced ? forceStop(reason) : stop(reason)),
+  };
 }
 
 // 동시에 concurrency 개까지만 워커를 띄운다. 한 영상의 실패는 다른 영상에 영향이 없다. 결과는 입력 순서다.
 // signal 이 중단되면 돌던 워커를 '중단됨(<이유>)' 로 멈추고, 아직 시작하지 않은 영상은 띄우지 않고 결과를 null 로 둔다.
-export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent = () => {}, signal = null }) {
+// forceSignal 이 중단되면 돌던 워커를 정리 유예 없이 바로 죽인다(결과는 같은 '중단됨').
+export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent = () => {}, signal = null, forceSignal = null }) {
   const activeWorkerSet = new Set();
-  const formatStopReason = () => `중단됨(${typeof signal.reason === 'string' ? signal.reason : '중단'})`;
+  const formatStopReason = () => `중단됨(${typeof signal?.reason === 'string' ? signal.reason : '중단'})`;
   const stopActiveWorkers = () => {
     for (const worker of activeWorkerSet) worker.kill({ reason: formatStopReason() });
   };
+  const forceStopActiveWorkers = () => {
+    for (const worker of activeWorkerSet) worker.kill({ reason: formatStopReason(), isForced: true });
+  };
   signal?.addEventListener('abort', stopActiveWorkers, { once: true });
+  forceSignal?.addEventListener('abort', forceStopActiveWorkers, { once: true });
   try {
     return await mapWithConcurrency({
       itemList: jobList,
@@ -137,5 +154,6 @@ export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent
     });
   } finally {
     signal?.removeEventListener('abort', stopActiveWorkers);
+    forceSignal?.removeEventListener('abort', forceStopActiveWorkers);
   }
 }

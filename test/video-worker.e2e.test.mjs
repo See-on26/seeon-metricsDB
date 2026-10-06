@@ -106,3 +106,36 @@ test('워커는 SIGTERM 을 받으면 띄운 ffmpeg·ffprobe 를 죽이고 143 �
   assert.deepEqual(await exitPromise, { code: 143, signal: null });
   assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
 });
+
+// 쓰는 쪽이 없는 FIFO 를 영상으로 준 워커를 띄워, ffprobe 가 열다가 멈춘 상태를 만든다.
+async function startStuckWorker({ t, name }) {
+  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), `factory-e2e-${name}-`));
+  t.after(() => fs.rmSync(dirPath, { recursive: true, force: true }));
+  const fifoPath = path.join(dirPath, 'stuck.mp4');
+  execFileSync('mkfifo', [fifoPath]);
+  const child = fork(WORKER_PATH, [], {
+    execArgv: ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON'], env: { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  });
+  const exitPromise = new Promise((resolve) => { child.once('exit', (code, signal) => resolve({ code, signal })); });
+  child.send({ type: 'run', job: { videoId: 'stuck', filePath: fifoPath, outStem: 'stuck', language: 'ko', isPageTransitionIncluded: false }, outDir: path.join(dirPath, 'out') });
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length > 0, { limitMs: 10000, pollMs: 50 }), 'ffprobe 가 떠 있어야 한다');
+  return { child, fifoPath, exitPromise };
+}
+
+test('워커는 터미널 Ctrl-C 의 SIGINT 로 죽지 않고, 부모가 보낸 SIGTERM 에 정리하고 끝난다', { timeout: 60000 }, async (t) => {
+  const { child, fifoPath, exitPromise } = await startStuckWorker({ t, name: 'sigint' });
+  let exitState = null;
+  exitPromise.then((state) => { exitState = state; });
+  child.kill('SIGINT');
+  assert.equal(await waitRealUntil(() => exitState !== null, { limitMs: 500, pollMs: 20 }), false, `SIGINT 에 끝나면 안 된다: ${JSON.stringify(exitState)}`);
+  child.kill('SIGTERM');
+  assert.deepEqual(await exitPromise, { code: 143, signal: null });
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+});
+
+test('워커는 부모와 IPC 가 끊기면(부모가 죽음) 띄운 ffprobe 를 죽이고 스스로 끝난다', { timeout: 60000 }, async (t) => {
+  const { child, fifoPath, exitPromise } = await startStuckWorker({ t, name: 'disconnect' });
+  child.disconnect();
+  assert.deepEqual(await exitPromise, { code: 1, signal: null });
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+});

@@ -41,11 +41,11 @@ async function openGpuAccess({ preflight, env, pipelineConfig, checkPort, startT
 }
 
 // 영상마다 워커 프로세스를 띄워 결과를 모은다. 진행은 영상마다 PROGRESS_LOG_MS 간격으로만 찍고, 영상 하나가 끝날 때마다 onResult 를 부른다.
-function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPath, videoTimeout, signal, onResult, log }) {
+function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPath, videoTimeout, signal, forceSignal, onResult, log }) {
   const lastLogAtMap = new Map();
   let doneCount = 0;
   return runWorkerPool({
-    jobList: pendingJobList, concurrency, signal,
+    jobList: pendingJobList, concurrency, signal, forceSignal,
     startWorker: (job) => {
       const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
       // 끝남 표시(JSON)는 이번 작업이 마지막에 새로 써야만 믿을 수 있다. 이전 실행의 JSON·mp3 를 먼저 지워
@@ -74,19 +74,39 @@ function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPat
   });
 }
 
-// SIGINT·SIGTERM 을 처음 받을 때만 onSignal 을 부른다(once). 같은 신호를 한 번 더 받으면 기본 동작대로 바로 끝난다. 떼는 함수를 돌려준다.
-function listenStopSignal({ signalSource, onSignal }) {
-  const handlerMap = new Map(STOP_SIGNAL_LIST.map((signalName) => [signalName, () => onSignal(signalName)]));
-  for (const [signalName, handler] of handlerMap) signalSource.once(signalName, handler);
+// 터미널 Ctrl-C 는 프로세스 그룹 전체에 SIGINT 를 보내고, npm run 은 받은 신호를 자식에게 한 번 더 전달한다.
+// 그래서 CLI 는 같은 신호를 거의 같은 순간 두 번 받는다. 첫 신호 뒤 이 창 안에 온 신호는 같은 Ctrl-C 로 보고 무시한다.
+const DUPLICATE_SIGNAL_WINDOW_MS = 1500;
+// 창 밖에서 다시 받으면(사람이 한 번 더 누름) 워커를 바로 죽인다. 그래도 이 시간 안에 정리가 끝나지 않으면 기록만 쓰고 끝낸다.
+const FORCE_EXIT_AFTER_MS = 3000;
+
+// 신호 처리기는 실행이 끝날 때까지 달아 둔다. 떼면 Node 기본 동작으로 돌아가 다음 신호에 정리 없이 죽는다.
+// 첫 신호는 onStop(우아한 중단), 창 밖에서 다시 온 신호는 onForce(한 번만)를 부른다. 떼는 함수를 돌려준다.
+function listenStopSignal({ signalSource, onStop, onForce, now = () => performance.now() }) {
+  let firstSignalAt = null;
+  let isForced = false;
+  const handleSignal = (signalName) => {
+    if (firstSignalAt === null) {
+      firstSignalAt = now();
+      onStop(signalName);
+      return;
+    }
+    if (isForced || now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS) return;
+    isForced = true;
+    onForce(signalName);
+  };
+  const handlerMap = new Map(STOP_SIGNAL_LIST.map((signalName) => [signalName, () => handleSignal(signalName)]));
+  for (const [signalName, handler] of handlerMap) signalSource.on(signalName, handler);
   return () => {
     for (const [signalName, handler] of handlerMap) signalSource.off(signalName, handler);
   };
 }
 
 // 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGINT 130, SIGTERM 143).
-// workerPath·checkPort·runVersion·startTunnel·signalSource 는 테스트가 실제 워커·GPU 포트·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
+// workerPath·checkPort·runVersion·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 포트·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
 export async function runFactoryCli({
   argList, env = process.env, log = console, workerPath, checkPort, runVersion, startTunnel = startProductTunnel, signalSource = process,
+  exitProcess = (exitCode) => process.exit(exitCode),
 }) {
   const options = parseFactoryArgs(argList);
   // 부모 프로세스는 제품 설정만 읽는다(시계 범위·electron 대역은 워커에서만 깐다).
@@ -110,9 +130,31 @@ export async function runFactoryCli({
 
   const runOptions = { ...options, input: path.resolve(options.input), out: outDir };
   const seeonMeet = readSeeonMeetVersion();
-  const abortController = new AbortController();
+  const stopController = new AbortController();
+  const forceController = new AbortController();
   let interruptedBy = null;
-  let stopListening = null;
+  let forceExitTimer = null;
+  let writeFinalRecord = () => {};
+  const toSignalExitCode = (signalName) => 128 + os.constants.signals[signalName];
+  // 점검을 마친 뒤부터 실행이 끝날 때까지 신호를 받는다. 워커를 띄우기 전에 받아도 기록을 남기고 끝낸다.
+  const stopListening = listenStopSignal({
+    signalSource,
+    onStop: (signalName) => {
+      interruptedBy = signalName;
+      log.error(`[factory] ${signalName} 받음 — 돌던 워커를 멈추고 기록을 남긴 뒤 끝낸다(${DUPLICATE_SIGNAL_WINDOW_MS / 1000}초 지나 한 번 더 보내면 워커를 바로 죽인다)`);
+      stopController.abort(signalName);
+    },
+    onForce: (signalName) => {
+      log.error(`[factory] ${signalName} 다시 받음 — 강제 종료: 워커를 바로 죽이고 기록만 남긴다`);
+      forceController.abort(signalName);
+      // 정리가 어딘가에서 멈춰도(터널 닫기 등) 기록을 쓰고 끝낸다.
+      forceExitTimer = setTimeout(() => {
+        writeFinalRecord();
+        exitProcess(toSignalExitCode(interruptedBy));
+      }, FORCE_EXIT_AFTER_MS);
+      forceExitTimer.unref?.();
+    },
+  });
   let manifest;
   try {
     await fs.promises.mkdir(outDir, { recursive: true });
@@ -123,20 +165,18 @@ export async function runFactoryCli({
     const buildCurrentManifest = (endedAt) => buildManifest({
       previousManifest, runOptions, seeonMeet, jobList, resultList: [...resultByStem.values()], skippedJobList, startedAt, endedAt, interruptedBy,
     });
+    writeFinalRecord = () => {
+      try {
+        writeRunRecord({ outDir, manifest: buildCurrentManifest(new Date().toISOString()) });
+      } catch (error) {
+        log.warn(`[factory] 실행 기록 쓰기 실패: ${error.message}`);
+      }
+    };
     writeRunRecord({ outDir, manifest: buildCurrentManifest(null) });
     log.log(`[factory] 영상 ${jobList.length}개(건너뜀 ${skippedJobList.length}) · 동시 ${options.concurrency} · 출력 ${outDir}`);
-    stopListening = listenStopSignal({
-      signalSource,
-      onSignal: (signalName) => {
-        if (interruptedBy) return;
-        interruptedBy = signalName;
-        log.error(`[factory] ${signalName} 받음 — 돌던 워커를 멈추고 기록을 남긴 뒤 끝낸다(한 번 더 보내면 바로 끝난다)`);
-        abortController.abort(signalName);
-      },
-    });
     await runPendingJobList({
       pendingJobList, outDir, concurrency: options.concurrency, env, workerPath, log,
-      videoTimeout: buildVideoTimeout({ timeoutMin: options.timeoutMin }), signal: abortController.signal,
+      videoTimeout: buildVideoTimeout({ timeoutMin: options.timeoutMin }), signal: stopController.signal, forceSignal: forceController.signal,
       onResult: (result) => {
         resultByStem.set(result.outStem, result);
         // 중간 기록을 못 써도 영상 처리는 계속한다. 마지막 기록은 아래에서 다시 쓴다.
@@ -150,11 +190,12 @@ export async function runFactoryCli({
     manifest = buildCurrentManifest(new Date().toISOString());
     writeRunRecord({ outDir, manifest });
   } finally {
-    stopListening?.();
     await tunnel?.stop();
+    clearTimeout(forceExitTimer);
+    stopListening();
   }
   log.log(formatSummary(manifest));
-  if (interruptedBy) return 128 + os.constants.signals[interruptedBy];
+  if (interruptedBy) return toSignalExitCode(interruptedBy);
   return manifest.counts.failed > 0 ? 1 : 0;
 }
 
