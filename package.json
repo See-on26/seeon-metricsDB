@@ -1,0 +1,12 @@
+{
+  "name": "seeon-metrics-db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SEEON 교차(균형) 모드 AD 를 넣은 평가 오디오를 영상마다 만드는 일괄 도구",
+  "type": "module",
+  "engines": { "node": ">=22.14" },
+  "scripts": {
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.mjs",
+    "factory": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/cli/factory-cli.mjs"
+  }
+}

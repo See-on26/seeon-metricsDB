@@ -1,0 +1,4 @@
+[submodule "seeon-meet"]
+	path = seeon-meet
+	url = https://github.com/See-on26/seeon-meet.git
+	branch = production
