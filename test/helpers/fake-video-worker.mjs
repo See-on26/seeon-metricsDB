@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { buildOutputPathMap } from '../../src/runner/output-paths.mjs';
+import { readResultIdentity } from '../../src/runner/result-identity.mjs';
+import { loadPipelineConfig } from '../../src/product/product-loader.mjs';
 
 // video-worker.mjs 와 같은 메시지 규약으로 도는 가짜 워커. 제품 파이프라인 없이 videoId 에 든 낱말로 결과를 고른다.
 // crash → 결과 없이 종료 코드 137, fail → failed 메시지 뒤 종료 1,
@@ -20,14 +22,15 @@ function hangUntilLimit() {
   }, HANG_LIMIT_MS);
 }
 
-function writeDoneOutput({ job, outDir }) {
+function writeDoneOutput({ job, outDir, runConcurrency }) {
   const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
   fs.writeFileSync(pathMap.mp3Path, 'mp3');
-  // AD 기록 JSON 과 같은 자리(video·config)에 작업 정보를 남긴다.
+  // AD 기록 JSON 과 같은 자리(video·seeonMeet·factory·config)에 작업 정보·코드 버전·결과 설정을 남긴다.
+  const { versionMap, resultConfig } = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(process.env) });
   fs.writeFileSync(pathMap.jsonPath, JSON.stringify({
     schemaVersion: 1, isComplete: true,
-    video: { videoId: job.videoId, file: job.filePath, language: job.language },
-    config: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded) },
+    video: { videoId: job.videoId, file: job.filePath, language: job.language }, ...versionMap,
+    config: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded), resultConfig, runConcurrency },
   }));
   return {
     videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: 2, droppedCount: 1,
@@ -37,7 +40,7 @@ function writeDoneOutput({ job, outDir }) {
 
 process.on('message', (message) => {
   if (message?.type !== 'run') return;
-  const { job, outDir } = message;
+  const { job, outDir, runConcurrency = null } = message;
   console.log(`[fake-worker] ${job.videoId} 시작 · 언어 ${job.language} · 전환 ${job.isPageTransitionIncluded}`);
   if (job.videoId.includes('crash')) {
     setTimeout(() => process.exit(137), 10);
@@ -71,9 +74,9 @@ process.on('message', (message) => {
   }
   if (job.videoId.includes('slow')) {
     process.send({ type: 'progress', videoId: job.videoId, videoTimeMs: 0, durationMs: 1000, adCount: 0 });
-    setTimeout(() => process.send({ type: 'done', result: writeDoneOutput({ job, outDir }) }, () => process.exit(0)), 500);
+    setTimeout(() => process.send({ type: 'done', result: writeDoneOutput({ job, outDir, runConcurrency }) }, () => process.exit(0)), 500);
     return;
   }
   process.send({ type: 'progress', videoId: job.videoId, videoTimeMs: 10000, durationMs: 60000, adCount: 1 });
-  process.send({ type: 'done', result: writeDoneOutput({ job, outDir }) }, () => process.exit(0));
+  process.send({ type: 'done', result: writeDoneOutput({ job, outDir, runConcurrency }) }, () => process.exit(0));
 });

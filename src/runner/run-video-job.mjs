@@ -3,7 +3,7 @@ import path from 'node:path';
 import { MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 import { bootProductPipeline } from '../product/boot-pipeline.mjs';
 import { getJudgeSourceCountMap } from '../product/product-loader.mjs';
-import { readSeeonMeetVersion } from '../product/product-version.mjs';
+import { readVersionMap, buildResultConfig } from './result-identity.mjs';
 import { createVirtualClock } from '../clock/virtual-clock.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
 import { probeVideo } from '../media/probe.mjs';
@@ -37,8 +37,11 @@ function describeIncompleteReason(reason) {
 
 // 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
 // 화면 입력이 실패한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다. 다시 돌리면 그 영상을 다시 처리한다.
-export async function runVideoJob({ job, outDir, onProgress = () => {}, log = console, openFrameReader = openSampleFrameReader }) {
+// runConcurrency 는 이번 실행의 동시 수로, 결과 JSON 에 남긴다.
+export async function runVideoJob({ job, outDir, runConcurrency = null, onProgress = () => {}, log = console, openFrameReader = openSampleFrameReader }) {
   const realStartedAt = performance.now();
+  // 실제로 돈 코드 버전을 시작할 때 읽는다. 긴 처리 중에 체크아웃이 바뀌어도 이 영상은 시작 때 읽은 코드로 돈다.
+  const versionMap = readVersionMap();
   const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
   const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
   await fs.promises.mkdir(pathMap.adDir, { recursive: true });
@@ -91,10 +94,12 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
   const { bedrockApiKey, ...modelConfig } = pipelineConfig;
   const report = buildAdReport({
     video: { videoId: job.videoId, file: job.filePath, durationMs: probe.durationMs, width: probe.width, height: probe.height, language: job.language },
-    seeonMeet: readSeeonMeetVersion(),
+    seeonMeet: versionMap.seeonMeet,
+    // resultConfig 는 재실행 때 건너뛸지 견주는 결과 설정, runConcurrency 는 이번 실행의 동시 수다.
     config: {
       mode: MODE_MAP.delayed, isEvalPreset: true, isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded),
       featureToggleMap: { ...EVAL_PRESET_MAP, page_transition: Boolean(job.isPageTransitionIncluded) }, modelConfig,
+      resultConfig: buildResultConfig({ pipelineConfig }), runConcurrency,
     },
     sessionStartWallMs: sessionResult.sessionStartWallMs, pieceList: sessionResult.pieceList,
     captionRecordList: sessionResult.captionRecordList, adPlayList: sessionResult.adPlayList, dropRecordList: sessionResult.dropRecordList,
@@ -103,7 +108,9 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
     adFileByRef, outputFileName: path.basename(pathMap.mp3Path), renderedDurationMs, processingMs,
   });
   const incompleteReasonList = buildIncompleteReasonList({ sessionResult });
+  // 공장 버전은 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
   const finalReport = {
+    schemaVersion: report.schemaVersion, isComplete: report.isComplete, video: report.video, seeonMeet: report.seeonMeet, factory: versionMap.factory,
     ...report,
     isComplete: incompleteReasonList.length === 0,
     // swallowedErrorCountMap: 연결 코드가 제품처럼 삼킨 오류 수(task: 비동기 작업 이름별, ipc: IPC 채널별). 0 이 아니면 연결 코드 버그를 의심한다.

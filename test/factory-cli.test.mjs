@@ -7,6 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runFactoryCli } from '../src/cli/factory-cli.mjs';
+import { readResultIdentity } from '../src/runner/result-identity.mjs';
+import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
 // GPU 실서비스 포트(8801–8804)에 닿지 않게 모든 주소를 쓰지 않는 포트로 두고, 포트 점검은 대역으로 바꾼다.
@@ -39,12 +41,13 @@ function createLogCollector({ onLine = () => {} } = {}) {
   return { lineList, log: { log: push, error: push, warn: push } };
 }
 
-// 가짜 워커가 남기는 것과 같은 모양의 끝난 결과(mp3 + isComplete JSON)를 미리 둔다.
+// 가짜 워커가 남기는 것과 같은 모양의 끝난 결과(mp3 + isComplete JSON)를 지금 코드 버전·결과 설정으로 미리 둔다.
 function writeDonePair({ outDir, outStem, videoId, filePath, language = 'auto', isPageTransitionIncluded = false }) {
+  const { versionMap, resultConfig } = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(BASE_ENV) });
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, `${outStem}_SEEON_AD.mp3`), 'old mp3');
   fs.writeFileSync(path.join(outDir, `${outStem}_SEEON_AD.json`), JSON.stringify({
-    isComplete: true, video: { videoId, file: filePath, language }, config: { isPageTransitionIncluded },
+    isComplete: true, video: { videoId, file: filePath, language }, ...versionMap, config: { isPageTransitionIncluded, resultConfig },
   }));
 }
 
@@ -347,4 +350,38 @@ test('CLI: 다시 처리하는 영상은 이전 실행이 남긴 작업 폴더(A
   assert.equal(countStart({ outDir, outStem: 'a' }), 1);
   assert.equal(fs.existsSync(path.join(outDir, 'a')), false, '이전 실행의 작업 폴더를 비운다');
   for (const name of staleFileList) assert.ok(fs.existsSync(path.join(outDir, 'b', name)), `건너뛴 영상의 ${name} 은 결과가 가리키므로 남긴다`);
+});
+
+test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모델)이 지금과 다르면 이유를 한 줄 찍고 다시 만들고, 주소만 바뀐 것은 건너뛴다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b.mp4']);
+  const outDir = path.join(makeDir('identity'), 'run');
+  const runOnce = async (env = BASE_ENV) => {
+    const { lineList, log } = createLogCollector();
+    assert.equal(await runFactoryCli({ argList: ['--input', inputDir, '--out', outDir], env, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT }), 0);
+    return lineList.filter((line) => line.startsWith('[factory] ↻'));
+  };
+  const countStartPair = () => [countStart({ outDir, outStem: 'a' }), countStart({ outDir, outStem: 'b' })];
+  assert.deepEqual(await runOnce(), []);
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.match(manifest.factory.commit, /^[0-9a-f]{40}$/);
+  assert.equal(typeof manifest.factory.isDirty, 'boolean');
+  assert.equal(manifest.resultConfig.vlmModel, 'qwen3.5-35b-a3b');
+  assert.equal(manifest.runOptions.concurrency, 3);
+  assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), new RegExp(`공장 ${manifest.factory.commit.slice(0, 7)}`));
+  const aReport = readJson(path.join(outDir, 'a_SEEON_AD.json'));
+  assert.deepEqual([aReport.factory, aReport.config.runConcurrency], [manifest.factory, 3], '결과 JSON 에 공장 버전·동시 수를 남긴다');
+  assert.deepEqual(await runOnce(), [], '같은 코드·설정이면 건너뛴다');
+  assert.deepEqual(countStartPair(), [1, 1]);
+
+  fs.writeFileSync(path.join(outDir, 'a_SEEON_AD.json'), JSON.stringify({ ...aReport, seeonMeet: { ...aReport.seeonMeet, commit: '0'.repeat(40) } }));
+  assert.deepEqual(await runOnce(), [`[factory] ↻ a 이전 완료 결과와 달라 다시 만든다 — seeon-meet 커밋 0000000 → ${manifest.seeonMeet.commit.slice(0, 7)}`]);
+  assert.deepEqual(countStartPair(), [2, 1]);
+
+  const modelEnv = { ...BASE_ENV, SEEON_VLM_MODEL: 'other-vlm' };
+  // 판정 GPU 모델은 따로 주지 않으면 VLM 모델을 따른다(제품 설정).
+  assert.deepEqual(await runOnce(modelEnv), ['a', 'b'].map((videoId) => `[factory] ↻ ${videoId} 이전 완료 결과와 달라 다시 만든다 — `
+    + '결과 설정 vlmModel qwen3.5-35b-a3b → other-vlm · 결과 설정 judgeGpuModel qwen3.5-35b-a3b → other-vlm'));
+  assert.deepEqual(countStartPair(), [3, 2]);
+  assert.deepEqual(await runOnce({ ...modelEnv, SEEON_ASR_URL: 'http://127.0.0.1:10/asr' }), [], '서비스 주소(터널·직접 연결)는 결과 설정이 아니다');
+  assert.deepEqual(countStartPair(), [3, 2]);
 });

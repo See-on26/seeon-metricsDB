@@ -6,11 +6,11 @@ import { pathToFileURL } from 'node:url';
 import { parseFactoryArgs } from './parse-args.mjs';
 import { listInputVideos } from '../input/video-list.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/worker-pool.mjs';
-import { isVideoDone, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../runner/manifest.mjs';
+import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../runner/manifest.mjs';
 import { runPreflight, listClosedPorts, startProductTunnel } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
-import { readSeeonMeetVersion } from '../product/product-version.mjs';
+import { readResultIdentity } from '../runner/result-identity.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
 import { loadPipelineConfig } from '../product/product-loader.mjs';
@@ -52,6 +52,15 @@ function clearPreviousOutput({ outDir, pathMap }) {
   fs.rmSync(pathMap.workDir, { recursive: true, force: true });
 }
 
+// 지금과 같은 영상·코드 버전·결과 설정으로 끝난 영상만 건너뛴다. 끝났는데 달라서 다시 만드는 영상은 이유를 한 줄씩 찍는다.
+function selectSkippedJobList({ jobList, outDir, identity, log }) {
+  return jobList.filter((job) => {
+    const { status, mismatchList } = inspectVideoResult({ outDir, ...job, identity });
+    if (status === 'mismatch') log.log(`[factory] ↻ ${job.videoId} 이전 완료 결과와 달라 다시 만든다 — ${mismatchList.join(' · ')}`);
+    return status === 'done';
+  });
+}
+
 // 영상마다 워커 프로세스를 띄워 결과를 모은다. 진행은 영상마다 PROGRESS_LOG_MS 간격으로만 찍고, 영상 하나가 끝날 때마다 onResult 를 부른다.
 function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPath, videoTimeout, signal, forceSignal, onResult, log }) {
   const lastLogAtMap = new Map();
@@ -62,7 +71,7 @@ function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPat
       const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
       clearPreviousOutput({ outDir, pathMap });
       return forkVideoWorker({
-        job, outDir, logPath: pathMap.logPath, env, workerPath, ...videoTimeout,
+        job, outDir, logPath: pathMap.logPath, env, workerPath, runConcurrency: concurrency, ...videoTimeout,
         onProgress: ({ videoTimeMs, durationMs, adCount }) => {
           const now = Date.now();
           if (now - (lastLogAtMap.get(job.outStem) || 0) < PROGRESS_LOG_MS) return;
@@ -138,7 +147,9 @@ export async function runFactoryCli({
   }
 
   const runOptions = { ...options, input: path.resolve(options.input), out: outDir };
-  const seeonMeet = readSeeonMeetVersion();
+  // 끝난 결과를 다시 쓸지 견줄 코드 버전(제품·공장)과 결과 설정. manifest 에도 남긴다.
+  const identity = readResultIdentity({ pipelineConfig });
+  const { seeonMeet, factory } = identity.versionMap;
   const stopController = new AbortController();
   const forceController = new AbortController();
   let interruptedBy = null;
@@ -178,12 +189,13 @@ export async function runFactoryCli({
       return 1;
     }
     const previousManifest = readManifest({ outDir });
-    const skippedJobList = options.isForced ? [] : jobList.filter((job) => isVideoDone({ outDir, ...job }));
+    const skippedJobList = options.isForced ? [] : selectSkippedJobList({ jobList, outDir, identity, log });
     const pendingJobList = jobList.filter((job) => !skippedJobList.includes(job));
     const startedAt = new Date().toISOString();
     const resultByStem = new Map();
     const buildCurrentManifest = (endedAt) => buildManifest({
-      previousManifest, runOptions, seeonMeet, jobList, resultList: [...resultByStem.values()], skippedJobList, startedAt, endedAt, interruptedBy,
+      previousManifest, runOptions, seeonMeet, factory, resultConfig: identity.resultConfig,
+      jobList, resultList: [...resultByStem.values()], skippedJobList, startedAt, endedAt, interruptedBy,
     });
     writeFinalRecord = () => {
       try {

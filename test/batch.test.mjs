@@ -9,7 +9,9 @@ import { setTimeout as sleepReal } from 'node:timers/promises';
 import { listInputVideos } from '../src/input/video-list.mjs';
 import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../src/runner/worker-pool.mjs';
-import { isVideoDone, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
+import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
+import { buildResultConfig } from '../src/runner/result-identity.mjs';
+import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 import { runPreflight, checkTcpPort, startProductTunnel } from '../src/runner/preflight.mjs';
 
 const makeDir = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `factory-${name}-`));
@@ -546,4 +548,64 @@ test('입력 목록 JSON: 점으로 시작하는 이름(숨김 파일·실행 �
   fs.writeFileSync(listPath, JSON.stringify([{ videoId: '.factory.lock', file: 'a.mp4' }, { videoId: '.hidden', file: 'b.mp4' }]));
   const jobList = await listInputVideos({ input: listPath });
   assert.deepEqual(jobList.map((job) => [job.videoId, job.outStem]), [['.factory.lock', 'video-.factory.lock'], ['.hidden', 'video-.hidden']]);
+});
+
+const IDENTITY = {
+  versionMap: {
+    seeonMeet: { commit: 'a'.repeat(40), isDirty: false, dirtyHash: null },
+    factory: { commit: 'b'.repeat(40), isDirty: true, dirtyHash: 'hash-now' },
+  },
+  resultConfig: { mode: 'delayed', delayMs: 10000, vlmModel: 'qwen', judgeBackend: 'gpu', isScaleEnabled: false },
+};
+
+function writeIdentityReport({ outDir, job, override = {}, resultConfig = IDENTITY.resultConfig }) {
+  fs.writeFileSync(path.join(outDir, `${job.outStem}_SEEON_AD.mp3`), 'x');
+  fs.writeFileSync(path.join(outDir, `${job.outStem}_SEEON_AD.json`), JSON.stringify({
+    isComplete: true, video: { videoId: job.videoId, file: job.filePath, language: job.language },
+    ...IDENTITY.versionMap,
+    config: { isPageTransitionIncluded: job.isPageTransitionIncluded, ...(resultConfig ? { resultConfig } : {}) },
+    ...override,
+  }));
+}
+
+test('재실행: 끝난 결과라도 seeon-meet·공장 커밋(수정 내용 포함)·결과 설정이 지금과 다르면 다시 돌고, 다른 곳을 문장으로 알린다', () => {
+  const outDir = makeDir('resume-identity');
+  const job = { videoId: 'a', filePath: '/v/a.mp4', outStem: 'a', language: 'ko', isPageTransitionIncluded: false };
+  const inspect = (extra = {}) => inspectVideoResult({ outDir, ...job, identity: IDENTITY, ...extra });
+  assert.deepEqual(inspect(), { status: 'missing', mismatchList: [] });
+  writeIdentityReport({ outDir, job });
+  assert.deepEqual(inspect(), { status: 'done', mismatchList: [] });
+  assert.equal(isVideoDone({ outDir, ...job, identity: IDENTITY }), true);
+  assert.deepEqual(inspect({ language: 'en' }), { status: 'mismatch', mismatchList: ['언어 ko → en'] });
+
+  writeIdentityReport({ outDir, job, override: { seeonMeet: { commit: 'c'.repeat(40), isDirty: false, dirtyHash: null } } });
+  assert.deepEqual(inspect(), { status: 'mismatch', mismatchList: ['seeon-meet 커밋 ccccccc → aaaaaaa'] });
+  assert.equal(isVideoDone({ outDir, ...job, identity: IDENTITY }), false);
+  writeIdentityReport({ outDir, job, override: { factory: { commit: 'b'.repeat(40), isDirty: true, dirtyHash: 'hash-before' } } });
+  assert.deepEqual(inspect().mismatchList, ['공장 작업 트리 수정 내용이 다르다(커밋 bbbbbbb)']);
+  writeIdentityReport({ outDir, job, override: { factory: { commit: 'b'.repeat(40), isDirty: false, dirtyHash: null } } });
+  assert.deepEqual(inspect().mismatchList, ['공장 작업 트리 수정 내용이 다르다(커밋 bbbbbbb)']);
+  writeIdentityReport({ outDir, job, override: { factory: undefined } });
+  assert.deepEqual(inspect().mismatchList, ['공장 버전 기록이 없다(이전 형식)']);
+  writeIdentityReport({ outDir, job, resultConfig: { ...IDENTITY.resultConfig, vlmModel: 'qwen-old', judgeBackend: 'bedrock' } });
+  assert.deepEqual(inspect().mismatchList, ['결과 설정 vlmModel qwen-old → qwen', '결과 설정 judgeBackend bedrock → gpu']);
+  writeIdentityReport({ outDir, job, resultConfig: null });
+  assert.deepEqual(inspect().mismatchList, ['결과 설정 기록이 없다(이전 형식)']);
+
+  fs.writeFileSync(path.join(outDir, 'a_SEEON_AD.json'), JSON.stringify({ isComplete: false }));
+  assert.deepEqual(inspect(), { status: 'incomplete', mismatchList: [] }, '불완전한 결과는 대조하지 않고 다시 돈다');
+});
+
+test('결과 설정: 결과를 바꾸는 모델·판정 백엔드·라우터·모드만 담고 서비스 주소·토큰은 담지 않는다', () => {
+  const { readPipelineConfig } = loadPipelineConfig();
+  const resultConfig = buildResultConfig({
+    pipelineConfig: readPipelineConfig({ SEEON_VLM_MODEL: 'vlm-x', SEEON_JUDGE_BACKEND: 'bedrock', AWS_BEARER_TOKEN_BEDROCK: 'secret', SEEON_VLM_URL: 'http://127.0.0.1:9/v' }),
+  });
+  assert.deepEqual(Object.keys(resultConfig).sort(), [
+    'bedrockModelId', 'delayMs', 'gapModelId', 'isScaleEnabled', 'isVlmFallbackEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
+    'mode', 'routerMode', 'vlmFallbackModelId', 'vlmModel',
+  ]);
+  assert.deepEqual([resultConfig.mode, resultConfig.delayMs, resultConfig.vlmModel, resultConfig.judgeBackend], ['delayed', 10000, 'vlm-x', 'bedrock']);
+  assert.equal(JSON.stringify(resultConfig).includes('secret'), false);
+  assert.equal(JSON.stringify(resultConfig).includes('127.0.0.1'), false);
 });

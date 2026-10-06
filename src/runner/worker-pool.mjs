@@ -30,9 +30,10 @@ function formatLimit(limitMs) {
 // 영상 하나 = 워커 하나. 콘솔 출력(제품 파이프라인 로그 포함)은 그대로 <영상>.log 로 간다.
 // timeoutMs 를 넘기면(첫 진행 보고 뒤에는 resolveTimeoutMs(영상 길이) 와 큰 쪽, 상한은 줄지 않는다) 멈추고 시간 초과로 실패한다.
 // 멈출 때는 SIGTERM 으로 정리할 틈을 주고 killGraceMs 뒤에도 살아 있으면 SIGKILL 한다.
+// runConcurrency 는 결과 JSON 에 남길 이번 실행의 동시 수다(GPU 포화로 결과가 달라질 수 있다).
 export function forkVideoWorker({
   job, outDir, logPath, env = process.env, workerPath = DEFAULT_WORKER_PATH, onProgress = () => {},
-  timeoutMs = null, resolveTimeoutMs = null, killGraceMs = DEFAULT_KILL_GRACE_MS,
+  timeoutMs = null, resolveTimeoutMs = null, killGraceMs = DEFAULT_KILL_GRACE_MS, runConcurrency = null,
 }) {
   const logFd = fs.openSync(logPath, 'a');
   let child;
@@ -108,7 +109,7 @@ export function forkVideoWorker({
       else reject(outcome?.error || new Error(`워커가 결과 없이 종료(코드 ${code ?? signal})`));
     });
   });
-  child.send({ type: 'run', job, outDir });
+  child.send({ type: 'run', job, outDir, runConcurrency });
   return {
     promise,
     kill: ({ reason = '중단됨', isForced = false } = {}) => (isForced ? forceStop(reason) : stop(reason)),

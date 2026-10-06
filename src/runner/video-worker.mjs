@@ -24,10 +24,10 @@ process.once('disconnect', () => {
 // 영상 하나를 맡는 워커 프로세스. 가상 시계·제품 모듈 상태가 프로세스마다 따로라 다른 영상에 영향이 없다.
 process.on('message', async (message) => {
   if (message?.type !== 'run') return;
-  const { job, outDir } = message;
+  const { job, outDir, runConcurrency = null } = message;
   try {
     const result = await runVideoJob({
-      job, outDir, onProgress: (progress) => process.send?.({ type: 'progress', videoId: job.videoId, ...progress }),
+      job, outDir, runConcurrency, onProgress: (progress) => process.send?.({ type: 'progress', videoId: job.videoId, ...progress }),
     });
     process.send({ type: 'done', result }, () => process.exit(0));
   } catch (error) {

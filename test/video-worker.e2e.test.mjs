@@ -9,18 +9,24 @@ import { startMockServices } from './helpers/mock-services.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { waitRealUntil } from './helpers/real-wait.mjs';
 import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
+import { inspectVideoResult } from '../src/runner/manifest.mjs';
+import { readResultIdentity } from '../src/runner/result-identity.mjs';
+import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 
 const { ffprobePath } = resolveFfmpegPaths({ env: process.env });
 const WORKER_PATH = fileURLToPath(new URL('../src/runner/video-worker.mjs', import.meta.url));
 const mock = await startMockServices();
 after(() => mock.close());
 
+const WORKER_ENV = { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv };
+const RUN_CONCURRENCY = 2;
+
 // Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock VLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
 function runWorker({ job, outDir }) {
   return new Promise((resolve, reject) => {
     const child = fork(WORKER_PATH, [], {
       execArgv: ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON'],
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv },
+      env: WORKER_ENV,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     let result = null;
@@ -32,7 +38,7 @@ function runWorker({ job, outDir }) {
       if (message.type === 'failed') result = { status: 'failed', message: message.message };
     });
     child.on('exit', (code) => (result ? resolve({ ...result, logText, code }) : reject(new Error(`워커가 결과 없이 끝남(${code}): ${logText.slice(-1500)}`))));
-    child.send({ type: 'run', job, outDir });
+    child.send({ type: 'run', job, outDir, runConcurrency: RUN_CONCURRENCY });
   });
 }
 
@@ -74,6 +80,13 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
   assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} }, '실제 제품 응답에서 연결 코드가 삼킨 오류가 없다');
+  assert.match(report.factory.commit, /^[0-9a-f]{40}$/);
+  assert.equal(report.config.runConcurrency, RUN_CONCURRENCY);
+  const identity = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(WORKER_ENV) });
+  assert.deepEqual(
+    inspectVideoResult({ outDir, outStem: 'deck', videoId: 'deck', filePath, language: 'ko', isPageTransitionIncluded: false, identity }),
+    { status: 'done', mismatchList: [] }, '실제 워커가 남긴 코드 버전·결과 설정을 CLI 가 지금과 같은 것으로 본다',
+  );
 });
 
 test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', { timeout: 120000 }, async () => {
