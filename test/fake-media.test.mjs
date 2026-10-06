@@ -57,14 +57,10 @@ async function runToEnd(chain) {
   return compactPieceList(chain.recorder.getPieceList());
 }
 
-test('해설이 없으면 10초를 채운 뒤 1배속으로 틀고, 영상이 끝나면 밀린 10초를 제품 배속식으로 따라잡는다', async () => {
+test('해설이 없으면 10초를 채운 뒤 1배속으로 틀고, 영상이 끝나도 라이브 끝이 계속 흘러 밀린 10초를 1배속으로 마저 튼다', async () => {
   const pieceList = await runToEnd(buildChain({ mediaDurationMs: 30000 }));
-  assert.equal(pieceList.length, 2);
-  assert.deepEqual([pieceList[0].outStartMs, Math.round(pieceList[0].outEndMs), pieceList[0].srcStartMs, Math.round(pieceList[0].srcEndMs)], [0, 20000, 0, 20000]);
-  const tail = pieceList[1];
-  assert.equal(Math.round(tail.srcEndMs), 30000);
-  const tailOutMs = tail.outEndMs - tail.outStartMs;
-  assert.ok(tailOutMs > 6500 && tailOutMs < 7700, `꼬리 ${tailOutMs}ms (1.5배→1.1배로 10초를 약 7.1초에)`);
+  assert.equal(pieceList.length, 1);
+  assert.deepEqual([pieceList[0].outStartMs, Math.round(pieceList[0].outEndMs), pieceList[0].srcStartMs, Math.round(pieceList[0].srcEndMs)], [0, 30000, 0, 30000]);
 });
 
 test('미디어 5초에 2초 해설을 넣으면 원음이 그 자리에서 멈추고, 끝난 뒤 배속 구간이 온다', async () => {
@@ -84,7 +80,7 @@ test('미디어 5초에 2초 해설을 넣으면 원음이 그 자리에서 멈�
   assert.equal(Math.round(summary.sourceMediaMs), 30000);
   assert.equal(Math.round(summary.adTotalMs), 2000);
   assert.ok(Math.abs(summary.outputDurationMs - (30000 + summary.adTotalMs + summary.silenceTotalMs - summary.recoveredMs)) < 1);
-  assert.ok(summary.recoveredMs > 4000, '해설 회수 + 끝 꼬리 회수');
+  assert.ok(summary.recoveredMs > 1900 && summary.recoveredMs < 2300, `해설로 멈춘 만큼만 회수 ${summary.recoveredMs}ms`);
 });
 
 test('제품 지연·해설 체인을 끝까지 돌려도 실제 타이머가 남지 않는다', async () => {
@@ -108,7 +104,7 @@ test('끝난 요소에 play 를 불러도 처음부터 다시 틀지 않는다',
   assert.equal(element.currentTime, 1);
 });
 
-test('라이브 끝은 200ms timeslice 로 내리고, 꼬리 모드면 길이+목표 지연에 고정한다', () => {
+test('라이브 끝은 200ms timeslice 로 내리고, 꼬리 모드면 영상 길이를 넘어 가상 시각대로 계속 흐른다', () => {
   let videoTimeMs = 0;
   const source = new FakeDelaySource({ clock: createVirtualClock(), getVideoTimeMs: () => videoTimeMs, mediaDurationMs: 5000, targetDelayMs: 10000 });
   source.start({});
@@ -117,7 +113,9 @@ test('라이브 끝은 200ms timeslice 로 내리고, 꼬리 모드면 길이+�
   videoTimeMs = 9000;
   assert.equal(source.getLiveTimeMs(), 5000, '라이브는 영상 길이를 넘지 않는다');
   source.enterTailMode();
-  assert.equal(source.getLiveTimeMs(), 15000);
+  assert.equal(source.getLiveTimeMs(), 9000);
+  videoTimeMs = 9399;
+  assert.equal(source.getLiveTimeMs(), 9200);
 });
 
 test('배속 조각은 하나로 합치고, 배속 사이에 낀 1초 미만 1배속 조각도 합치며, 긴 1배속 조각은 그대로 둔다', () => {

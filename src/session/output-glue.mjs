@@ -7,8 +7,10 @@ import { readWavInfo } from '../media/wav.mjs';
 import { GAP_SAFETY_MS, CAPTION_SOURCE_TRANSITION } from './renderer-constants.mjs';
 
 // 렌더러 쪽에서 해설을 버리는 사유 중 제품 대기 줄(narration-queue.js) 사유가 아닌 것.
+// emitFailed 는 제품이 경고만 찍고 잃어버리는 발행 오류(main.js:1491-1496)다.
 export const FACTORY_DROP_REASON_MAP = {
   noAudio: 'no_audio', excessDelay: 'excess_delay', afterEnd: 'after_end', dwellCancelled: 'dwell_cancelled', leaderCancelled: 'leader_cancelled',
+  emitFailed: 'emit_failed',
 };
 
 // main.js:1402-1404 toNarrationType
@@ -26,11 +28,14 @@ export function createOutputGlue({ ctx }) {
   const recordBySeq = new Map();
   const dropRecordList = [];
   const adPlayList = [];
+  const droppedSeqSet = new Set();
+  const playedSeqSet = new Set();
   let nextSeq = 1;
   let isEnded = false;
 
+  // wav 는 main 이 만든 버퍼를 복사하지 않고 참조로 둔다. 재생 대기 줄에는 제품처럼 잘라 낸 ArrayBuffer 가 따로 간다.
   function registerCaption(payload, requestContext) {
-    const wavBytes = payload.wavData ? Buffer.from(payload.wavData) : null;
+    const wavBytes = payload.wavData ?? null;
     const record = {
       captionSeq: nextSeq, ts: payload.ts, text: payload.text, source: payload.source, narrationClass: payload.narrationClass ?? null,
       slideLabel: payload.slideLabel ?? null, eventVideoTimeMs: Number.isFinite(payload.eventVideoTimeMs) ? payload.eventVideoTimeMs : null,
@@ -43,8 +48,11 @@ export function createOutputGlue({ ctx }) {
     return record;
   }
 
+  // 한 캡션은 한 번만 버린다. 소리가 나간 적 없는 캡션의 wav 는 렌더에 쓰이지 않으므로 놓아 메모리를 줄인다.
   function addDrop({ record, reason, waitedMs = null }) {
-    if (!record) return;
+    if (!record || droppedSeqSet.has(record.captionSeq)) return;
+    droppedSeqSet.add(record.captionSeq);
+    if (!playedSeqSet.has(record.captionSeq)) record.wavBytes = null;
     const { captionSeq, ts, text, source, narrationClass, slideLabel, eventVideoTimeMs } = record;
     dropRecordList.push({ captionSeq, ts, text, source, narrationClass, slideLabel, eventVideoTimeMs, reason, waitedMs });
   }
@@ -164,9 +172,11 @@ export function createOutputGlue({ ctx }) {
   }
 
   // main.js:1491-1496 emitCaptionSafely. 제품의 console.warn 대신 trackTask 가 경고를 남기고 배수 판정용으로 센다.
+  // 실패한 캡션은 재생도 드롭도 아닌 채 남지 않게 emit_failed 로 버린다.
   function emitCaptionSafely(payload, options) {
     ctx.trackTask(emitCaption(payload, options).catch((error) => {
       options.leaderHandle?.settle({ status: LEADER_STATUS_MAP.unscheduled });
+      addDrop({ record: options.record, reason: FACTORY_DROP_REASON_MAP.emitFailed });
       throw error;
     }), 'caption');
   }
@@ -216,6 +226,7 @@ export function createOutputGlue({ ctx }) {
     },
     applyCaption, resolveInsertionTimeMs, scheduleNarration, handleNarrationDrop,
     noteAdStart({ entry, atElapsedMs, durationMs, playedMediaMs }) {
+      if (entry) playedSeqSet.add(entry.captionSeq);
       adPlayList.push({ captionSeq: entry?.captionSeq ?? null, atElapsedMs, durationMs, playedMediaMs });
     },
     // 배수가 끝났는데도 남은 예약·대기 해설은 영상 끝 뒤 자리라 들려줄 수 없다. 이 뒤로 오는 해설도 같은 사유로 버린다.

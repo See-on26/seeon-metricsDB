@@ -99,7 +99,9 @@ export class FakeMediaElement {
 }
 
 // StreamDelaySource(stream-delay-source.js:25-171) 대역. MSE 버퍼 끝 대신 영상 시각을 200ms timeslice 로 내린 값을 라이브 끝으로 쓴다.
-// 영상이 끝나면 꼬리 모드로 라이브 끝을 "길이 + 목표 지연"에 고정해, 밀린 원음을 DelayBuffer 가 제품 배속식으로 따라잡게 한다.
+// 영상이 끝나면 꼬리 모드로 라이브 끝을 영상 길이에 묶지 않고 가상 시각대로 계속 흘린다. 실험실은 끝난 플레이어를 계속 캡처해
+// 라이브 끝이 계속 자라므로 밀린 원음이 1배속으로 이어진다. 끝 순간 초과 지연이 뛰면 끝 직후 캡션이 버려지고 끝 구간이 빨라진다.
+// 지연 재생 요소는 원음이 끝나는 영상 길이에서 끝난다.
 export class FakeDelaySource {
   constructor({ clock, getVideoTimeMs, mediaDurationMs, targetDelayMs, timesliceMs = STREAM_TIMESLICE_MS, onElementChange = () => {} }) {
     this.clock = clock;
@@ -126,8 +128,8 @@ export class FakeDelaySource {
   getElement() { return this.element; }
 
   getLiveTimeMs() {
-    if (this.isTailMode) return this.mediaDurationMs + this.targetDelayMs;
-    const recordedMs = Math.max(0, Math.min(this.getVideoTimeMs(), this.mediaDurationMs) - this.recorderStartVideoTimeMs);
+    const capturedMs = this.isTailMode ? this.getVideoTimeMs() : Math.min(this.getVideoTimeMs(), this.mediaDurationMs);
+    const recordedMs = Math.max(0, capturedMs - this.recorderStartVideoTimeMs);
     return Math.floor(recordedMs / this.timesliceMs) * this.timesliceMs + this.recorderStartVideoTimeMs;
   }
 

@@ -92,29 +92,94 @@ test('영상 끝 뒤로 잡힌 예약은 after_end 로 버린다', () => {
   });
 });
 
+const PRODUCT_SOURCE_MARK = '/seeon-meet/src/';
+const WATCH_STACK_TRACE_LIMIT = 50;
+
+// 지연 버퍼·대기 줄·체류·지시 후보 타이머를 모두 쓰는 장면. 해설이 끝난 뒤 따라잡기 갈래(caption-narrator.js:210-234)까지 지난다.
+async function runWatchedScenario() {
+  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '' }) } });
+  harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '끝.' });
+  deliverAt(harness, 16000, buildCaption({ text: '해설', eventVideoTimeMs: 12000 }));
+  harness.ctx.core.candidateScheduler.submit({ source: 'speech', utterance: '이것', trigger: '이것', captureTs: harness.clock.nowPerf(), videoTimeMs: 0 });
+  harness.ctx.core.slideDwellGate.enter({ label: '1' });
+  return harness.clock.runUntil({
+    isDone: () => harness.outputGlue.getAdPlayList().length === 1 && !harness.ctx.core.narrator.currentEntry && harness.clock.elapsedMs() >= 25000,
+    deadlineElapsedMs: 60000,
+  });
+}
+
+// 감시 중 오류가 나도 감시 결과를 먼저 단언한다. 가상 시계 오류보다 새어 나간 자리의 스택이 원인을 바로 보여 준다.
+async function runUnderWatch({ install, uninstall, readFindingList }) {
+  const originalStackTraceLimit = Error.stackTraceLimit;
+  Error.stackTraceLimit = WATCH_STACK_TRACE_LIMIT;
+  let outcome = null;
+  let runError = null;
+  install();
+  try {
+    outcome = await runWatchedScenario();
+  } catch (error) {
+    runError = error;
+  } finally {
+    uninstall();
+    Error.stackTraceLimit = originalStackTraceLimit;
+  }
+  assert.deepEqual(readFindingList(), []);
+  if (runError) throw runError;
+  assert.equal(outcome, 'done');
+}
+
 test('시뮬레이션 동안 seeon-meet 코드가 실제 setTimeout/setInterval 을 만들지 않는다', async () => {
   const leakList = [];
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalSetInterval = globalThis.setInterval;
-  const watch = (original, name) => function watchedTimer(...argList) {
+  const leakedHandleList = [];
+  const originalMap = { setTimeout: globalThis.setTimeout, setInterval: globalThis.setInterval };
+  const watch = (name) => function watchedTimer(...argList) {
+    const handle = originalMap[name].apply(this, argList);
     const stack = new Error().stack || '';
-    if (stack.includes('/seeon-meet/src/')) leakList.push(`${name}\n${stack}`);
-    return original.apply(this, argList);
+    if (stack.includes(PRODUCT_SOURCE_MARK)) {
+      leakList.push(`${name}\n${stack}`);
+      leakedHandleList.push(handle);
+    }
+    return handle;
   };
-  globalThis.setTimeout = watch(originalSetTimeout, 'setTimeout');
-  globalThis.setInterval = watch(originalSetInterval, 'setInterval');
-  try {
-    const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '' }) } });
-    harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '끝.' });
-    deliverAt(harness, 16000, buildCaption({ text: '해설', eventVideoTimeMs: 12000 }));
-    harness.ctx.core.candidateScheduler.submit({ source: 'speech', utterance: '이것', trigger: '이것', captureTs: harness.clock.nowPerf(), videoTimeMs: 0 });
-    harness.ctx.core.slideDwellGate.enter({ label: '1' });
-    await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length === 1 });
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-    globalThis.setInterval = originalSetInterval;
-  }
-  assert.deepEqual(leakList, []);
+  await runUnderWatch({
+    install() {
+      globalThis.setTimeout = watch('setTimeout');
+      globalThis.setInterval = watch('setInterval');
+    },
+    // 새어 나간 실제 타이머가 남으면 테스트 프로세스가 끝나지 않으므로 감시를 풀 때 모두 지운다.
+    uninstall() {
+      globalThis.setTimeout = originalMap.setTimeout;
+      globalThis.setInterval = originalMap.setInterval;
+      for (const handle of leakedHandleList) clearTimeout(handle);
+    },
+    readFindingList: () => leakList,
+  });
+});
+
+// 가상 시계는 외부 호출 중 performance.now 로 흐른다. 그 경로와 섞이지 않게 실제 시계를 직접 부른 자리가 제품 파일일 때만 센다.
+test('시뮬레이션 동안 seeon-meet 코드가 실제 performance.now/Date.now 를 읽지 않는다', async () => {
+  const readList = [];
+  const originalDateNow = Date.now;
+  const watch = ({ name, read }) => function watchedNow() {
+    const holder = {};
+    Error.captureStackTrace(holder, watchedNow);
+    const callerLine = holder.stack.split('\n')[1] || '';
+    if (callerLine.includes(PRODUCT_SOURCE_MARK)) readList.push(`${name}\n${holder.stack}`);
+    return read();
+  };
+  const originalPerformanceNow = performance.now;
+  await runUnderWatch({
+    install() {
+      performance.now = watch({ name: 'performance.now', read: () => originalPerformanceNow.call(performance) });
+      Date.now = watch({ name: 'Date.now', read: () => originalDateNow.call(Date) });
+    },
+    uninstall() {
+      delete performance.now;
+      Date.now = originalDateNow;
+    },
+    readFindingList: () => readList,
+  });
+  assert.equal(performance.now, originalPerformanceNow);
 });
 
 const debugReasonList = (harness) => harness.bridge.sendList.filter(({ channel }) => channel === 'pipeline-debug').map(({ payload }) => payload.reason);
@@ -188,4 +253,46 @@ test('배수 뒤 도착한 해설은 after_end 로 버리고, stop 은 재생 �
   const adPieceList = pieceList.filter((piece) => piece.kind === 'ad');
   assert.deepEqual(adPieceList.map(({ adRef, outStartMs, outEndMs }) => [adRef, outEndMs - outStartMs]), [[1, 1500]]);
   assert.deepEqual(harness.warnList, []);
+});
+
+test('영상 끝 직후 도착한 캡션은 excess_delay 로 버려지지 않고 재생되며, 끝 구간 원음이 1.5배속으로 뛰지 않는다', async () => {
+  const harness = setupOutput({ mediaDurationMs: 20000 });
+  const { core } = harness.ctx;
+  const rateList = [];
+  harness.clock.setTimeout(() => core.delaySource.enterTailMode(), 20000);
+  const rateProbe = harness.clock.setInterval(() => {
+    if (harness.clock.elapsedMs() > 20000 && !harness.outputGlue.getAdPlayList().length) rateList.push(core.delayBuffer.delayedVideo.playbackRate);
+  }, 250);
+  deliverAt(harness, 20500, buildCaption({ text: '끝 직후 도착한 해설', eventVideoTimeMs: 18000 }));
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length === 1, deadlineElapsedMs: 40000 });
+  harness.clock.clearInterval(rateProbe);
+  assert.deepEqual(harness.outputGlue.getDropRecordList(), []);
+  const [adPlay] = harness.outputGlue.getAdPlayList();
+  assert.ok(adPlay.playedMediaMs >= 18000 && adPlay.playedMediaMs <= 18200, `재생 위치 ${adPlay.playedMediaMs}`);
+  assert.ok(rateList.length > 20, `표본 ${rateList.length}개`);
+  assert.equal(Math.max(...rateList), 1);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('캡션 발행 중 오류가 나면 재생도 드롭도 아닌 채 남기지 않고 emit_failed 로 남긴다', async () => {
+  const harness = setupOutput();
+  harness.ctx.core.gapCandidateStore.getCandidateList = () => { throw new Error('후보 표 손상'); };
+  deliverAt(harness, 16000, buildCaption({ text: '발행 실패 해설', eventVideoTimeMs: 12000 }));
+  await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 16000 && harness.ctx.getTaskCount() === 0 });
+  assert.deepEqual(harness.outputGlue.getDropRecordList().map(({ text, reason }) => [text, reason]), [['발행 실패 해설', 'emit_failed']]);
+  assert.deepEqual(harness.warnList, ['[factory] caption 실패(무시): 후보 표 손상']);
+});
+
+test('재생한 캡션은 wav 를 복사 없이 참조로 두고, 버린 캡션은 wav 를 놓는다', async () => {
+  const harness = setupOutput();
+  const playedPayload = buildCaption({ text: '재생할 해설', eventVideoTimeMs: 1000 });
+  const offPayload = buildCaption({ text: '꺼진 분류 해설', eventVideoTimeMs: 1000, narrationClass: 'speaker_identity', source: 'speaker_identity' });
+  deliverAt(harness, 2000, playedPayload);
+  deliverAt(harness, 2000, offPayload);
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length === 1 && harness.outputGlue.getDropRecordList().length === 1 });
+  const [played, dropped] = harness.outputGlue.getCaptionRecordList();
+  assert.equal(played.wavBytes, playedPayload.wavData);
+  assert.equal(dropped.wavBytes, null);
+  assert.deepEqual([dropped.hasAudio, dropped.audioDurationMs], [true, 1500]);
+  assert.equal(harness.outputGlue.getDropRecordList()[0].reason, 'feature_off');
 });
