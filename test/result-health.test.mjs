@@ -39,6 +39,35 @@ test('불완전: ASR 실패가 10% 를 넘으면, Bedrock 401·403 이 하나라
   assert.deepEqual(frameReasonList.map(describeIncompleteReason), ['프레임 읽기 실패(2000ms): 디코드 실패', 'JPEG 캡처 실패 3건']);
 });
 
+test('불완전: 해설이 하나라도 나왔는데 모두 TTS 소리가 없으면(TTS 장애) 불완전이고, 일부만 소리가 없으면 경고로만 남긴다', () => {
+  const caption = (hasAudio) => ({ captionSeq: 1, hasAudio });
+  const ttsDownSession = { ...OK_SESSION, captionRecordList: [caption(false), caption(false)] };
+  const ttsDownLog = [call('tts', { status: 500 }), refusedCall('tts')];
+  const reasonList = buildIncompleteReasonList({ sessionResult: ttsDownSession, callLog: ttsDownLog });
+  assert.deepEqual(reasonList, [{ code: 'tts_unavailable', narrationCount: 2, count: 2, total: 2, message: 'HTTP 500' }]);
+  assert.equal(describeIncompleteReason(reasonList[0]), 'TTS 장애 — 해설 2개 모두 소리 없음(TTS 실패 2/2건) — HTTP 500');
+  // 해설이 하나뿐이어도 그 해설이 소리를 잃으면 결과 mp3 에 AD 가 없다.
+  assert.deepEqual(
+    buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(false)] }, callLog: [timeoutCall('tts')] }).map((reason) => reason.code),
+    ['tts_unavailable'],
+  );
+  const emptyAudioReason = buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(false)] }, callLog: [call('tts')] })[0];
+  assert.equal(describeIncompleteReason(emptyAudioReason), 'TTS 장애 — 해설 1개 모두 소리 없음(TTS 실패 0/1건) — 응답에 소리가 없다');
+
+  const partialSession = { ...OK_SESSION, captionRecordList: [caption(true), caption(false), caption(false)] };
+  const partialLog = [call('tts'), call('tts', { status: 500 }), call('tts', { status: 500 })];
+  assert.deepEqual(buildIncompleteReasonList({ sessionResult: partialSession, callLog: partialLog }), [], '소리 있는 해설이 하나라도 있으면 완료');
+  assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [] }, callLog: [] }), [], '해설이 없는 영상');
+  assert.deepEqual(buildWarningList({
+    callLog: partialLog, judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: partialSession,
+    swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],
+  }), [{ code: 'tts_error', count: 2, message: 'TTS 호출 실패 2/3건 — HTTP 500' }]);
+  assert.deepEqual(buildWarningList({
+    callLog: ttsDownLog, judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: ttsDownSession,
+    swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: reasonList,
+  }), [], '불완전 사유로 센 TTS 실패는 경고로 다시 세지 않는다');
+});
+
 test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedrock 대체·VLM 폴백·배수 상한·삼킨 오류는 실패로 만들지 않고 코드별 수로 남긴다', () => {
   const callLog = [
     ...repeat(10, () => call('asr')), timeoutCall('asr'),

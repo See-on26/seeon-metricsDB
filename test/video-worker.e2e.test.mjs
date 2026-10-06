@@ -169,3 +169,24 @@ test('ASR 이 계속 실패하면(서비스 장애) 결과를 불완전으로 �
   assert.deepEqual(report.incompleteReasonList.map((reason) => reason.code), ['asr_failure']);
   assert.equal(inspectVideoResult({ outDir, outStem: 'talk' }).status, 'incomplete', '다시 돌리면 다시 처리한다');
 });
+
+test('TTS 가 죽어 해설이 모두 소리를 잃으면 AD 없는 결과를 완료로 두지 않고 불완전으로 남겨, 다시 돌리면 그 영상을 다시 처리한다', { timeout: 180000 }, async (t) => {
+  const dirPath = makeTempDir('factory-e2e-tts-down-');
+  const filePath = await createTestClip({
+    dirPath, fileName: 'deck.mp4', width: 640, height: 360,
+    colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
+  });
+  const outDir = path.join(dirPath, 'out');
+  mock.setTtsStatus(500);
+  t.after(() => mock.setTtsStatus(200));
+  const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir });
+  assert.equal(result.status, 'failed', result.logText.slice(-2000));
+  assert.match(result.message, /^결과가 불완전하다 — TTS 장애 — 해설 (\d+)개 모두 소리 없음\(TTS 실패 \1\/\1건\) — HTTP 500/);
+  const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
+  assert.equal(report.isComplete, false);
+  assert.equal(report.adList.length, 0);
+  assert.ok(report.droppedList.some((drop) => drop.reason === 'no_audio'), JSON.stringify(report.droppedList));
+  assert.deepEqual(report.incompleteReasonList.map((reason) => reason.code), ['tts_unavailable']);
+  assert.equal(report.warningList.some((warning) => warning.code.startsWith('tts_')), false, '불완전 사유로 센 TTS 실패는 경고로 다시 세지 않는다');
+  assert.equal(inspectVideoResult({ outDir, outStem: 'deck' }).status, 'incomplete', '다시 돌리면 다시 처리한다');
+});

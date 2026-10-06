@@ -2,15 +2,22 @@
 import { SERVICE_MAP } from '../clock/scoped-fetch.mjs';
 
 // 결과를 완료로 치지 않는 사유. 실패로 끝나 재실행이 그 영상을 다시 처리한다.
-// 화면 입력 실패, 서비스 장애(ASR 실패 비율 과다·Bedrock 인증 실패), 제품 세션 종료 실패처럼 다시 돌리면 고쳐질 기반 문제만 넣는다.
+// 화면 입력 실패, 서비스 장애(ASR 실패 비율 과다·TTS 장애·Bedrock 인증 실패), 제품 세션 종료 실패처럼 다시 돌리면 고쳐질 기반 문제만 넣는다.
 export const INCOMPLETE_REASON_MAP = {
   frameSourceError: 'frame_source_error', frameCaptureFailed: 'frame_capture_failed',
-  asrFailure: 'asr_failure', bedrockAuthFailed: 'bedrock_auth_failed', sessionEndFailed: 'session_end_failed',
+  asrFailure: 'asr_failure', ttsUnavailable: 'tts_unavailable', bedrockAuthFailed: 'bedrock_auth_failed', sessionEndFailed: 'session_end_failed',
 };
 // ASR 은 지시·무발화·틈 후보 등 모든 감지의 입력이라 실패한 조각만큼 발화가 통째로 사라진다. 10% 를 넘으면 해설 집합이
 // 제품과 크게 달라지므로 불완전으로 본다. 그 아래는 일시적 실패로 보고 경고로만 남긴다(동시 3 실측에서도 ASR 실패는 없었고
 // p95 6초로 20초 상한과 거리가 멀어, 부하만으로 이 선을 넘어 재처리가 끝없이 반복되지는 않는다). 서비스가 죽으면 100% 가 된다.
 export const ASR_FAILURE_RATIO_LIMIT = 0.1;
+// TTS 장애는 호출 실패 비율이 아니라 "해설이 하나라도 나왔는데 소리 있는 해설이 하나도 없음"으로 가른다.
+// 제품은 해설마다 TTS 를 한 번 부르고, 실패하면 소리 없이 글만 보낸다(caption-pipeline/index.js). 공장은 그 해설을 no_audio 로 버리므로
+// 이 경우 결과 mp3 에는 AD 가 하나도 없다 — 결과가 쓸모없다는 것을 바로 가리키는 신호다.
+// 비율 규칙(예: 호출 3건 이상·실패 50% 초과)은 실측 영상의 해설 수(63.7초 영상 2개, 31.7초 영상 1개)로는 문턱에 닿지 않아
+// 짧은 영상에서 TTS 가 죽은 결과를 놓친다. 일부 해설만 소리를 잃은 것(부하로 15초 상한을 넘김, 영상 도중 TTS 가 죽음)은
+// 완료로 두고 tts_timeout·tts_error 경고로 남긴다.
+const hasNarrationWithoutAnyAudio = (captionRecordList = []) => captionRecordList.length > 0 && captionRecordList.every((record) => !record.hasAudio);
 // 단기 토큰 만료·권한 없음. 한 번 나면 그 뒤 Bedrock 호출(틈 추론·판정 대체·VLM 폴백)이 모두 실패한다.
 const BEDROCK_AUTH_STATUS_LIST = [401, 403];
 const JUDGE_BACKEND_GPU = 'gpu';
@@ -42,6 +49,14 @@ export function buildIncompleteReasonList({ sessionResult, callLog }) {
   if (asrCallList.length && failedAsrList.length / asrCallList.length > ASR_FAILURE_RATIO_LIMIT) {
     reasonList.push({ code: INCOMPLETE_REASON_MAP.asrFailure, count: failedAsrList.length, total: asrCallList.length, message: describeCallError(failedAsrList[0]) });
   }
+  if (hasNarrationWithoutAnyAudio(sessionResult.captionRecordList)) {
+    const ttsCallList = callLog.filter((record) => record.service === SERVICE_MAP.tts);
+    const failedTtsList = ttsCallList.filter(isFailedCall);
+    reasonList.push({
+      code: INCOMPLETE_REASON_MAP.ttsUnavailable, narrationCount: sessionResult.captionRecordList.length,
+      count: failedTtsList.length, total: ttsCallList.length, message: failedTtsList.length ? describeCallError(failedTtsList[0]) : null,
+    });
+  }
   const authFailedList = callLog.filter(isBedrockAuthCall);
   if (authFailedList.length) {
     reasonList.push({ code: INCOMPLETE_REASON_MAP.bedrockAuthFailed, count: authFailedList.length, message: describeCallError(authFailedList[0]) });
@@ -57,6 +72,8 @@ export function describeIncompleteReason(reason) {
     case INCOMPLETE_REASON_MAP.frameCaptureFailed: return `JPEG 캡처 실패 ${reason.count}건`;
     case INCOMPLETE_REASON_MAP.asrFailure:
       return `ASR 실패 ${reason.count}/${reason.total}건(${toPercent(reason.count / reason.total)}% > ${toPercent(ASR_FAILURE_RATIO_LIMIT)}%) — ${reason.message}`;
+    case INCOMPLETE_REASON_MAP.ttsUnavailable:
+      return `TTS 장애 — 해설 ${reason.narrationCount}개 모두 소리 없음(TTS 실패 ${reason.count}/${reason.total}건) — ${reason.message ?? '응답에 소리가 없다'}`;
     case INCOMPLETE_REASON_MAP.bedrockAuthFailed: return `Bedrock 인증 실패 ${reason.count}건(${reason.message}) — AWS_BEARER_TOKEN_BEDROCK 만료·권한을 확인한다`;
     case INCOMPLETE_REASON_MAP.sessionEndFailed: return `제품 세션 종료 실패 — ${reason.message}`;
     default: return reason.code;
@@ -72,12 +89,15 @@ function pickJudgeSourceCountMap({ judgeSourceCountMap, source }) {
     .map(([judgeKey, countMap]) => [judgeKey, countMap?.[source] || 0]).filter(([, count]) => count > 0));
 }
 
-// 서비스별 시간 초과·실패. 불완전 사유로 이미 센 것(ASR 실패 과다, Bedrock 인증 실패)은 겹쳐 세지 않는다.
+// 서비스 실패를 통째로 센 불완전 사유. 이 사유가 있으면 그 서비스의 실패는 경고로 다시 세지 않는다.
+const SERVICE_BY_INCOMPLETE_CODE_MAP = { [INCOMPLETE_REASON_MAP.asrFailure]: SERVICE_MAP.asr, [INCOMPLETE_REASON_MAP.ttsUnavailable]: SERVICE_MAP.tts };
+
+// 서비스별 시간 초과·실패. 불완전 사유로 이미 센 것(ASR 실패 과다, TTS 장애, Bedrock 인증 실패)은 겹쳐 세지 않는다.
 function buildServiceWarningList({ callLog, incompleteReasonList }) {
-  const isAsrIncomplete = incompleteReasonList.some((reason) => reason.code === INCOMPLETE_REASON_MAP.asrFailure);
+  const skippedServiceSet = new Set(incompleteReasonList.map((reason) => SERVICE_BY_INCOMPLETE_CODE_MAP[reason.code]).filter(Boolean));
   const warningList = [];
   for (const service of SERVICE_ORDER_LIST) {
-    if (service === SERVICE_MAP.asr && isAsrIncomplete) continue;
+    if (skippedServiceSet.has(service)) continue;
     const callList = callLog.filter((record) => record.service === service);
     const failedList = callList.filter((record) => isFailedCall(record) && !isBedrockAuthCall(record));
     const timeoutList = failedList.filter(isTimeoutCall);

@@ -72,7 +72,7 @@ function parseJsonOrNull(text) {
 export async function startMockServices({
   asrScriptList = DEFAULT_ASR_SCRIPT_LIST, ttsDurationMs = 800, vlmGroundingText = '빨간 막대 그래프의 상승 구간',
 } = {}) {
-  const state = { asrIndex: 0, asrStatus: 200, callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0 } };
+  const state = { asrIndex: 0, asrStatus: 200, ttsStatus: 200, callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0 } };
   const serverList = [];
   async function listen(handler) {
     const server = http.createServer((request, response) => { handler(request, response).catch(() => sendJson(response, 500, {})); });
@@ -111,6 +111,7 @@ export async function startMockServices({
   const ttsOrigin = await listen(async (request, response) => {
     await readBody(request);
     state.callCountMap.tts += 1;
+    if (state.ttsStatus !== 200) { sendJson(response, state.ttsStatus, { error: 'mock' }); return; }
     response.writeHead(200, { 'content-type': 'audio/wav' });
     response.end(ttsWav);
   });
@@ -130,6 +131,7 @@ export async function startMockServices({
     },
     state,
     setAsrStatus: (status) => { state.asrStatus = status; },
+    setTtsStatus: (status) => { state.ttsStatus = status; },
     close: () => Promise.all(serverList.map((server) => new Promise((resolve) => server.close(resolve)))),
   };
 }
