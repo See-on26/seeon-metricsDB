@@ -1,23 +1,28 @@
 // src/runner/result-identity.mjs
 import { MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 import { readSeeonMeetVersion, readFactoryVersion } from '../product/product-version.mjs';
+import { buildReportModelConfig } from '../output/ad-report.mjs';
 
 // 결과를 바꾸는 설정만 고른다. 서비스 주소·토큰은 뺀다 — 같은 서버를 터널로 부르든 직접 부르든 결과는 같다.
 // ASR·TTS·임베딩 모델은 제품 설정에 없고 GPU 서버가 정하므로 공장이 알 수 없다(서버 모델을 바꾸면 --force 나 새 --out 을 쓴다).
+// 값은 결과 JSON 의 config.modelConfig 와 같은 허용 목록 모양(buildReportModelConfig)에서 읽는다. 기록하는 쪽(워커)과
+// 견주는 쪽(CLI)이 같은 모양을 거치므로 견주는 값은 늘 기록된 modelConfig 의 값과 같고, 허용 목록 밖 필드·주소의 사용자 정보는
+// 견주지 않는다. 그래서 모델 설정을 바꾸지 않은 재실행은 건너뛴다.
 export function buildResultConfig({ pipelineConfig, mode = MODE_MAP.delayed }) {
+  const modelConfig = buildReportModelConfig({ modelConfig: pipelineConfig });
   return {
     mode,
     delayMs: getModePolicy({ mode }).delayMs,
-    vlmModel: pipelineConfig.vlmModel ?? null,
-    isVlmFallbackEnabled: pipelineConfig.isVlmFallbackEnabled ?? null,
-    vlmFallbackModelId: pipelineConfig.vlmFallbackModelId ?? null,
-    judgeBackend: pipelineConfig.judgeBackend ?? null,
-    judgeGpuModel: pipelineConfig.judgeGpuModel ?? null,
-    judgeModelId: pipelineConfig.judgeModelId ?? null,
-    bedrockModelId: pipelineConfig.bedrockModelId ?? null,
-    gapModelId: pipelineConfig.gapModelByModeMap?.[mode] ?? null,
-    routerMode: pipelineConfig.routerMode ?? null,
-    isScaleEnabled: pipelineConfig.isScaleEnabled ?? null,
+    vlmModel: modelConfig.vlmModel ?? null,
+    isVlmFallbackEnabled: modelConfig.isVlmFallbackEnabled ?? null,
+    vlmFallbackModelId: modelConfig.vlmFallbackModelId ?? null,
+    judgeBackend: modelConfig.judgeBackend ?? null,
+    judgeGpuModel: modelConfig.judgeGpuModel ?? null,
+    judgeModelId: modelConfig.judgeModelId ?? null,
+    bedrockModelId: modelConfig.bedrockModelId ?? null,
+    gapModelId: modelConfig.gapModelByModeMap?.[mode] ?? null,
+    routerMode: modelConfig.routerMode ?? null,
+    isScaleEnabled: modelConfig.isScaleEnabled ?? null,
   };
 }
 

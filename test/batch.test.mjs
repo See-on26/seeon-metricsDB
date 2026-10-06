@@ -11,6 +11,8 @@ import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../src/runner/worker-pool.mjs';
 import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
 import { buildResultConfig } from '../src/runner/result-identity.mjs';
+import { buildReportConfig } from '../src/runner/run-video-job.mjs';
+import { buildAdReport } from '../src/output/ad-report.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 import { runPreflight, probeHttpService, startProductTunnel } from '../src/runner/preflight.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
@@ -628,4 +630,43 @@ test('결과 설정: 결과를 바꾸는 모델·판정 백엔드·라우터·�
   assert.deepEqual([resultConfig.mode, resultConfig.delayMs, resultConfig.vlmModel, resultConfig.judgeBackend], ['delayed', 10000, 'vlm-x', 'bedrock']);
   assert.equal(JSON.stringify(resultConfig).includes('secret'), false);
   assert.equal(JSON.stringify(resultConfig).includes('127.0.0.1'), false);
+});
+
+test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdReport)로 만든 JSON 을 견주면, 모델을 바꾸지 않은 다시 실행은 건너뛰고(허용 목록 밖 필드·주소·토큰이 달라도) 모델을 바꾸면 다시 돈다', () => {
+  const outDir = makeDir('resume-real-report');
+  const job = { videoId: 'a', filePath: '/v/a.mp4', outStem: 'a', language: 'ko', isPageTransitionIncluded: false };
+  const { readPipelineConfig } = loadPipelineConfig();
+  // 워커가 기록할 때의 제품 설정: 허용 목록 밖 새 필드와 사용자 정보가 든 주소가 있다. 실서비스 포트는 쓰지 않는다.
+  const workerPipelineConfig = {
+    ...readPipelineConfig({ AWS_BEARER_TOKEN_BEDROCK: 'secret-bearer', SEEON_ASR_URL: 'http://user:secret-pass@127.0.0.1:9/asr' }),
+    futureSetting: 'secret-unknown', gpuAccessToken: 'secret-token',
+  };
+  const report = buildAdReport({
+    video: { videoId: job.videoId, file: job.filePath, durationMs: 1000, width: 320, height: 180, language: job.language },
+    seeonMeet: IDENTITY.versionMap.seeonMeet, config: buildReportConfig({ job, pipelineConfig: workerPipelineConfig, runConcurrency: 3 }),
+    sessionStartWallMs: 0, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }],
+    captionRecordList: [], adPlayList: [], dropRecordList: [], pipelineRecordList: [], callLog: [],
+    adFileByRef: new Map(), outputFileName: 'a_SEEON_AD.mp3', renderedDurationMs: 1000, processingMs: 100,
+  });
+  fs.writeFileSync(path.join(outDir, 'a_SEEON_AD.mp3'), 'x');
+  fs.writeFileSync(path.join(outDir, 'a_SEEON_AD.json'), JSON.stringify({ ...report, factory: IDENTITY.versionMap.factory }));
+  const recordedConfig = JSON.parse(fs.readFileSync(path.join(outDir, 'a_SEEON_AD.json'), 'utf8')).config;
+  assert.equal(JSON.stringify(recordedConfig).includes('secret'), false);
+  // 견주는 모델 항목은 기록된 modelConfig(허용 목록 모양)에 있고 값도 같다.
+  const comparedModelKeyList = ['vlmModel', 'isVlmFallbackEnabled', 'vlmFallbackModelId', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled'];
+  for (const key of comparedModelKeyList) {
+    assert.ok(Object.hasOwn(recordedConfig.modelConfig, key), `기록 허용 목록에 ${key} 가 없다`);
+    assert.equal(recordedConfig.resultConfig[key], recordedConfig.modelConfig[key], key);
+  }
+  assert.equal(recordedConfig.resultConfig.gapModelId, recordedConfig.modelConfig.gapModelByModeMap[recordedConfig.mode]);
+
+  // CLI 가 견줄 때의 설정: 같은 모델에 다른 주소(터널 대신 직접)·토큰이고 허용 목록 밖 필드는 없다.
+  const inspectWith = (env) => inspectVideoResult({
+    outDir, ...job, identity: { versionMap: IDENTITY.versionMap, resultConfig: buildResultConfig({ pipelineConfig: readPipelineConfig(env) }) },
+  });
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] });
+  const recordedVlmModel = recordedConfig.modelConfig.vlmModel;
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_MODEL: 'vlm-next' }), {
+    status: 'mismatch', mismatchList: [`결과 설정 vlmModel ${recordedVlmModel} → vlm-next`, `결과 설정 judgeGpuModel ${recordedVlmModel} → vlm-next`],
+  });
 });

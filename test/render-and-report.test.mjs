@@ -8,7 +8,7 @@ import { REPORT_MODEL_CONFIG_KEY_LIST, buildAdReport, readPipelineRecordList } f
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolveProductPath } from '../src/product/product-paths.mjs';
-import { ALIGN_TO_VIDEO_TIME_FILTER, resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
+import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';

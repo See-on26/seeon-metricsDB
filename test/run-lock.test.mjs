@@ -5,18 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { acquireRunLock, isPidAlive, RUN_LOCK_FILE_NAME } from '../src/runner/run-lock.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
-function makeOutDir(t) {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-lock-'));
-  t.after(() => fs.rmSync(dirPath, { recursive: true, force: true }));
-  return dirPath;
-}
+const makeOutDir = () => makeTempDir('factory-lock-');
 
 const readLock = (outDir) => JSON.parse(fs.readFileSync(path.join(outDir, RUN_LOCK_FILE_NAME), 'utf8'));
 const writeLock = (outDir, owner) => fs.writeFileSync(path.join(outDir, RUN_LOCK_FILE_NAME), JSON.stringify(owner));
 
-test('잠금: pid·호스트·시작 시각을 담아 만들고, 살아 있는 실행이 쥐고 있으면 거절하며, 풀면 다시 잡을 수 있다', (t) => {
-  const outDir = makeOutDir(t);
+test('잠금: pid·호스트·시작 시각을 담아 만들고, 살아 있는 실행이 쥐고 있으면 거절하며, 풀면 다시 잡을 수 있다', () => {
+  const outDir = makeOutDir();
   const lock = acquireRunLock({ outDir, pid: 101, host: 'h1', now: () => new Date('2026-10-06T01:02:03.000Z'), checkPidAlive: () => true });
   assert.deepEqual(readLock(outDir), { pid: 101, host: 'h1', startedAt: '2026-10-06T01:02:03.000Z' });
   assert.throws(
@@ -34,8 +31,8 @@ test('잠금: pid·호스트·시작 시각을 담아 만들고, 살아 있는 �
   assert.deepEqual(fs.readdirSync(outDir), [], '임시 파일이 남지 않는다');
 });
 
-test('잠금: 같은 호스트에서 pid 가 죽은 잠금은 낡은 것으로 보고 알린 뒤 가져간다', (t) => {
-  const outDir = makeOutDir(t);
+test('잠금: 같은 호스트에서 pid 가 죽은 잠금은 낡은 것으로 보고 알린 뒤 가져간다', () => {
+  const outDir = makeOutDir();
   writeLock(outDir, { pid: 303, host: 'h1', startedAt: 's' });
   const takeOverList = [];
   const lock = acquireRunLock({
@@ -47,8 +44,8 @@ test('잠금: 같은 호스트에서 pid 가 죽은 잠금은 낡은 것으로 �
   assert.deepEqual(fs.readdirSync(outDir), []);
 });
 
-test('잠금: 다른 호스트의 잠금·읽지 못하는 잠금은 살았는지 알 수 없어 가져가지 않고 지울 파일을 알려 준다', (t) => {
-  const outDir = makeOutDir(t);
+test('잠금: 다른 호스트의 잠금·읽지 못하는 잠금은 살았는지 알 수 없어 가져가지 않고 지울 파일을 알려 준다', () => {
+  const outDir = makeOutDir();
   const lockPath = path.join(outDir, RUN_LOCK_FILE_NAME);
   writeLock(outDir, { pid: 505, host: 'other-host', startedAt: 's' });
   assert.throws(
@@ -61,7 +58,7 @@ test('잠금: 다른 호스트의 잠금·읽지 못하는 잠금은 살았는�
 });
 
 test('잠금: 실제 프로세스로 살았는지 본다 — 살아 있는 pid 면 거절, 그 프로세스가 끝나면 가져간다', async (t) => {
-  const outDir = makeOutDir(t);
+  const outDir = makeOutDir();
   const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
   t.after(() => holder.kill('SIGKILL'));
   writeLock(outDir, { pid: holder.pid, host: os.hostname(), startedAt: 's' });

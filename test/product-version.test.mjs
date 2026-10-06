@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { readSeeonMeetVersion, readFactoryVersion, readGitVersion } from '../src/product/product-version.mjs';
 import { SEEON_MEET_ROOT, FACTORY_ROOT } from '../src/product/product-paths.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 test('제품 버전: 서브모듈 seeon-meet 의 HEAD 커밋과 수정 여부를 읽는다', () => {
   const { commit, isDirty } = readSeeonMeetVersion();
@@ -14,9 +14,8 @@ test('제품 버전: 서브모듈 seeon-meet 의 HEAD 커밋과 수정 여부를
   assert.equal(typeof isDirty, 'boolean');
 });
 
-test('공장 버전: 저장소 HEAD 커밋과, 결과에 영향을 주는 코드(src·package.json)만 본 수정 여부·수정 내용 해시를 읽는다', (t) => {
-  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-version-'));
-  t.after(() => fs.rmSync(repoDir, { recursive: true, force: true }));
+test('공장 버전: 저장소 HEAD 커밋과, 결과에 영향을 주는 코드(src·package.json)만 본 수정 여부·수정 내용 해시를 읽는다', () => {
+  const repoDir = makeTempDir('factory-version-');
   const git = (...argList) => execFileSync('git', ['-C', repoDir, ...argList], { env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).toString().trim();
   git('init', '-q');
   fs.mkdirSync(path.join(repoDir, 'src'));

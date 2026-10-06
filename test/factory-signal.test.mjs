@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { waitRealUntil } from './helpers/real-wait.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const DRIVER_PATH = fileURLToPath(new URL('./helpers/factory-cli-driver.mjs', import.meta.url));
 const NODE_FLAG = '--disable-warning=MODULE_TYPELESS_PACKAGE_JSON';
@@ -20,9 +20,8 @@ const DRIVER_ENV = {
 // 터미널 Ctrl-C 와 npm 이 전달한 SIGINT 사이의 간격(같은 Ctrl-C 로 보는 창보다 훨씬 짧다).
 const NPM_FORWARD_GAP_MS = 10;
 
-function prepareRun(t, nameList) {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-signal-'));
-  t.after(() => fs.rmSync(dirPath, { recursive: true, force: true }));
+function prepareRun(nameList) {
+  const dirPath = makeTempDir('factory-signal-');
   const inputDir = path.join(dirPath, 'input');
   fs.mkdirSync(inputDir);
   for (const name of nameList) fs.writeFileSync(path.join(inputDir, name), '');
@@ -76,7 +75,7 @@ function assertInterruptedManifest({ outDir, output }) {
 }
 
 test('진짜 프로세스: 그룹에 SIGINT 가 연달아 두 번(터미널 Ctrl-C + npm 전달) 와도 워커를 SIGTERM 으로 순서대로 멈추고 중단을 기록한 뒤 130 으로 끝난다', { timeout: 30000 }, async (t) => {
-  const { inputDir, outDir } = prepareRun(t, ['a-linger.mp4', 'b-linger.mp4', 'c.mp4']);
+  const { inputDir, outDir } = prepareRun(['a-linger.mp4', 'b-linger.mp4', 'c.mp4']);
   const run = spawnInGroup(t, { command: process.execPath, argList: [NODE_FLAG, DRIVER_PATH, '--input', inputDir, '--out', outDir, '--concurrency', '2'] });
   assert.ok(await waitWorkersStarted({ outDir, outStemList: ['a-linger', 'b-linger'] }), run.output.text);
   signalGroup({ child: run.child, signalName: 'SIGINT' });
@@ -91,7 +90,7 @@ test('진짜 프로세스: 그룹에 SIGINT 가 연달아 두 번(터미널 Ctrl
 });
 
 test('진짜 프로세스: npm exec -c(npm run 과 같은 신호 전달) 아래에서 Ctrl-C 한 번에도 정리하고 manifest 에 중단을 남긴다', { timeout: 30000 }, async (t) => {
-  const { dirPath, inputDir, outDir } = prepareRun(t, ['a-linger.mp4', 'b-linger.mp4', 'c.mp4']);
+  const { dirPath, inputDir, outDir } = prepareRun(['a-linger.mp4', 'b-linger.mp4', 'c.mp4']);
   const commandText = [process.execPath, NODE_FLAG, DRIVER_PATH, '--input', inputDir, '--out', outDir, '--concurrency', '2']
     .map((part) => `'${part}'`).join(' ');
   const run = spawnInGroup(t, { command: 'npm', argList: ['exec', '--offline', '-c', commandText], cwd: dirPath });
@@ -103,7 +102,7 @@ test('진짜 프로세스: npm exec -c(npm run 과 같은 신호 전달) 아래�
 });
 
 test('진짜 프로세스: 정리 중에 시간을 두고 신호를 한 번 더 보내면 워커 유예를 기다리지 않고 바로 죽이되 중단 기록은 남긴다', { timeout: 30000 }, async (t) => {
-  const { inputDir, outDir } = prepareRun(t, ['a-stubborn.mp4', 'b-stubborn.mp4']);
+  const { inputDir, outDir } = prepareRun(['a-stubborn.mp4', 'b-stubborn.mp4']);
   const run = spawnInGroup(t, { command: process.execPath, argList: [NODE_FLAG, DRIVER_PATH, '--input', inputDir, '--out', outDir, '--concurrency', '2'] });
   assert.ok(await waitWorkersStarted({ outDir, outStemList: ['a-stubborn', 'b-stubborn'] }), run.output.text);
   const firstSignalAt = performance.now();

@@ -18,6 +18,17 @@ import { buildAdReport, readPipelineRecordList } from '../output/ad-report.mjs';
 import { buildOutputPathMap } from './output-paths.mjs';
 import { buildIncompleteReasonList, buildWarningList, describeIncompleteReason } from './result-health.mjs';
 
+// 결과 JSON 의 config. 토큰은 남기지 않고, modelConfig 는 buildAdReport 가 기록 허용 목록으로 한 번 더 거른다.
+// resultConfig 는 재실행 때 건너뛸지 견주는 결과 설정, runConcurrency 는 이번 실행의 동시 수다.
+export function buildReportConfig({ job, pipelineConfig, runConcurrency = null }) {
+  const { bedrockApiKey, ...modelConfig } = pipelineConfig;
+  return {
+    mode: MODE_MAP.delayed, isEvalPreset: true, isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded),
+    featureToggleMap: { ...EVAL_PRESET_MAP, page_transition: Boolean(job.isPageTransitionIncluded) }, modelConfig,
+    resultConfig: buildResultConfig({ pipelineConfig }), runConcurrency,
+  };
+}
+
 // 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
 // 기반 문제(화면 입력 실패·서비스 장애·세션 종료 실패)로 불완전한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다.
 // 다시 돌리면 그 영상을 다시 처리한다. 부하로 생기는 품질 저하(시간 초과·판정 대체 등)는 완료로 두고 warningList 에 남긴다.
@@ -77,17 +88,10 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   const callLog = scopedFetch.getCallLog();
   const judgeSourceCountMap = getJudgeSourceCountMap();
   const swallowedErrorCountMap = { task: sessionResult.swallowedErrorCountMap, ipc: bridge.getSwallowedErrorCountMap() };
-  // 토큰은 JSON 에 남기지 않는다.
-  const { bedrockApiKey, ...modelConfig } = pipelineConfig;
   const report = buildAdReport({
     video: { videoId: job.videoId, file: job.filePath, durationMs: probe.durationMs, width: probe.width, height: probe.height, language: job.language },
     seeonMeet: versionMap.seeonMeet,
-    // resultConfig 는 재실행 때 건너뛸지 견주는 결과 설정, runConcurrency 는 이번 실행의 동시 수다.
-    config: {
-      mode: MODE_MAP.delayed, isEvalPreset: true, isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded),
-      featureToggleMap: { ...EVAL_PRESET_MAP, page_transition: Boolean(job.isPageTransitionIncluded) }, modelConfig,
-      resultConfig: buildResultConfig({ pipelineConfig }), runConcurrency,
-    },
+    config: buildReportConfig({ job, pipelineConfig, runConcurrency }),
     sessionStartWallMs: sessionResult.sessionStartWallMs, pieceList: sessionResult.pieceList,
     captionRecordList: sessionResult.captionRecordList, adPlayList: sessionResult.adPlayList, dropRecordList: sessionResult.dropRecordList,
     pipelineRecordList: readPipelineRecordList({ recordPath: sessionResult.recordPath }), callLog,
