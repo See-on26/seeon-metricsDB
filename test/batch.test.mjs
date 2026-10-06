@@ -408,6 +408,51 @@ test('시작 전 점검: 제품이 터널로 넘기는 긴 문장 TTS 주소(tts
   assert.deepEqual(closedPortList, ['TTS_LONG 127.0.0.1:18805']);
 });
 
+test('시작 전 점검: Bedrock 토큰 없음 사유는 탐지 판정 백엔드(gpu·bedrock)에 맞춰 적는다', async () => {
+  const baseConfig = {
+    vlmUrl: 'http://127.0.0.1:18801/v', asrUrl: 'http://127.0.0.1:18802/a', ttsUrl: 'http://127.0.0.1:18803/t', embedUrl: 'http://127.0.0.1:18804/e',
+    judgeGpuUrl: 'http://127.0.0.1:18801/v', bedrockApiKey: '',
+  };
+  const readKeyProblem = async (judgeBackend) => {
+    const { problemList } = await runPreflight({
+      pipelineConfig: { ...baseConfig, judgeBackend }, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe',
+      checkPort: async () => true, runVersion: async () => Buffer.from('ok'),
+    });
+    assert.equal(problemList.length, 1);
+    return problemList[0];
+  };
+  const gpuProblem = await readKeyProblem('gpu');
+  assert.match(gpuProblem, /^AWS_BEARER_TOKEN_BEDROCK 이 없다 — /);
+  assert.match(gpuProblem, /틈 추론/);
+  assert.match(gpuProblem, /GPU 판정이 실패해도 Bedrock 으로 넘기지 못해/);
+  assert.doesNotMatch(gpuProblem, /라우터/, 'GPU 판정이면 라우터는 토큰 없이도 판정한다');
+  const bedrockProblem = await readKeyProblem('bedrock');
+  assert.match(bedrockProblem, /^AWS_BEARER_TOKEN_BEDROCK 이 없다 — /);
+  assert.match(bedrockProblem, /SEEON_JUDGE_BACKEND=bedrock/);
+  assert.match(bedrockProblem, /라우터·무발화·지시 판정/);
+});
+
+test('시작 전 점검: 판정 GPU 주소가 VLM 과 다른 호스트·포트일 때만 그 포트를 JUDGE 로 따로 본다', async () => {
+  const baseConfig = {
+    vlmUrl: 'http://127.0.0.1:18801/v1/chat/completions', asrUrl: 'http://127.0.0.1:18802/a', ttsUrl: 'http://127.0.0.1:18803/t',
+    embedUrl: 'http://127.0.0.1:18804/e', bedrockApiKey: 'token',
+  };
+  const runWithConfig = async (judgeConfig) => {
+    const checkedList = [];
+    const { closedPortList } = await runPreflight({
+      pipelineConfig: { ...baseConfig, ...judgeConfig }, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe',
+      checkPort: async ({ host, port }) => { checkedList.push(`${host}:${port}`); return port !== 18806; }, runVersion: async () => Buffer.from('ok'),
+    });
+    return { checkedList, closedPortList };
+  };
+  const shared = await runWithConfig({ judgeBackend: 'gpu', judgeGpuUrl: 'http://127.0.0.1:18801/v1/chat/completions' });
+  assert.deepEqual(shared.checkedList, ['127.0.0.1:18801', '127.0.0.1:18802', '127.0.0.1:18803', '127.0.0.1:18804'], 'VLM 점검이 판정도 덮는다');
+  const dedicated = await runWithConfig({ judgeBackend: 'gpu', judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' });
+  assert.deepEqual(dedicated.closedPortList, ['JUDGE 127.0.0.1:18806']);
+  const bedrockJudge = await runWithConfig({ judgeBackend: 'bedrock', judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' });
+  assert.equal(bedrockJudge.checkedList.includes('127.0.0.1:18806'), false, 'Bedrock 판정이면 GPU 판정 주소를 쓰지 않는다');
+});
+
 test('시작 전 점검: 실제 ffmpeg·ffprobe -version 은 통과한다', async () => {
   const { problemList } = await runPreflight({
     pipelineConfig: { vlmUrl: 'http://127.0.0.1:1/v', asrUrl: 'http://127.0.0.1:1/a', ttsUrl: 'http://127.0.0.1:1/t', embedUrl: 'http://127.0.0.1:1/e', bedrockApiKey: 'token' },

@@ -23,15 +23,38 @@ export function checkTcpPort({ host, port, timeoutMs = 2000 }) {
 
 // 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함).
 const GPU_SERVICE_URL_KEY_LIST = [['VLM', 'vlmUrl'], ['ASR', 'asrUrl'], ['TTS', 'ttsUrl'], ['TTS_LONG', 'ttsLongUrl'], ['EMBED', 'embedUrl']];
+const JUDGE_URL_KEY = ['JUDGE', 'judgeGpuUrl'];
+// 제품 judge-llm.js JUDGE_BACKEND_MAP 과 같은 값.
+const JUDGE_BACKEND_MAP = { gpu: 'gpu', bedrock: 'bedrock' };
+// Bedrock 토큰이 없을 때 제품과 달라지는 곳. gpu 판정은 토큰 없이도 돌지만 GPU 가 실패하면 Bedrock 으로 넘기지 못한다.
+const MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP = {
+  [JUDGE_BACKEND_MAP.gpu]: '틈 추론이 규칙 폴백으로 떨어지고 GPU 판정이 실패해도 Bedrock 으로 넘기지 못해',
+  [JUDGE_BACKEND_MAP.bedrock]: 'SEEON_JUDGE_BACKEND=bedrock 이라 라우터·무발화·지시 판정이 LLM 없이 통과·차단되고 틈 추론이 규칙 폴백으로 떨어져',
+};
+
+function readHostPort(url) {
+  const { hostname, port, protocol } = new URL(url);
+  return { hostname, portNumber: Number(port) || DEFAULT_PORT_BY_PROTOCOL_MAP[protocol] };
+}
+
+// 판정 GPU 주소가 VLM 과 같은 호스트·포트면(제품 기본값) VLM 점검이 판정도 덮는다. 따로 두면 그 포트도 본다.
+// 제품 터널은 판정 주소를 넘기지 않으므로 닫혀 있으면 터널을 연 뒤에도 닫힌 채로 남아 점검이 실패한다.
+function listServiceUrlKeyList({ pipelineConfig }) {
+  const { judgeBackend, judgeGpuUrl, vlmUrl } = pipelineConfig;
+  if (judgeBackend !== JUDGE_BACKEND_MAP.gpu || !judgeGpuUrl) return GPU_SERVICE_URL_KEY_LIST;
+  const judgeHostPort = readHostPort(judgeGpuUrl);
+  const vlmHostPort = vlmUrl ? readHostPort(vlmUrl) : null;
+  const isSameHostPort = vlmHostPort?.hostname === judgeHostPort.hostname && vlmHostPort?.portNumber === judgeHostPort.portNumber;
+  return isSameHostPort ? GPU_SERVICE_URL_KEY_LIST : [...GPU_SERVICE_URL_KEY_LIST, JUDGE_URL_KEY];
+}
 
 // GPU 서비스 주소에서 포트를 열어 보고 닫힌 것만 '<이름> <호스트>:<포트>' 로 돌려준다. 포트를 적지 않은 주소는 프로토콜 기본 포트, 설정에 없는 주소는 건너뛴다.
 export async function listClosedPorts({ pipelineConfig, checkPort = checkTcpPort }) {
   const closedPortList = [];
-  for (const [label, key] of GPU_SERVICE_URL_KEY_LIST) {
+  for (const [label, key] of listServiceUrlKeyList({ pipelineConfig })) {
     const url = pipelineConfig[key];
     if (!url) continue;
-    const { hostname, port, protocol } = new URL(url);
-    const portNumber = Number(port) || DEFAULT_PORT_BY_PROTOCOL_MAP[protocol];
+    const { hostname, portNumber } = readHostPort(url);
     if (!(await checkPort({ host: hostname, port: portNumber }))) closedPortList.push(`${label} ${hostname}:${portNumber}`);
   }
   return closedPortList;
@@ -51,7 +74,10 @@ export async function runPreflight({
   }
   const closedPortList = await listClosedPorts({ pipelineConfig, checkPort });
   if (!pipelineConfig.bedrockApiKey) {
-    problemList.push('AWS_BEARER_TOKEN_BEDROCK 이 없다 — 라우터·틈 추론이 규칙 폴백으로 떨어져 제품과 다르게 돈다(.env 확인)');
+    // 백엔드가 없는 설정은 제품 judge-llm.js 처럼 Bedrock 판정으로 본다.
+    const impact = MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP[pipelineConfig.judgeBackend]
+      ?? MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP[JUDGE_BACKEND_MAP.bedrock];
+    problemList.push(`AWS_BEARER_TOKEN_BEDROCK 이 없다 — ${impact} 제품과 다르게 돈다(.env 확인)`);
   }
   return { problemList, closedPortList };
 }
