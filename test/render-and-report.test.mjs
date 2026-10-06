@@ -77,6 +77,28 @@ test('조각 표본 수는 출력 시각 경계에서 재어 누적 오차가 �
   assert.deepEqual(chunk.inputArgList, []);
 });
 
+test('atempo 범위(0.5–100) 밖 배속의 원음 조각은 렌더 전에 오류로 알린다', () => {
+  const stalled = { kind: 'source', outStartMs: 0, outEndMs: 500, srcStartMs: 1000, srcEndMs: 1000 };
+  assert.throws(
+    () => buildPieceFilter({ piece: stalled, inputLabel: 's0', outputLabel: 'p0', seekMs: 1000, sampleRate: 48000, channelLayout: 'stereo' }),
+    /배속 0\.000000.*0\.5–100/,
+  );
+  assert.throws(() => buildRenderChunkList({
+    pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 10, srcStartMs: 0, srcEndMs: 2000 }],
+    sourcePath: '/v.mp4', hasSourceAudio: true, adPathByRef: new Map(), sampleRate: 48000, channelLayout: 'stereo',
+  }), /배속 200\.000000/);
+});
+
+test('AD 음성이 WAV 가 아니면 채널 수를 몰라 합성하지 않고 거부한다', async () => {
+  const adPath = path.join(dirPath, 'ad-not-wav.mp3');
+  fs.writeFileSync(adPath, Buffer.from('ID3 이것은 WAV 가 아니다'.padEnd(200, '.')));
+  await assert.rejects(renderOutputMp3({
+    sourcePath: path.join(dirPath, 'unused.mp4'), hasSourceAudio: true, outPath: path.join(dirPath, 'not-wav.mp3'), workDir: dirPath,
+    sampleRate: 48000, channelCount: 2, ffmpegPath, adPathByRef: new Map([[1, adPath]]), pieceList: [{ kind: 'ad', outStartMs: 0, outEndMs: 500, adRef: 1 }],
+  }), /WAV/);
+  assert.equal(fs.existsSync(path.join(dirPath, 'not-wav.mp3')), false);
+});
+
 test('원음 + 무음 + AD + 배속 원음을 이어 mp3 를 만들고 길이가 타임라인과 같다', async () => {
   const sourcePath = await createTestClip({ dirPath, fileName: 'src.mp4', colorTimeline: [['black', 6]], audioExpr: '0.3*sin(2*PI*330*t)' });
   const adPath = path.join(dirPath, 'ad-001.wav');
@@ -207,6 +229,32 @@ test('AD 기록: 렌더러 드롭은 그 사유로, 사건 영상 시각이 없�
   assert.equal(ad.latencyMs, 1000);
   assert.equal(report.stats.realtimeFactor, null);
   assert.deepEqual(report.output, { file: 'v2_SEEON_AD.mp3', renderedDurationMs: 21000, timelineDurationMs: 21000, sourceMediaMs: 20000, adTotalMs: 1000, silenceTotalMs: 0, recoveredMs: 0 });
+});
+
+test('AD 기록: 재생된 뒤 끊긴 해설은 실험실처럼 버린 목록이 아니라 AD 항목의 interruptedReason 으로 남긴다', () => {
+  const sessionStartWallMs = 1_800_000_000_000;
+  const captionList = [
+    { captionSeq: 1, ts: sessionStartWallMs + 1000, text: '끊긴 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 1000, rationale: null, insertVideoTimeMs: 1000, gap: null, callList: [] },
+    { captionSeq: 2, ts: sessionStartWallMs + 6000, text: '끝까지 들린 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 6000, rationale: null, insertVideoTimeMs: 6000, gap: null, callList: [] },
+  ];
+  const report = buildAdReport({
+    video: { videoId: 'v3', file: '/v3.mp4', durationMs: 10000, width: 1280, height: 720, language: 'ko' },
+    seeonMeet: { commit: 'c0ebca0', isDirty: false }, config: { mode: 'delayed', isEvalPreset: true, isPageTransitionIncluded: false },
+    sessionStartWallMs,
+    pieceList: [
+      { kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 },
+      { kind: 'ad', outStartMs: 1000, outEndMs: 1400, adRef: 1 },
+      { kind: 'source', outStartMs: 1400, outEndMs: 6400, srcStartMs: 1000, srcEndMs: 6000 },
+      { kind: 'ad', outStartMs: 6400, outEndMs: 7400, adRef: 2 },
+      { kind: 'source', outStartMs: 7400, outEndMs: 11400, srcStartMs: 6000, srcEndMs: 10000 },
+    ],
+    captionRecordList: captionList,
+    adPlayList: [{ captionSeq: 1, atElapsedMs: 1000, durationMs: 2000, playedMediaMs: 1000 }, { captionSeq: 2, atElapsedMs: 6400, durationMs: 1000, playedMediaMs: 6000 }],
+    dropRecordList: [{ captionSeq: 1, ts: sessionStartWallMs + 1000, text: '끊긴 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 1000, reason: 'interrupted', waitedMs: null }],
+    pipelineRecordList: [], callLog: [], adFileByRef: new Map(), outputFileName: 'v3_SEEON_AD.mp3', renderedDurationMs: 11400, processingMs: 5000,
+  });
+  assert.deepEqual(report.adList.map((ad) => [ad.text, ad.interruptedReason]), [['끊긴 해설', 'interrupted'], ['끝까지 들린 해설', null]]);
+  assert.deepEqual(report.droppedList, []);
 });
 
 test('파이프라인 기록은 줄마다 JSON 으로 읽고 깨진 줄·없는 파일은 건너뛴다', () => {

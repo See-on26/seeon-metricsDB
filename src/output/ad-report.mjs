@@ -30,6 +30,9 @@ export function buildAdReport({
   callLog, adFileByRef, outputFileName, renderedDurationMs, processingMs,
 }) {
   const recordBySeq = new Map(captionRecordList.map((record) => [record.captionSeq, record]));
+  const playedSeqSet = new Set(adPlayList.map((adPlay) => adPlay.captionSeq));
+  // 재생된 뒤 끊긴 해설(질문 답이 끊음)은 실험실처럼 버린 목록이 아니라 AD 항목의 interruptedReason 으로 남긴다.
+  const interruptedReasonBySeq = new Map(dropRecordList.filter((drop) => playedSeqSet.has(drop.captionSeq)).map((drop) => [drop.captionSeq, drop.reason]));
   const adPieceByRef = new Map(pieceList.filter((piece) => piece.kind === PIECE_KIND_MAP.ad).map((piece) => [piece.adRef, piece]));
   const deixisByKey = new Map(pipelineRecordList
     .filter((record) => record.kind === PIPELINE_RECORD_KIND_MAP.deixis && record.caption)
@@ -59,6 +62,7 @@ export function buildAdReport({
         judgeReason: deixis?.judgeReason ?? null,
       },
       latencyMs: Number.isFinite(playedMediaMs) && Number.isFinite(eventMediaMs) ? playedMediaMs - eventMediaMs : null,
+      interruptedReason: interruptedReasonBySeq.get(adPlay.captionSeq) ?? null,
       gap: record.gap ? { source: record.gap.source, reason: record.gap.reason, gapIndex: record.gap.gapIndex, candidateCount: record.gap.candidateCount } : null,
       serviceCallList, isVlmFallback: serviceCallList.some((call) => call.isVlmFallback),
       wavFile: adFileByRef.get(adPlay.captionSeq) ?? null,
@@ -66,14 +70,13 @@ export function buildAdReport({
   });
 
   // 버린 해설: 렌더러가 사유를 남긴 것, 사유 없이 끝내 재생되지 않은 것, main 이 발행하지 않은 것(간격·중복·기능 꺼짐).
-  const playedSeqSet = new Set(adPlayList.map((adPlay) => adPlay.captionSeq));
   const droppedSeqSet = new Set(dropRecordList.map((drop) => drop.captionSeq));
   const toDrop = (record, reason) => ({
     text: record.text, type: normalizeType(record.source), narrationClass: record.narrationClass ?? null,
     slideLabel: record.slideLabel ?? null, eventMediaMs: toEventMediaMs(record), reason,
   });
   const droppedList = [
-    ...dropRecordList.map((drop) => toDrop(drop, drop.reason)),
+    ...dropRecordList.filter((drop) => !playedSeqSet.has(drop.captionSeq)).map((drop) => toDrop(drop, drop.reason)),
     ...captionRecordList.filter((record) => !playedSeqSet.has(record.captionSeq) && !droppedSeqSet.has(record.captionSeq)).map((record) => toDrop(record, NOT_PLAYED_REASON)),
     ...pipelineRecordList.filter((record) => record.kind === PIPELINE_RECORD_KIND_MAP.narration && record.isEmitted === false).map((record) => ({
       text: record.text, type: normalizeType(record.source), narrationClass: record.narrationClass || null,

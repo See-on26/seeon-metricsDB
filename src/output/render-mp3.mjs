@@ -4,21 +4,14 @@ import { runBinary } from '../media/ffmpeg.mjs';
 import { readWavInfo } from '../media/wav.mjs';
 import { resolveOutputAudioFormat, buildRenderChunkList } from './render-plan.mjs';
 
-// fmt·data 머리만 읽으면 채널 수를 안다. 앞에 큰 LIST 청크가 붙어도 들어올 만큼 읽는다.
-const WAV_HEADER_READ_BYTES = 64 * 1024;
-
-// AD wav 의 채널 수. 모노 AD 를 스테레오 출력에 Web Audio 처럼 넣으려고 쓴다. 읽지 못하면 null(ffmpeg 기본 변환).
+// AD wav 의 채널 수. 모노 AD 를 스테레오 출력에 Web Audio 처럼 넣으려고 쓴다. 제품 TTS 는 WAV 라, 채널 수를 읽지 못하면
+// ffmpeg 기본 업믹스(-3dB)로 조용히 바뀌지 않게 거부한다. AD 하나는 몇 초짜리라 통째로 읽는다.
 async function readAdChannelCountByRef(adPathByRef) {
   const channelCountByRef = new Map();
   for (const [adRef, adPath] of adPathByRef) {
-    const handle = await fs.promises.open(adPath, 'r');
-    try {
-      const buffer = Buffer.alloc(WAV_HEADER_READ_BYTES);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      channelCountByRef.set(adRef, readWavInfo(buffer.subarray(0, bytesRead))?.channelCount ?? null);
-    } finally {
-      await handle.close();
-    }
+    const channelCount = readWavInfo(await fs.promises.readFile(adPath))?.channelCount;
+    if (!(channelCount > 0)) throw new Error(`AD 음성이 WAV 가 아니라 채널 수를 읽지 못했다: ${adPath}`);
+    channelCountByRef.set(adRef, channelCount);
   }
   return channelCountByRef;
 }
@@ -40,10 +33,10 @@ export async function renderOutputMp3({ sourcePath, hasSourceAudio, pieceList, a
       const chunkPath = path.resolve(workDir, `render-${index}.wav`);
       tempPathList.push(scriptPath, chunkPath);
       await fs.promises.writeFile(scriptPath, chunk.filterScript);
-      // ffmpeg 7 이상은 -/filter_complex <파일> 로 필터 스크립트를 읽는다(-filter_complex_script 는 폐기 예정).
+      // -filter_complex_script 는 ffmpeg 5.1–8.0 이 모두 읽는다. 7.0 에 생긴 -/filter_complex 는 6.x 에 없다(8.0 은 폐기 예정 경고만 낸다).
       await runBinary({
         binaryPath: ffmpegPath,
-        argList: ['-v', 'error', '-y', ...chunk.inputArgList, '-/filter_complex', scriptPath, '-map', '[out]', '-c:a', 'pcm_f32le', '-rf64', 'auto', chunkPath],
+        argList: ['-v', 'error', '-y', ...chunk.inputArgList, '-filter_complex_script', scriptPath, '-map', '[out]', '-c:a', 'pcm_f32le', '-rf64', 'auto', chunkPath],
       });
       chunkPathList.push(chunkPath);
     }

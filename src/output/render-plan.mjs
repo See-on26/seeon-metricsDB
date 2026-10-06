@@ -3,6 +3,9 @@ import { ALIGN_TO_VIDEO_TIME_FILTER } from '../media/ffmpeg.mjs';
 
 const MP3_SAMPLE_RATE_LIST = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000];
 const RATE_EPSILON = 0.001;
+// ffmpeg atempo 가 받는 배속. 제품 배속은 1 이상 따라잡기뿐이라 이 밖은 원음 길이 0 같은 연결 코드의 잘못이다.
+const ATEMPO_MIN_RATE = 0.5;
+const ATEMPO_MAX_RATE = 100;
 // Web Audio 는 모노 AD 를 스테레오 출력의 두 채널에 그대로 복사한다(speakers 업믹스). ffmpeg 기본 업믹스는 채널마다 -3dB 라 따로 정한다.
 const MONO_TO_STEREO_FILTER = 'pan=stereo|c0=c0|c1=c0';
 
@@ -35,7 +38,12 @@ export function buildPieceFilter({ piece, inputLabel = null, outputLabel, seekMs
     return `[${inputLabel}]asetpts=PTS-STARTPTS,${upmix}${fit}[${outputLabel}]`;
   }
   const rate = (piece.srcEndMs - piece.srcStartMs) / (piece.outEndMs - piece.outStartMs);
-  const tempo = Math.abs(rate - 1) < RATE_EPSILON ? '' : `,atempo=${rate.toFixed(6)}`;
+  const isTempoNeeded = Math.abs(rate - 1) >= RATE_EPSILON;
+  if (isTempoNeeded && !(rate >= ATEMPO_MIN_RATE && rate <= ATEMPO_MAX_RATE)) {
+    throw new Error(`원음 조각 배속 ${rate.toFixed(6)} 이 atempo 범위(${ATEMPO_MIN_RATE}–${ATEMPO_MAX_RATE}) 밖이다: `
+      + `출력 ${piece.outStartMs}–${piece.outEndMs}ms, 원음 ${piece.srcStartMs}–${piece.srcEndMs}ms`);
+  }
+  const tempo = isTempoNeeded ? `,atempo=${rate.toFixed(6)}` : '';
   return `[${inputLabel}]atrim=start=${toSec(piece.srcStartMs - seekMs)}:end=${toSec(piece.srcEndMs - seekMs)},asetpts=PTS-STARTPTS${tempo},${fit}[${outputLabel}]`;
 }
 
