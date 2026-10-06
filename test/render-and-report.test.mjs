@@ -4,8 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveOutputAudioFormat, buildPieceFilter, buildRenderChunkList } from '../src/output/render-plan.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
-import { buildAdReport, readPipelineRecordList } from '../src/output/ad-report.mjs';
+import { REPORT_MODEL_CONFIG_KEY_LIST, buildAdReport, readPipelineRecordList } from '../src/output/ad-report.mjs';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { resolveProductPath } from '../src/product/product-paths.mjs';
 import { ALIGN_TO_VIDEO_TIME_FILTER, resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
@@ -271,4 +273,37 @@ test('파이프라인 기록은 줄마다 JSON 으로 읽고 깨진 줄·없는 
   assert.deepEqual(readPipelineRecordList({ recordPath }).map((record) => record.kind), ['narration', 'deixis']);
   assert.deepEqual(readPipelineRecordList({ recordPath: path.join(dirPath, 'none.jsonl') }), []);
   assert.deepEqual(readPipelineRecordList({ recordPath: null }), []);
+});
+
+test('AD 기록: 모델 설정은 허용 목록의 이름만 남겨 제품이 키·토큰 필드를 더해도 기록에 실리지 않고, 주소의 사용자 정보는 지운다', () => {
+  const { readPipelineConfig } = createRequire(import.meta.url)(resolveProductPath('src/main/caption-pipeline/config.js'));
+  const productConfig = readPipelineConfig({ AWS_BEARER_TOKEN_BEDROCK: 'secret-bearer', SEEON_ASR_URL: 'http://user:secret-pass@127.0.0.1:8802/asr' });
+  const unknownFieldMap = { newServiceApiKey: 'secret-key', gpuAccessToken: 'secret-token', futureSetting: 'secret-unknown' };
+  const report = buildAdReport({
+    video: { videoId: 'v1', file: '/v1.mp4', durationMs: 1000, width: 320, height: 180, language: 'ko' },
+    seeonMeet: { commit: 'c0ebca0', isDirty: false }, config: { mode: 'delayed', modelConfig: { ...productConfig, ...unknownFieldMap } },
+    sessionStartWallMs: 0, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }],
+    captionRecordList: [], adPlayList: [], dropRecordList: [], pipelineRecordList: [], callLog: [],
+    adFileByRef: new Map(), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 1000, processingMs: 100,
+  });
+  const reportedConfig = report.config.modelConfig;
+  assert.deepEqual(Object.keys(reportedConfig).sort(), [...REPORT_MODEL_CONFIG_KEY_LIST].sort());
+  assert.equal(reportedConfig.asrUrl, 'http://127.0.0.1:8802/asr');
+  assert.equal(reportedConfig.vlmUrl, productConfig.vlmUrl, '사용자 정보가 없는 주소는 그대로');
+  assert.deepEqual(reportedConfig.gapModelByModeMap, productConfig.gapModelByModeMap);
+  assert.equal(reportedConfig.hasBedrockCredentials, true);
+  assert.equal(JSON.stringify(report).includes('secret'), false);
+  // 제품 설정에 새 필드가 생기면 여기서 알린다. 비밀이 아니면 허용 목록에 더하고, 비밀이면 아래 목록에 더한다.
+  assert.deepEqual(Object.keys(productConfig).filter((key) => !REPORT_MODEL_CONFIG_KEY_LIST.includes(key)), ['bedrockApiKey']);
+});
+
+test('AD 기록: 모델 설정이 없는 기록은 그대로 둔다', () => {
+  const report = buildAdReport({
+    video: { videoId: 'v1', file: '/v1.mp4', durationMs: 1000, width: 320, height: 180, language: 'ko' },
+    seeonMeet: { commit: 'c0ebca0', isDirty: false }, config: { mode: 'delayed' },
+    sessionStartWallMs: 0, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }],
+    captionRecordList: [], adPlayList: [], dropRecordList: [], pipelineRecordList: [], callLog: [],
+    adFileByRef: new Map(), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 1000, processingMs: 100,
+  });
+  assert.deepEqual(report.config, { mode: 'delayed' });
 });
