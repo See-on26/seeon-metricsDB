@@ -8,9 +8,11 @@ import { GAP_SAFETY_MS, CAPTION_SOURCE_TRANSITION } from './renderer-constants.m
 
 // 렌더러 쪽에서 해설을 버리는 사유 중 제품 대기 줄(narration-queue.js) 사유가 아닌 것.
 // emitFailed 는 제품이 경고만 찍고 잃어버리는 발행 오류(main.js:1491-1496)다.
+// drainTimeout 은 배수 상한에 닿아 멈출 때 영상 안 자리(삽입 시각 ≤ 영상 길이)라 더 기다렸으면 들렸을 해설이다.
+// afterEnd 는 영상 끝 뒤 자리라 지연 재생이 닿지 않거나, 배수를 다 마친 뒤 도착한 해설이다.
 export const FACTORY_DROP_REASON_MAP = {
   noAudio: 'no_audio', excessDelay: 'excess_delay', afterEnd: 'after_end', dwellCancelled: 'dwell_cancelled', leaderCancelled: 'leader_cancelled',
-  emitFailed: 'emit_failed',
+  emitFailed: 'emit_failed', drainTimeout: 'drain_timeout',
 };
 
 // main.js:1402-1404 toNarrationType
@@ -32,6 +34,7 @@ export function createOutputGlue({ ctx }) {
   const playedSeqSet = new Set();
   let nextSeq = 1;
   let isEnded = false;
+  let isDrainTimedOut = false;
 
   // wav 는 main 이 만든 버퍼를 복사하지 않고 참조로 둔다. 재생 대기 줄에는 제품처럼 잘라 낸 ArrayBuffer 가 따로 간다.
   function registerCaption(payload, requestContext) {
@@ -101,11 +104,17 @@ export function createOutputGlue({ ctx }) {
     return chosen.videoTimeMs;
   }
 
+  // 세션을 멈춘 뒤 남은·도착한 해설의 사유. 상한에 닿아 멈췄고 자리가 영상 안이면 drain_timeout 이다.
+  function resolveEndDropReason(insertVideoTimeMs) {
+    const isInsideVideo = Number.isFinite(insertVideoTimeMs) && insertVideoTimeMs <= ctx.mediaDurationMs;
+    return isDrainTimedOut && isInsideVideo ? FACTORY_DROP_REASON_MAP.drainTimeout : FACTORY_DROP_REASON_MAP.afterEnd;
+  }
+
   // main.js:1536-1559 scheduleNarration
   function scheduleNarration({ entry, captionCaptureMs, record }) {
     // 영상 끝 배수가 끝난 뒤 도착한 해설은 들려줄 자리가 없다. 제품은 정지 뒤 소리 없이 사라지지만 공장은 사유를 남긴다.
     if (isEnded) {
-      addDrop({ record, reason: FACTORY_DROP_REASON_MAP.afterEnd });
+      addDrop({ record, reason: resolveEndDropReason(captionCaptureMs) });
       return;
     }
     const { delayBuffer, narrationScheduler, narrationGate } = core;
@@ -229,11 +238,16 @@ export function createOutputGlue({ ctx }) {
       if (entry) playedSeqSet.add(entry.captionSeq);
       adPlayList.push({ captionSeq: entry?.captionSeq ?? null, atElapsedMs, durationMs, playedMediaMs });
     },
-    // 배수가 끝났는데도 남은 예약·대기 해설은 영상 끝 뒤 자리라 들려줄 수 없다. 이 뒤로 오는 해설도 같은 사유로 버린다.
-    dropPendingAfterEnd() {
+    // 세션을 멈출 때 남은 예약·대기 해설을 버린다. 배수를 다 마쳤으면 남은 예약은 영상 끝 뒤 자리뿐이다(after_end).
+    // 상한에 닿아 멈췄으면 영상 안 자리 예약과 이미 삽입 시점이 온 대기 줄 해설은 drain_timeout 이다. 이 뒤로 오는 해설도 같은 규칙이다.
+    dropPendingAfterEnd({ isDrainTimedOut: isTimedOut = false } = {}) {
       isEnded = true;
-      for (const item of core.narrationScheduler?.pendingList ?? []) addDrop({ record: recordBySeq.get(item.entry.captionSeq), reason: FACTORY_DROP_REASON_MAP.afterEnd });
-      for (const entry of core.narrator?.queue?.entryList ?? []) addDrop({ record: recordBySeq.get(entry.captionSeq), reason: FACTORY_DROP_REASON_MAP.afterEnd });
+      isDrainTimedOut = isTimedOut;
+      for (const item of core.narrationScheduler?.pendingList ?? []) {
+        addDrop({ record: recordBySeq.get(item.entry.captionSeq), reason: resolveEndDropReason(item.captionCaptureMs) });
+      }
+      const queueReason = isDrainTimedOut ? FACTORY_DROP_REASON_MAP.drainTimeout : FACTORY_DROP_REASON_MAP.afterEnd;
+      for (const entry of core.narrator?.queue?.entryList ?? []) addDrop({ record: recordBySeq.get(entry.captionSeq), reason: queueReason });
       core.narrationScheduler?.reset();
       core.narrator?.queue?.clear();
     },

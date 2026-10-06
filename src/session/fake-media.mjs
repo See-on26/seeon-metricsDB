@@ -101,7 +101,9 @@ export class FakeMediaElement {
 // StreamDelaySource(stream-delay-source.js:25-171) 대역. MSE 버퍼 끝 대신 영상 시각을 200ms timeslice 로 내린 값을 라이브 끝으로 쓴다.
 // 영상이 끝나면 꼬리 모드로 라이브 끝을 영상 길이에 묶지 않고 가상 시각대로 계속 흘린다. 실험실은 끝난 플레이어를 계속 캡처해
 // 라이브 끝이 계속 자라므로 밀린 원음이 1배속으로 이어진다. 끝 순간 초과 지연이 뛰면 끝 직후 캡션이 버려지고 끝 구간이 빨라진다.
-// 지연 재생 요소는 원음이 끝나는 영상 길이에서 끝난다.
+// 지연 재생 요소는 원음이 끝나는 영상 길이에서 끝난다. 끝난 뒤에는 라이브 끝을 그 순간 값으로 묶는다. 실험실 지연 재생은 끝 뒤
+// 캡처분을 이어 틀어 초과 지연이 그대로인데, 공장 요소는 멈춰 있어 라이브 끝만 흐르면 초과 지연이 끝없이 커지고 끝 구간 캡션이
+// 조금만 늦어도 excess_delay 로 버려진다(실험실은 튼다).
 export class FakeDelaySource {
   constructor({ clock, getVideoTimeMs, mediaDurationMs, targetDelayMs, timesliceMs = STREAM_TIMESLICE_MS, onElementChange = () => {} }) {
     this.clock = clock;
@@ -113,14 +115,19 @@ export class FakeDelaySource {
     this.element = null;
     this.recorderStartVideoTimeMs = 0;
     this.isTailMode = false;
+    this.endedLiveTimeMs = null;
   }
 
   start() {
     this.recorderStartVideoTimeMs = this.getVideoTimeMs();
+    this.endedLiveTimeMs = null;
     this.element = new FakeMediaElement({
       clock: this.clock,
       getMaxMediaMs: () => this.mediaDurationMs - this.recorderStartVideoTimeMs,
-      onChange: (event) => this.onElementChange({ ...event, mediaMs: event.mediaMs + this.recorderStartVideoTimeMs }),
+      onChange: (event) => {
+        if (event.kind === 'ended') this.endedLiveTimeMs = this.getLiveTimeMs();
+        this.onElementChange({ ...event, mediaMs: event.mediaMs + this.recorderStartVideoTimeMs });
+      },
     });
     return this.element;
   }
@@ -128,6 +135,7 @@ export class FakeDelaySource {
   getElement() { return this.element; }
 
   getLiveTimeMs() {
+    if (this.endedLiveTimeMs !== null) return this.endedLiveTimeMs;
     const capturedMs = this.isTailMode ? this.getVideoTimeMs() : Math.min(this.getVideoTimeMs(), this.mediaDurationMs);
     const recordedMs = Math.max(0, capturedMs - this.recorderStartVideoTimeMs);
     return Math.floor(recordedMs / this.timesliceMs) * this.timesliceMs + this.recorderStartVideoTimeMs;

@@ -25,9 +25,11 @@ export function killTrackedChildren() {
   trackedChildSet.clear();
 }
 
-export function runBinary({ binaryPath, argList, inputBuffer = null }) {
+// signal 을 주면 중단할 때 그 프로세스만 SIGKILL 로 죽이고 AbortError 로 거부한다(멈춘 ffmpeg 를 실제 시간 상한으로 끊을 때).
+export function runBinary({ binaryPath, argList, inputBuffer = null, signal = null }) {
   return new Promise((resolve, reject) => {
-    const child = spawnTracked(binaryPath, argList, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const abortOption = signal ? { signal, killSignal: 'SIGKILL' } : {};
+    const child = spawnTracked(binaryPath, argList, { stdio: ['pipe', 'pipe', 'pipe'], ...abortOption });
     const stdoutList = [];
     const stderrList = [];
     child.stdout.on('data', (chunk) => stdoutList.push(chunk));

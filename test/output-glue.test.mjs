@@ -255,6 +255,22 @@ test('배수 뒤 도착한 해설은 after_end 로 버리고, stop 은 재생 �
   assert.deepEqual(harness.warnList, []);
 });
 
+test('배수 상한에 닿아 멈추면 영상 안 자리의 남은·늦게 온 해설은 drain_timeout, 영상 끝 뒤 자리는 after_end 로 버린다', async () => {
+  const harness = setupOutput({ mediaDurationMs: 20000 });
+  harness.outputGlue.handleCaptionEvent({ payload: buildCaption({ text: '영상 안 예약', eventVideoTimeMs: 15000 }), requestContext });
+  harness.outputGlue.handleCaptionEvent({ payload: buildCaption({ text: '영상 끝 뒤 예약', eventVideoTimeMs: 21000 }), requestContext });
+  await harness.clock.runUntil({ isDone: () => harness.ctx.core.narrationScheduler.pendingCount === 2 });
+  harness.outputGlue.dropPendingAfterEnd({ isDrainTimedOut: true });
+  harness.outputGlue.handleCaptionEvent({ payload: buildCaption({ text: '늦게 온 영상 안 해설', eventVideoTimeMs: 12000 }), requestContext });
+  harness.outputGlue.handleCaptionEvent({ payload: buildCaption({ text: '늦게 온 영상 끝 뒤 해설', eventVideoTimeMs: 25000 }), requestContext });
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getDropRecordList().length === 4, deadlineElapsedMs: harness.clock.elapsedMs() + 5000 });
+  assert.deepEqual(harness.outputGlue.getDropRecordList().map(({ text, reason }) => [text, reason]), [
+    ['영상 안 예약', 'drain_timeout'], ['영상 끝 뒤 예약', 'after_end'],
+    ['늦게 온 영상 안 해설', 'drain_timeout'], ['늦게 온 영상 끝 뒤 해설', 'after_end'],
+  ]);
+  assert.deepEqual(harness.warnList, []);
+});
+
 test('영상 끝 직후 도착한 캡션은 excess_delay 로 버려지지 않고 재생되며, 끝 구간 원음이 1.5배속으로 뛰지 않는다', async () => {
   const harness = setupOutput({ mediaDurationMs: 20000 });
   const { core } = harness.ctx;
@@ -271,6 +287,23 @@ test('영상 끝 직후 도착한 캡션은 excess_delay 로 버려지지 않고
   assert.ok(adPlay.playedMediaMs >= 18000 && adPlay.playedMediaMs <= 18200, `재생 위치 ${adPlay.playedMediaMs}`);
   assert.ok(rateList.length > 20, `표본 ${rateList.length}개`);
   assert.equal(Math.max(...rateList), 1);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('지연 재생 요소가 끝난 지 6초 넘어 도착한 끝 구간 캡션도 excess_delay 로 버리지 않고 끝 자리에 재생한다', async () => {
+  const harness = setupOutput({ mediaDurationMs: 20000 });
+  const { core } = harness.ctx;
+  harness.clock.setTimeout(() => core.delaySource.enterTailMode(), 20000);
+  deliverAt(harness, 37000, buildCaption({ text: '끝 구간 늦은 해설', eventVideoTimeMs: 19000 }));
+  await harness.clock.runUntil({
+    isDone: () => harness.outputGlue.getAdPlayList().length + harness.outputGlue.getDropRecordList().length === 1, deadlineElapsedMs: 60000,
+  });
+  assert.equal(core.delayBuffer.delayedVideo.ended, true);
+  assert.deepEqual(harness.outputGlue.getDropRecordList(), []);
+  const [adPlay] = harness.outputGlue.getAdPlayList();
+  assert.equal(Math.round(adPlay.playedMediaMs), 20000);
+  assert.ok(adPlay.atElapsedMs >= 37000);
+  assert.ok(core.delayBuffer.getExcessMs() < 1000, `끝난 뒤 초과 지연이 자라지 않는다: ${core.delayBuffer.getExcessMs()}`);
   assert.deepEqual(harness.warnList, []);
 });
 

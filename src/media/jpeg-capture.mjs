@@ -29,11 +29,11 @@ export function buildJpegCaptureArgList({ filePath, timeMs, normRect = null, qsc
   ];
 }
 
-export async function captureJpeg({ filePath, timeMs, durationMs, normRect = null, ffmpegPath, quality = CROP_JPEG_QUALITY }) {
+export async function captureJpeg({ filePath, timeMs, durationMs, normRect = null, ffmpegPath, quality = CROP_JPEG_QUALITY, signal = null }) {
   if (!(durationMs > 0)) throw new Error(`JPEG 캡처에 영상 길이가 없다: ${durationMs}`);
   const clampedMs = Math.max(0, Math.min(timeMs, durationMs - LAST_FRAME_MARGIN_MS));
   const buffer = await runBinary({
-    binaryPath: ffmpegPath, argList: buildJpegCaptureArgList({ filePath, timeMs: clampedMs, normRect, qscale: toMjpegQscale(quality) }),
+    binaryPath: ffmpegPath, argList: buildJpegCaptureArgList({ filePath, timeMs: clampedMs, normRect, qscale: toMjpegQscale(quality) }), signal,
   });
   return buffer.length ? buffer : null;
 }
