@@ -218,3 +218,15 @@ test('실제 fetch 가 실패하면 undici 가 cause 에 둔 원인(코드·문�
     await new Promise((resolve) => { silentServer.close(resolve); });
   }
 });
+
+test('주소에 사용자 정보(user:pass@)가 있으면 undici 가 그 주소를 오류 문구에 담아 거부하는데, 기록에는 비밀번호를 지운 문구만 남긴다', async () => {
+  // undici 는 요청을 만들 때 거부하므로 연결을 시도하지 않는다. 포트는 쓰지 않는 9 다.
+  const ttsUrl = 'http://user:secretpw@127.0.0.1:9/tts';
+  const scoped = createScopedFetch({ clock: createVirtualClock(), pipelineConfig: { ...pipelineConfig, ttsUrl }, requestContextStorage: createRequestContextStorage() });
+  await assert.rejects(scoped.fetch(ttsUrl, { method: 'POST' }), /secretpw/, '던지는 오류는 제품에 그대로 간다');
+  const [record] = scoped.getCallLog();
+  assert.equal(record.service, 'tts');
+  assert.match(record.errorMessage, /credentials: http:\/\/127\.0\.0\.1:9\/tts/);
+  assert.equal(record.errorMessage.includes('secretpw'), false);
+  assert.equal(record.errorMessage.includes('user:'), false);
+});

@@ -1,6 +1,14 @@
 import os from 'node:os';
 import { runVideoJob } from './run-video-job.mjs';
 import { killTrackedChildren } from '../media/ffmpeg.mjs';
+import { redactUrlCredential } from '../util/redact-url-credential.mjs';
+
+// 제품·공장 콘솔 출력은 그대로 <영상>.log 로 간다. 서비스 주소에 넣은 비밀번호가 오류 문구(undici 의 거부 문구 등)에 실려
+// 로그에 남지 않게 쓰기 전에 지운다. console 은 글로 쓰므로 글만 고친다.
+for (const stream of [process.stdout, process.stderr]) {
+  const write = stream.write.bind(stream);
+  stream.write = (chunk, ...restList) => write(typeof chunk === 'string' ? redactUrlCredential(chunk) : chunk, ...restList);
+}
 
 // 터미널 Ctrl-C 는 프로세스 그룹 전체(CLI·워커·ffmpeg)에 SIGINT 를 보낸다. 워커는 그 SIGINT 로 죽지 않는다.
 // 멈춤은 부모(워커 풀)가 SIGTERM 으로 보내고, 부모가 그 결과를 영상마다 거둬 manifest 에 중단으로 남긴다.

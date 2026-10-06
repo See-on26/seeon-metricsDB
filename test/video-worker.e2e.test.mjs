@@ -203,3 +203,44 @@ test('워커는 작업 폴더 자리에 공장이 만들지 않은 같은 이름
   assert.deepEqual(fs.readdirSync(userDir), ['notes.txt']);
   assert.equal(fs.existsSync(path.join(dirPath, 'lecture_SEEON_AD.mp3')), false);
 });
+
+// 워커 환경만 바꾼다. 같은 mock 서버를 가리키되 주소에 사용자 정보를 넣어 undici 가 요청을 만들 때 거부하게 한다.
+function runWorkerWithEnv({ job, outDir, env }) {
+  return new Promise((resolve, reject) => {
+    const child = fork(WORKER_PATH, [], { execArgv: ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    let result = null;
+    let logText = '';
+    child.stdout.on('data', (chunk) => { logText += chunk; });
+    child.stderr.on('data', (chunk) => { logText += chunk; });
+    child.on('message', (message) => {
+      if (message.type === 'failed') result = { status: 'failed', message: message.message };
+      if (message.type === 'done') result = message.result;
+    });
+    child.on('exit', (code) => (result ? resolve({ ...result, logText, code }) : reject(new Error(`워커가 결과 없이 끝남(${code}): ${logText.slice(-1500)}`))));
+    child.send({ type: 'run', job, outDir, runConcurrency: 1 });
+  });
+}
+
+test('TTS 주소에 비밀번호가 들어 있으면 결과 JSON·실패 문구·워커 로그(제품 콘솔 포함)에는 비밀번호를 지운 주소만 남는다', { timeout: 180000 }, async () => {
+  const dirPath = makeTempDir('factory-e2e-credential-');
+  const filePath = await createTestClip({
+    dirPath, fileName: 'deck.mp4', width: 640, height: 360,
+    colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
+  });
+  const outDir = path.join(dirPath, 'out');
+  const ttsUrl = new URL(mock.urlEnv.SEEON_TTS_URL);
+  ttsUrl.username = 'user';
+  ttsUrl.password = 'secretpw';
+  const result = await runWorkerWithEnv({
+    job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir,
+    env: { ...WORKER_ENV, SEEON_TTS_URL: ttsUrl.href },
+  });
+  assert.equal(result.status, 'failed', result.logText.slice(-2000));
+  assert.match(result.message, /TTS 장애/);
+  const reportText = fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8');
+  assert.match(JSON.parse(reportText).incompleteReasonList[0].message, /credentials: http:\/\/127\.0\.0\.1:\d+\/tts/);
+  assert.match(result.logText, /TTS 실패\(텍스트만 전송\)/, '제품 콘솔 줄도 워커 로그로 간다');
+  for (const [name, text] of [['JSON', reportText], ['실패 문구', result.message], ['워커 로그', result.logText]]) {
+    assert.equal(text.includes('secretpw'), false, `${name} 에 비밀번호가 남았다`);
+  }
+});

@@ -12,6 +12,7 @@ import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
 import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
 import { formatWarningBrief } from '../runner/result-health.mjs';
+import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 import { readResultIdentity } from '../runner/result-identity.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
@@ -148,7 +149,8 @@ export async function runFactoryCli({
   const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkService, runVersion });
   const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkService, startTunnel, log });
   if (preflight.problemList.length) {
-    for (const problem of preflight.problemList) log.error(`[factory] 시작 전 점검 실패: ${problem}`);
+    // 터널 모듈 오류 등 바깥 문구에는 주소가 실릴 수 있어 사용자 정보를 지운다.
+    for (const problem of preflight.problemList) log.error(`[factory] 시작 전 점검 실패: ${redactUrlCredential(problem)}`);
     await tunnel?.stop();
     return 1;
   }
@@ -253,5 +255,5 @@ if (isEntryPoint()) {
   loadFactoryEnv();
   runFactoryCli({ argList: process.argv.slice(2) })
     .then((exitCode) => { process.exitCode = exitCode; })
-    .catch((error) => { console.error(`[factory] ${error.message}`); process.exitCode = 1; });
+    .catch((error) => { console.error(`[factory] ${redactUrlCredential(error.message)}`); process.exitCode = 1; });
 }

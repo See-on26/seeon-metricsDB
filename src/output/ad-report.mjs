@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { PIECE_KIND_MAP, summarizeTimeline } from '../session/playback-recorder.mjs';
 import { computeServiceStats } from '../clock/scoped-fetch.mjs';
+import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 
 // 필드 이름은 실험실 ad-timeline.json(src/main/lab/export/ad-timeline.js)과 맞춘다. 비교 도구가 두 기록을 같은 이름으로 읽는다.
 export const AID_MAP = { page_transition: 'A1', deixis: 'A2', interpretation: 'A3', visual_description: 'A4', user_command: 'Q', speaker_identity: 'S' };
@@ -21,25 +22,11 @@ export const REPORT_MODEL_CONFIG_KEY_LIST = [
   'isVlmFallbackEnabled', 'vlmFallbackModelId', 'hasBedrockCredentials',
 ];
 
-// 서비스 주소에 사용자 정보(user:pass@)를 넣었으면 지운다. 주소가 아니거나 사용자 정보가 없으면 그대로 둔다.
-function stripUrlCredential(value) {
-  if (typeof value !== 'string' || !value.includes('@')) return value;
-  try {
-    const url = new URL(value);
-    if (!url.username && !url.password) return value;
-    url.username = '';
-    url.password = '';
-    return url.toString();
-  } catch {
-    return value;
-  }
-}
-
-// 제품 모델 설정에서 허용 목록의 이름만 골라 기록용으로 만든다.
+// 제품 모델 설정에서 허용 목록의 이름만 골라 기록용으로 만든다. 서비스 주소에 넣은 사용자 정보(user:pass@)는 지운다.
 export function buildReportModelConfig({ modelConfig }) {
   return Object.fromEntries(REPORT_MODEL_CONFIG_KEY_LIST
     .filter((key) => Object.hasOwn(modelConfig, key))
-    .map((key) => [key, stripUrlCredential(modelConfig[key])]));
+    .map((key) => [key, redactUrlCredential(modelConfig[key])]));
 }
 
 function parseAnchorText(summary) {

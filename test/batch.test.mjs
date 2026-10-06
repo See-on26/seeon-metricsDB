@@ -153,6 +153,19 @@ test('워커 풀: 워커를 띄우다 바로 던져도 실패로 기록하고, �
   assert.deepEqual(await runWorkerPool({ jobList: [], concurrency: 3, startWorker: () => assert.fail('부르지 않는다') }), []);
 });
 
+test('워커 풀: 실패 문구에 사용자 정보가 든 주소가 있으면 manifest·터미널로 가기 전에 지운다', async () => {
+  const resultList = await runWorkerPool({
+    jobList: [{ videoId: 'a', outStem: 'a' }, { videoId: 'b', outStem: 'b' }], concurrency: 2,
+    startWorker: (job) => {
+      if (job.videoId === 'a') throw new Error('터널 주소 http://user:secretpw@gpu.local:8801 에 닿지 못했다');
+      return { kill() {}, promise: Promise.reject(new Error('결과가 불완전하다 — TTS 장애 — credentials: http://user:secretpw@127.0.0.1:9/tts')) };
+    },
+  });
+  assert.deepEqual(resultList.map((result) => result.errorMessage), [
+    '터널 주소 http://gpu.local:8801 에 닿지 못했다', '결과가 불완전하다 — TTS 장애 — credentials: http://127.0.0.1:9/tts',
+  ]);
+});
+
 test('워커가 결과 없이 죽으면(종료 코드 137) 실패로 기록하고 로그 파일을 남긴다', async () => {
   const outDir = makeDir('crash');
   const logPath = path.join(outDir, 'v.log');

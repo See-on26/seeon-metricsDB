@@ -1,3 +1,5 @@
+import { redactUrlCredential } from '../util/redact-url-credential.mjs';
+
 // judge 는 탐지 단계 경량 LLM 판정(통합 라우터·무발화·지시 판정)이 GPU 서버로 보낸 호출이다. Bedrock 으로 넘어간 판정은 bedrock 에 든다.
 export const SERVICE_MAP = { vlm: 'vlm', judge: 'judge', asr: 'asr', tts: 'tts', embed: 'embed', bedrock: 'bedrock', other: 'other' };
 
@@ -8,9 +10,10 @@ const NULL_BODY_STATUS_LIST = [204, 205, 304];
 const IMAGE_PART_TOKEN = '"image_url"';
 
 // undici 는 연결 거부·DNS·TLS 실패를 모두 'fetch failed' 로 던지고 실제 원인을 cause 에 둔다. 원인까지 붙여 기록한다.
+// 이 문구는 결과 JSON·manifest 로 나가므로 주소의 사용자 정보는 지운다(undici 는 user:pass@ 주소를 그대로 문구에 담아 거부한다).
 function describeFetchError(error) {
   const causeText = [error.cause?.code, error.cause?.message].filter(Boolean).join(': ');
-  return causeText ? `${error.message} (${causeText})` : error.message;
+  return redactUrlCredential(causeText ? `${error.message} (${causeText})` : error.message);
 }
 
 function toOriginPath(urlText) {

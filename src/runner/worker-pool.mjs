@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mapWithConcurrency } from '../util/map-with-concurrency.mjs';
+import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 
 const DEFAULT_WORKER_PATH = fileURLToPath(new URL('./video-worker.mjs', import.meta.url));
 // SIGTERM 뒤 워커가 띄운 ffmpeg 를 정리하고 끝날 틈. 그 안에 안 끝나면 SIGKILL.
@@ -147,7 +148,8 @@ export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent
             activeWorkerSet.delete(worker);
           }
         } catch (error) {
-          result = { videoId: job.videoId, outStem: job.outStem, status: 'failed', errorMessage: error.message };
+          // 실패 문구는 manifest·summary·터미널로 나가므로 주소의 사용자 정보를 지운다.
+          result = { videoId: job.videoId, outStem: job.outStem, status: 'failed', errorMessage: redactUrlCredential(error.message) };
         }
         onEvent({ type: 'end', job, result });
         return result;

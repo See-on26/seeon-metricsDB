@@ -151,6 +151,15 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
   });
   assert.equal(exitCode, 1);
   assert.ok(lineList.includes('[factory] 시작 전 점검 실패: GPU 터널이 제때 연결되지 않았다'), lineList.join('\n'));
+
+  const secret = createLogCollector();
+  assert.equal(await runFactoryCli({
+    argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-secret'), 'run')], env: BASE_ENV, log: secret.log, workerPath: FAKE_WORKER_PATH,
+    checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
+    startTunnel: async () => { throw new Error('원격 주소 http://user:secretpw@gpu.local:8801 로 터널을 열지 못했다'); },
+  }), 1);
+  assert.ok(secret.lineList.includes('[factory] 시작 전 점검 실패: 원격 주소 http://gpu.local:8801 로 터널을 열지 못했다'), secret.lineList.join('\n'));
+  assert.equal(secret.lineList.join('\n').includes('secretpw'), false);
 });
 
 test('CLI: 닫힌 포트를 제품 터널로 열면 다시 점검해 돌리고, 끝나면 터널을 닫는다', async () => {
