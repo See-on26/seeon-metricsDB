@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,10 +28,23 @@ function makeInputDir(nameList) {
   return dirPath;
 }
 
-function createLogCollector() {
+function createLogCollector({ onLine = () => {} } = {}) {
   const lineList = [];
-  const push = (...partList) => lineList.push(partList.join(' '));
+  const push = (...partList) => {
+    const line = partList.join(' ');
+    lineList.push(line);
+    onLine(line);
+  };
   return { lineList, log: { log: push, error: push, warn: push } };
+}
+
+// 가짜 워커가 남기는 것과 같은 모양의 끝난 결과(mp3 + isComplete JSON)를 미리 둔다.
+function writeDonePair({ outDir, outStem, videoId, filePath, language = 'auto', isPageTransitionIncluded = false }) {
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, `${outStem}_SEEON_AD.mp3`), 'old mp3');
+  fs.writeFileSync(path.join(outDir, `${outStem}_SEEON_AD.json`), JSON.stringify({
+    isComplete: true, video: { videoId, file: filePath, language }, config: { isPageTransitionIncluded },
+  }));
 }
 
 const readJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -71,7 +85,7 @@ test('CLI: 영상마다 워커를 띄워 manifest·summary 를 쓰고, 실패가
 
   const rerun = createLogCollector();
   assert.equal(await runFactoryCli({
-    argList: ['--input', inputDir, '--out', outDir, '--language', 'en'], env: BASE_ENV, log: rerun.log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    argList: ['--input', inputDir, '--out', outDir, '--language', 'en', '--include-page-transition'], env: BASE_ENV, log: rerun.log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
   }), 1);
   const rerunManifest = readJson(path.join(outDir, 'manifest.json'));
   assert.deepEqual(rerunManifest.counts, { total: 4, done: 2, failed: 2, skipped: 2 });
@@ -114,7 +128,7 @@ test('CLI: GPU 포트가 닫혀 있고 터널도 못 열면 이유를 찍고 워
   });
   assert.equal(exitCode, 1);
   assert.equal(tunnelCallCount, 1);
-  assert.ok(lineList.some((line) => line.startsWith('[factory] GPU 포트 닫힘(VLM 127.0.0.1:9, ASR 127.0.0.1:9, TTS 127.0.0.1:9, EMBED 127.0.0.1:9)')), lineList.join('\n'));
+  assert.ok(lineList.some((line) => line.startsWith('[factory] GPU 포트 닫힘(VLM 127.0.0.1:9, ASR 127.0.0.1:9, TTS 127.0.0.1:9, TTS_LONG 127.0.0.1:9, EMBED 127.0.0.1:9)')), lineList.join('\n'));
   assert.ok(lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: VLM 127.0.0.1:9')), lineList.join('\n'));
   assert.equal(fs.existsSync(outDir), false, '점검에 실패하면 출력 폴더를 만들지 않는다');
 });
@@ -183,4 +197,97 @@ test('CLI: 처리할 영상이 없으면 종료 코드 1, 잘못된 인자는 Er
   assert.equal(await runFactoryCli({ argList: ['--input', makeInputDir(['notes.txt'])], env: BASE_ENV, log, ...PASSING_PREFLIGHT }), 1);
   assert.ok(lineList.includes('[factory] 처리할 영상이 없다'));
   await assert.rejects(runFactoryCli({ argList: ['--input', 'x', '--language', 'jp'], env: BASE_ENV, log }), /ko·en·auto/);
+});
+
+test('CLI: 워커를 띄우기 전에 이전 완료 표시를 지워, --force 재실행이 도중에 죽으면 다음 실행이 다시 돈다', async () => {
+  const inputDir = makeInputDir(['c-crash.mp4']);
+  const outDir = path.join(makeDir('stale'), 'run');
+  const pair = { outDir, outStem: 'c-crash', videoId: 'c-crash', filePath: path.join(inputDir, 'c-crash.mp4') };
+  writeDonePair(pair);
+  const runOnce = (extraArgList) => runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, ...extraArgList], env: BASE_ENV, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  });
+  assert.equal(await runOnce([]), 0, '지금 작업과 같은 끝난 결과면 건너뛴다');
+  assert.equal(fs.existsSync(path.join(outDir, 'c-crash.log')), false);
+  assert.equal(await runOnce(['--force']), 1);
+  assert.equal(fs.existsSync(path.join(outDir, 'c-crash_SEEON_AD.json')), false, '죽은 워커 뒤에 이전 완료 표시가 남지 않는다');
+  assert.equal(fs.existsSync(path.join(outDir, 'c-crash_SEEON_AD.mp3')), false);
+  assert.equal(await runOnce([]), 1);
+  assert.equal(countStart({ outDir, outStem: 'c-crash' }), 2, '--force 없이 다시 돌려도 다시 돈다');
+});
+
+test('CLI: 같은 출력 폴더라도 언어·전환 고지 설정이 바뀐 영상은 다시 돈다', async () => {
+  const inputDir = makeInputDir(['a.mp4']);
+  const outDir = path.join(makeDir('config-change'), 'run');
+  const runOnce = (extraArgList) => runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, ...extraArgList], env: BASE_ENV, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  });
+  assert.equal(await runOnce(['--language', 'en']), 0);
+  assert.equal(await runOnce(['--language', 'ko']), 0);
+  assert.equal(countStart({ outDir, outStem: 'a' }), 2, '언어가 바뀌면 다시 돈다');
+  assert.equal(await runOnce(['--language', 'ko']), 0);
+  assert.equal(countStart({ outDir, outStem: 'a' }), 2, '같으면 건너뛴다');
+  assert.equal(await runOnce(['--language', 'ko', '--include-page-transition']), 0);
+  assert.equal(countStart({ outDir, outStem: 'a' }), 3, '전환 고지 설정이 바뀌면 다시 돈다');
+});
+
+test('CLI: --timeout-min 을 넘긴 영상은 워커를 멈추고 시간 초과로 기록한다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['x-hang.mp4', 'y.mp4']);
+  const outDir = path.join(makeDir('timeout'), 'run');
+  const exitCode = await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, '--timeout-min', '0.005'], env: BASE_ENV, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  });
+  assert.equal(exitCode, 1);
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.deepEqual(manifest.videoList.map((video) => [video.videoId, video.status]), [['x-hang', 'failed'], ['y', 'done']]);
+  assert.match(manifest.videoList[0].errorMessage, /^시간 초과/);
+  assert.match(fs.readFileSync(path.join(outDir, 'x-hang.log'), 'utf8'), /SIGTERM 받음/);
+});
+
+test('CLI: 영상 하나가 끝날 때마다 manifest·summary 를 고쳐 써 중간에 죽어도 기록이 남는다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b-slow.mp4']);
+  const outDir = path.join(makeDir('incremental'), 'run');
+  let manifestAtFirstEnd = null;
+  const { log } = createLogCollector({
+    onLine: (line) => {
+      if (!manifestAtFirstEnd && line.startsWith('[factory] ✔')) manifestAtFirstEnd = readJson(path.join(outDir, 'manifest.json'));
+    },
+  });
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, '--concurrency', '2'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 0);
+  assert.deepEqual(manifestAtFirstEnd.videoList.map((video) => [video.videoId, video.status]), [['a', 'done'], ['b-slow', 'not_run']]);
+  assert.equal(manifestAtFirstEnd.endedAt, null);
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.deepEqual(manifest.videoList.map((video) => video.status), ['done', 'done']);
+  assert.ok(manifest.endedAt);
+  assert.deepEqual(fs.readdirSync(outDir).filter((name) => name.endsWith('.tmp')), []);
+});
+
+test('CLI: SIGINT 를 받으면 돌던 워커를 멈추고 남은 영상은 띄우지 않으며 manifest 를 쓰고 130 으로 끝난다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a-hang.mp4', 'b-hang.mp4', 'c.mp4']);
+  const outDir = path.join(makeDir('signal'), 'run');
+  const signalSource = new EventEmitter();
+  let startCount = 0;
+  const { lineList, log } = createLogCollector({
+    onLine: (line) => {
+      if (!line.startsWith('[factory] ▶')) return;
+      startCount += 1;
+      if (startCount === 2) setTimeout(() => signalSource.emit('SIGINT', 'SIGINT'), 150);
+    },
+  });
+  const exitCode = await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, '--concurrency', '2'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, signalSource, ...PASSING_PREFLIGHT,
+  });
+  assert.equal(exitCode, 130);
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.equal(manifest.interruptedBy, 'SIGINT');
+  assert.deepEqual(manifest.videoList.map((video) => [video.videoId, video.status, video.errorMessage]), [
+    ['a-hang', 'failed', '중단됨(SIGINT)'], ['b-hang', 'failed', '중단됨(SIGINT)'], ['c', 'not_run', undefined],
+  ]);
+  assert.ok(manifest.endedAt);
+  assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), /SIGINT 로 중단/);
+  assert.equal(fs.existsSync(path.join(outDir, 'c.log')), false, '중단 뒤에는 새 워커를 띄우지 않는다');
+  assert.ok(lineList.some((line) => line.startsWith('[factory] SIGINT 받음')), lineList.join('\n'));
+  assert.equal(signalSource.listenerCount('SIGINT') + signalSource.listenerCount('SIGTERM'), 0, '실행이 끝나면 신호 처리기를 뗀다');
 });

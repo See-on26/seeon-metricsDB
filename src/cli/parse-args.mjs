@@ -9,8 +9,14 @@ function readPositiveInteger({ value, name }) {
   return number;
 }
 
+function readPositiveNumber({ value, name }) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) throw new Error(`${name} 은 0 보다 큰 수여야 한다: ${value}`);
+  return number;
+}
+
 export function parseFactoryArgs(argList) {
-  const options = { input: null, out: null, concurrency: DEFAULT_CONCURRENCY, language: 'auto', isPageTransitionIncluded: false, isForced: false, limit: null };
+  const options = { input: null, out: null, concurrency: DEFAULT_CONCURRENCY, language: 'auto', isPageTransitionIncluded: false, isForced: false, limit: null, timeoutMin: null };
   for (let index = 0; index < argList.length; index += 1) {
     const arg = argList[index];
     const readValue = () => {
@@ -24,6 +30,7 @@ export function parseFactoryArgs(argList) {
     else if (arg === '--concurrency') options.concurrency = readPositiveInteger({ value: readValue(), name: '--concurrency' });
     else if (arg === '--limit') options.limit = readPositiveInteger({ value: readValue(), name: '--limit' });
     else if (arg === '--language') options.language = readValue();
+    else if (arg === '--timeout-min') options.timeoutMin = readPositiveNumber({ value: readValue(), name: '--timeout-min' });
     else if (arg === '--include-page-transition') options.isPageTransitionIncluded = true;
     else if (arg === '--force') options.isForced = true;
     else throw new Error(`모르는 인자: ${arg}`);

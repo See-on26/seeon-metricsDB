@@ -21,10 +21,15 @@ export function checkTcpPort({ host, port, timeoutMs = 2000 }) {
   });
 }
 
-// GPU 서비스 4개의 주소에서 포트를 열어 보고 닫힌 것만 '<이름> <호스트>:<포트>' 로 돌려준다. 포트를 적지 않은 주소는 프로토콜 기본 포트다.
+// 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함).
+const GPU_SERVICE_URL_KEY_LIST = [['VLM', 'vlmUrl'], ['ASR', 'asrUrl'], ['TTS', 'ttsUrl'], ['TTS_LONG', 'ttsLongUrl'], ['EMBED', 'embedUrl']];
+
+// GPU 서비스 주소에서 포트를 열어 보고 닫힌 것만 '<이름> <호스트>:<포트>' 로 돌려준다. 포트를 적지 않은 주소는 프로토콜 기본 포트, 설정에 없는 주소는 건너뛴다.
 export async function listClosedPorts({ pipelineConfig, checkPort = checkTcpPort }) {
   const closedPortList = [];
-  for (const [label, url] of [['VLM', pipelineConfig.vlmUrl], ['ASR', pipelineConfig.asrUrl], ['TTS', pipelineConfig.ttsUrl], ['EMBED', pipelineConfig.embedUrl]]) {
+  for (const [label, key] of GPU_SERVICE_URL_KEY_LIST) {
+    const url = pipelineConfig[key];
+    if (!url) continue;
     const { hostname, port, protocol } = new URL(url);
     const portNumber = Number(port) || DEFAULT_PORT_BY_PROTOCOL_MAP[protocol];
     if (!(await checkPort({ host: hostname, port: portNumber }))) closedPortList.push(`${label} ${hostname}:${portNumber}`);

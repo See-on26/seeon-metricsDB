@@ -2,7 +2,34 @@ import fs from 'node:fs';
 import { buildOutputPathMap } from '../../src/runner/output-paths.mjs';
 
 // video-worker.mjs 와 같은 메시지 규약으로 도는 가짜 워커. 제품 파이프라인 없이 videoId 에 든 낱말로 결과를 고른다.
-// crash → 결과 없이 종료 코드 137, fail → failed 메시지 뒤 종료 1, hang → 끝나지 않음, 그 밖 → progress 뒤 mp3·JSON 을 쓰고 done.
+// crash → 결과 없이 종료 코드 137, fail → failed 메시지 뒤 종료 1,
+// stubborn → SIGTERM 을 무시하고 끝나지 않음, hang → 끝나지 않다가 SIGTERM 에 정리하고 종료 1,
+// slow → 영상 길이 1000ms 를 알린 뒤 500ms 지나 done, 그 밖 → progress 뒤 mp3·JSON 을 쓰고 done.
+// 끝나지 않는 워커도 HANG_LIMIT_MS 뒤에는 스스로 끝내, 멈추기가 회귀해도 테스트 프로세스가 영영 남지 않게 한다.
+const HANG_LIMIT_MS = 30000;
+
+function hangUntilLimit() {
+  setTimeout(() => {
+    console.log('[fake-worker] 안전 상한 — 스스로 끝낸다');
+    process.exit(99);
+  }, HANG_LIMIT_MS);
+}
+
+function writeDoneOutput({ job, outDir }) {
+  const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
+  fs.writeFileSync(pathMap.mp3Path, 'mp3');
+  // AD 기록 JSON 과 같은 자리(video·config)에 작업 정보를 남긴다.
+  fs.writeFileSync(pathMap.jsonPath, JSON.stringify({
+    schemaVersion: 1, isComplete: true,
+    video: { videoId: job.videoId, file: job.filePath, language: job.language },
+    config: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded) },
+  }));
+  return {
+    videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: 2, droppedCount: 1,
+    outputPathMap: { mp3: `${job.outStem}_SEEON_AD.mp3`, json: `${job.outStem}_SEEON_AD.json` },
+  };
+}
+
 process.on('message', (message) => {
   if (message?.type !== 'run') return;
   const { job, outDir } = message;
@@ -16,17 +43,24 @@ process.on('message', (message) => {
     process.send({ type: 'failed', message: `${job.videoId} 영상 스트림이 없다` }, () => process.exit(1));
     return;
   }
+  if (job.videoId.includes('stubborn')) {
+    process.on('SIGTERM', () => console.log('[fake-worker] SIGTERM 무시'));
+    hangUntilLimit();
+    return;
+  }
   if (job.videoId.includes('hang')) {
-    setInterval(() => {}, 1000);
+    process.on('SIGTERM', () => {
+      console.log('[fake-worker] SIGTERM 받음 — 정리하고 끝낸다');
+      process.exit(1);
+    });
+    hangUntilLimit();
+    return;
+  }
+  if (job.videoId.includes('slow')) {
+    process.send({ type: 'progress', videoId: job.videoId, videoTimeMs: 0, durationMs: 1000, adCount: 0 });
+    setTimeout(() => process.send({ type: 'done', result: writeDoneOutput({ job, outDir }) }, () => process.exit(0)), 500);
     return;
   }
   process.send({ type: 'progress', videoId: job.videoId, videoTimeMs: 10000, durationMs: 60000, adCount: 1 });
-  const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
-  fs.writeFileSync(pathMap.mp3Path, 'mp3');
-  fs.writeFileSync(pathMap.jsonPath, JSON.stringify({ isComplete: true }));
-  const result = {
-    videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: 2, droppedCount: 1,
-    outputPathMap: { mp3: `${job.outStem}_SEEON_AD.mp3`, json: `${job.outStem}_SEEON_AD.json` },
-  };
-  process.send({ type: 'done', result }, () => process.exit(0));
+  process.send({ type: 'done', result: writeDoneOutput({ job, outDir }) }, () => process.exit(0));
 });
