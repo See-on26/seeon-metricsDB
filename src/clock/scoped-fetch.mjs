@@ -1,8 +1,11 @@
-export const SERVICE_MAP = { vlm: 'vlm', asr: 'asr', tts: 'tts', embed: 'embed', bedrock: 'bedrock', other: 'other' };
+// judge 는 탐지 단계 경량 LLM 판정(통합 라우터·무발화·지시 판정)이 GPU 서버로 보낸 호출이다. Bedrock 으로 넘어간 판정은 bedrock 에 든다.
+export const SERVICE_MAP = { vlm: 'vlm', judge: 'judge', asr: 'asr', tts: 'tts', embed: 'embed', bedrock: 'bedrock', other: 'other' };
 
 const BEDROCK_HOST_PATTERN = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
 const BEDROCK_MODEL_PATH_PATTERN = /\/model\/([^/]+)\/converse/;
 const NULL_BODY_STATUS_LIST = [204, 205, 304];
+// JSON 문자열 값 안의 따옴표는 이스케이프되므로 이 토큰은 구조에만 나온다. 이미지가 든 VLM 몸통은 파싱하지 않고 거른다.
+const IMAGE_PART_TOKEN = '"image_url"';
 
 function toOriginPath(urlText) {
   const url = new URL(String(urlText));
@@ -11,18 +14,22 @@ function toOriginPath(urlText) {
 
 const stripUsPrefix = (modelId) => String(modelId || '').replace(/^us\./, '');
 
+const MODEL_KEY_BY_SERVICE_MAP = { [SERVICE_MAP.vlm]: 'vlmModel', [SERVICE_MAP.judge]: 'judgeGpuModel' };
+
 export function classifyServiceUrl({ url, pipelineConfig }) {
   const target = new URL(String(url));
   const originPath = `${target.origin}${target.pathname}`;
+  // 판정 GPU 주소가 VLM 과 같으면(제품 기본값) VLM 이 먼저 맞는다. 그 경우는 classifyServiceRequest 가 몸통으로 다시 가른다.
   const serviceUrlList = [
-    [pipelineConfig.vlmUrl, SERVICE_MAP.vlm], [pipelineConfig.asrUrl, SERVICE_MAP.asr],
+    [pipelineConfig.vlmUrl, SERVICE_MAP.vlm], [pipelineConfig.judgeGpuUrl, SERVICE_MAP.judge], [pipelineConfig.asrUrl, SERVICE_MAP.asr],
     [pipelineConfig.ttsUrl, SERVICE_MAP.tts], [pipelineConfig.ttsLongUrl, SERVICE_MAP.tts],
     [pipelineConfig.embedUrl, SERVICE_MAP.embed],
   ];
   const matched = serviceUrlList.find(([serviceUrl]) => serviceUrl && toOriginPath(serviceUrl) === originPath);
   if (matched) {
     const service = matched[1];
-    return { service, modelId: service === SERVICE_MAP.vlm ? pipelineConfig.vlmModel : null, isVlmFallback: false };
+    const modelKey = MODEL_KEY_BY_SERVICE_MAP[service];
+    return { service, modelId: modelKey ? pipelineConfig[modelKey] ?? null : null, isVlmFallback: false };
   }
   if (BEDROCK_HOST_PATTERN.test(target.hostname)) {
     const rawModelId = target.pathname.match(BEDROCK_MODEL_PATH_PATTERN)?.[1];
@@ -32,6 +39,29 @@ export function classifyServiceUrl({ url, pipelineConfig }) {
     return { service: SERVICE_MAP.bedrock, modelId, isVlmFallback };
   }
   return { service: SERVICE_MAP.other, modelId: null, isVlmFallback: false };
+}
+
+// 제품 judge-llm.js 는 OpenAI chat 메시지의 content 를 모두 글 한 덩어리(문자열)로 보내고, vlm-gateway.js 는 이미지가 없는
+// 라벨링·질문 라우팅까지 늘 부품 목록(배열)으로 보낸다. 그래서 "이미지 없음"이 아니라 content 모양으로 판정 요청을 가린다.
+export function isJudgeRequestBody(body) {
+  if (typeof body !== 'string' || body.includes(IMAGE_PART_TOKEN)) return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const messageList = parsed?.messages;
+  return Array.isArray(messageList) && messageList.length > 0 && messageList.every((message) => typeof message?.content === 'string');
+}
+
+// URL 로 가른 뒤, 판정 GPU 주소가 VLM 주소와 같은 호출만 몸통을 보고 판정을 VLM 통계에서 떼어 낸다.
+export function classifyServiceRequest({ url, body, pipelineConfig }) {
+  const classified = classifyServiceUrl({ url, pipelineConfig });
+  const isSharedJudgeUrl = classified.service === SERVICE_MAP.vlm && Boolean(pipelineConfig.judgeGpuUrl)
+    && toOriginPath(pipelineConfig.judgeGpuUrl) === toOriginPath(url);
+  if (!isSharedJudgeUrl || !isJudgeRequestBody(body)) return classified;
+  return { service: SERVICE_MAP.judge, modelId: pipelineConfig.judgeGpuModel ?? null, isVlmFallback: false };
 }
 
 function computePercentile(sortedList, percent) {
@@ -77,7 +107,7 @@ export function createScopedFetch({
   const callLog = [];
 
   async function scopedFetch(input, init) {
-    const { service, modelId, isVlmFallback } = classifyServiceUrl({ url: input, pipelineConfig });
+    const { service, modelId, isVlmFallback } = classifyServiceRequest({ url: input, body: init?.body, pipelineConfig });
     const requestContext = requestContextStorage.getStore() || null;
     const record = {
       service, modelId, isVlmFallback, status: null, errorMessage: null,

@@ -187,7 +187,12 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
     adPlayList: [{ captionSeq: 1, atElapsedMs: 15000, durationMs: 1500, playedMediaMs: 5000 }],
     dropRecordList: [],
     pipelineRecordList: [{ kind: 'narration', ts: sessionStartWallMs + 12000, source: 'deixis', text: '간격 억제된 해설', slideLabel: '1', isEmitted: false, skipReason: 'rate-limited' }],
-    callLog: [{ service: 'asr', elapsedMs: 300, status: 200, errorMessage: null }],
+    callLog: [
+      { service: 'asr', elapsedMs: 300, status: 200, errorMessage: null },
+      { service: 'judge', modelId: 'qwen', elapsedMs: 400, status: 200, errorMessage: null },
+      { service: 'vlm', modelId: 'qwen', elapsedMs: 1200, status: 200, errorMessage: null },
+    ],
+    judgeSourceCountMap: { router: { gpu: 1, bedrock: 0, error: 0 }, silence: { gpu: 0, bedrock: 0, error: 0 }, deixis: { gpu: 0, bedrock: 0, error: 0 } },
     adFileByRef: new Map([[1, 'v1/ad/ad-001.wav']]), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 29000, processingMs: 10000,
   });
   assert.equal(report.isComplete, true);
@@ -200,6 +205,8 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
   assert.deepEqual(report.droppedList.map((drop) => [drop.text, drop.reason, drop.eventMediaMs]), [['못 들은 해설', 'not_played', 8000], ['간격 억제된 해설', 'rate-limited', 12000]]);
   assert.equal(report.output.recoveredMs, 2500);
   assert.equal(report.stats.serviceMap.asr.count, 1);
+  assert.deepEqual([report.stats.serviceMap.judge.count, report.stats.serviceMap.vlm.count], [1, 1], '판정 호출은 VLM 과 따로 센다');
+  assert.deepEqual(report.stats.judgeSourceCountMap.router, { gpu: 1, bedrock: 0, error: 0 });
   assert.equal(report.stats.realtimeFactor, 3);
 });
 
@@ -228,6 +235,7 @@ test('AD 기록: 렌더러 드롭은 그 사유로, 사건 영상 시각이 없�
   assert.deepEqual(ad.trigger, { utterance: '여기 표를 보면', anchor: null, judgeReason: '지시어+표' });
   assert.equal(ad.latencyMs, 1000);
   assert.equal(report.stats.realtimeFactor, null);
+  assert.equal(report.stats.judgeSourceCountMap, null, '판정 집계를 받지 않으면 null');
   assert.deepEqual(report.output, { file: 'v2_SEEON_AD.mp3', renderedDurationMs: 21000, timelineDurationMs: 21000, sourceMediaMs: 20000, adTotalMs: 1000, silenceTotalMs: 0, recoveredMs: 0 });
 });
 

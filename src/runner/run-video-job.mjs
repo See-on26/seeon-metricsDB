@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 import { bootProductPipeline } from '../product/boot-pipeline.mjs';
+import { getJudgeSourceCountMap } from '../product/product-loader.mjs';
 import { readSeeonMeetVersion } from '../product/product-version.mjs';
 import { createVirtualClock } from '../clock/virtual-clock.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
@@ -97,6 +98,7 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
     sessionStartWallMs: sessionResult.sessionStartWallMs, pieceList: sessionResult.pieceList,
     captionRecordList: sessionResult.captionRecordList, adPlayList: sessionResult.adPlayList, dropRecordList: sessionResult.dropRecordList,
     pipelineRecordList: readPipelineRecordList({ recordPath: sessionResult.recordPath }), callLog: scopedFetch.getCallLog(),
+    judgeSourceCountMap: getJudgeSourceCountMap(),
     adFileByRef, outputFileName: path.basename(pathMap.mp3Path), renderedDurationMs, processingMs,
   });
   const incompleteReasonList = buildIncompleteReasonList({ sessionResult });

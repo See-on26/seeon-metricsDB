@@ -41,10 +41,38 @@ function computeMockEmbedding(jpegBuffer) {
   return vector.map((value) => value / norm);
 }
 
+// 제품 판정기(router/*.js)가 parse 하는 모양 그대로의 답. 라우터는 지시 후보 하나, 무발화는 차단, 지시 판정은 통과로 둬
+// 판정 LLM 이 없던 때(라우터 통과·무발화 차단·지시 통과)와 같은 흐름을 낸다.
+const JUDGE_REPLY_MAP = {
+  router: { candidateList: [{ type: 'deixis', subKind: 'simple', reference: 'explicit', anchor: '이' }], blockedReason: null },
+  silence: { cue: false, reason: 'no_cue' },
+  deixis: { caption: true, reason: 'visual_referent' },
+};
+
+// 판정 요청은 system 메시지를 앞에 두고 content 를 문자열로 보낸다(judge-llm.js). VLM 요청은 system 없이 content 가 배열이다.
+// 판정기 종류는 마지막 user 입력의 틀(prompts/unified-router·silence-judge·deixis-judge 의 build*Input)로 가린다.
+function readJudgeKind(parsedBody) {
+  const messageList = Array.isArray(parsedBody?.messages) ? parsedBody.messages : [];
+  if (messageList[0]?.role !== 'system' || typeof messageList[0].content !== 'string') return null;
+  const lastInput = String(messageList.findLast((message) => message.role === 'user')?.content || '');
+  if (lastInput.includes('침묵 직전 발화:')) return 'silence';
+  if (lastInput.includes('지시 발화:')) return 'deixis';
+  if (lastInput.includes('분류(JSON 한 줄):')) return 'router';
+  return 'unknown';
+}
+
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 export async function startMockServices({
   asrScriptList = DEFAULT_ASR_SCRIPT_LIST, ttsDurationMs = 800, vlmGroundingText = '빨간 막대 그래프의 상승 구간',
 } = {}) {
-  const state = { asrIndex: 0, asrStatus: 200, callCountMap: { vlm: 0, asr: 0, tts: 0, embed: 0 } };
+  const state = { asrIndex: 0, asrStatus: 200, callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0 } };
   const serverList = [];
   async function listen(handler) {
     const server = http.createServer((request, response) => { handler(request, response).catch(() => sendJson(response, 500, {})); });
@@ -52,8 +80,17 @@ export async function startMockServices({
     serverList.push(server);
     return `http://127.0.0.1:${server.address().port}`;
   }
+  // 제품은 판정 GPU 주소를 따로 주지 않으면 VLM 주소로 판정 요청을 보낸다. 같은 주소에서 몸통으로 갈라 답한다.
   const vlmOrigin = await listen(async (request, response) => {
     const prompt = (await readBody(request)).toString('utf8');
+    const judgeKind = readJudgeKind(parseJsonOrNull(prompt));
+    if (judgeKind) {
+      state.callCountMap.judge += 1;
+      const reply = JUDGE_REPLY_MAP[judgeKind];
+      if (!reply) { sendJson(response, 500, { error: `모르는 판정 요청(${judgeKind})` }); return; }
+      sendJson(response, 200, { choices: [{ message: { content: JSON.stringify(reply) } }] });
+      return;
+    }
     state.callCountMap.vlm += 1;
     let content = vlmGroundingText;
     if (prompt.includes('그대로 옮겨 적어라')) content = '매출 추이\n2분기 | 120억 원';
