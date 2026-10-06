@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { computeMeterLevel, computeMeterLevelList, createMeterLevelAccumulator, decodeMeterLevelList, readLevelAt } from '../src/media/audio-levels.mjs';
 import { planAsrSegmentList } from '../src/media/asr-segment-plan.mjs';
@@ -218,6 +219,24 @@ test('조각 인코딩은 레벨과 같은 모노 다운믹스(스테레오 ½L+
 
 test('조각 인코더는 채널 수를 받아야 한다(모르면 ffmpeg 기본 다운믹스로 조용히 바뀌지 않게 거부)', () => {
   assert.throws(() => buildSegmentEncodeArgList({ filePath: 'a.mp4', startMs: 0, endMs: 1000 }), /채널 수/);
+});
+
+test('길이 정보가 없는 webm(MediaRecorder 녹화처럼 파이프로 쓴 것)은 다시 담는 방법을 알려 주며 거부한다', async () => {
+  const webmBuffer = await runBinary({
+    binaryPath: ffmpegPath,
+    argList: [
+      '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=160x90:r=10:d=1', '-f', 'lavfi', '-i', 'sine=f=440:d=1',
+      '-c:v', 'libvpx', '-b:v', '100k', '-c:a', 'libopus', '-f', 'webm', 'pipe:1',
+    ],
+  });
+  const filePath = path.join(dirPath, 'recorded.webm');
+  fs.writeFileSync(filePath, webmBuffer);
+  await assert.rejects(probeVideo({ filePath, ffprobePath }), (error) => {
+    assert.match(error.message, /영상 길이를 읽지 못했다/);
+    assert.match(error.message, /-c copy/, '다시 담는 명령을 알려 준다');
+    assert.ok(error.message.includes(filePath));
+    return true;
+  });
 });
 
 test('WAV 길이를 읽는다', () => {
