@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildOutputPathMap } from './output-paths.mjs';
 import { listIdentityMismatch } from './result-identity.mjs';
+import { formatWarningBrief } from './result-health.mjs';
 
 const MANIFEST_FILE_NAME = 'manifest.json';
 const SUMMARY_FILE_NAME = 'summary.txt';
@@ -95,17 +96,23 @@ export function buildManifest({
   };
 }
 
+// 완료 영상 중 경고(부하로 생긴 시간 초과·판정 대체 등)가 있는 것은 수와 ⚠ 로 드러낸다. 자세한 내용은 영상 JSON 의 warningList 에 있다.
 export function formatSummary(manifest) {
   const remainingCount = manifest.counts.total - manifest.counts.done - manifest.counts.failed;
+  const warnedCount = manifest.videoList.filter((video) => video.status === 'done' && video.warningList?.length).length;
   const lineList = [
     `seeon-meet ${manifest.seeonMeet?.commit || '-'}${manifest.seeonMeet?.isDirty ? ' (수정됨)' : ''}`
       + ` · 공장 ${manifest.factory?.commit || '-'}${manifest.factory?.isDirty ? ' (수정됨)' : ''}`,
-    `영상 ${manifest.counts.total} · 완료 ${manifest.counts.done} · 실패 ${manifest.counts.failed} · 건너뜀 ${manifest.counts.skipped}${remainingCount > 0 ? ` · 남음 ${remainingCount}` : ''}`,
+    `영상 ${manifest.counts.total} · 완료 ${manifest.counts.done}${warnedCount ? `(경고 ${warnedCount})` : ''} · 실패 ${manifest.counts.failed}`
+      + ` · 건너뜀 ${manifest.counts.skipped}${remainingCount > 0 ? ` · 남음 ${remainingCount}` : ''}`,
     `시작 ${manifest.startedAt} · 끝 ${manifest.endedAt || '진행 중'}${manifest.interruptedBy ? ` · ${manifest.interruptedBy} 로 중단` : ''}`,
   ];
   for (const video of manifest.videoList) {
     if (video.status === 'failed') lineList.push(`  ✖ ${video.videoId}: ${video.errorMessage}`);
-    else if (video.status === 'done') lineList.push(`  ✔ ${video.videoId}: AD ${video.adCount ?? '-'}개${video.isSkipped ? ' (이전 실행)' : ''}`);
+    else if (video.status === 'done') {
+      const warningText = formatWarningBrief(video.warningList);
+      lineList.push(`  ✔ ${video.videoId}: AD ${video.adCount ?? '-'}개${video.isSkipped ? ' (이전 실행)' : ''}${warningText ? ` ${warningText}` : ''}`);
+    }
   }
   return `${lineList.join('\n')}\n`;
 }

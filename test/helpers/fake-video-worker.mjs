@@ -7,7 +7,7 @@ import { loadPipelineConfig } from '../../src/product/product-loader.mjs';
 // crash → 결과 없이 종료 코드 137, fail → failed 메시지 뒤 종료 1,
 // stubborn → SIGTERM 을 무시하고 끝나지 않음, hang → 끝나지 않다가 SIGTERM 에 정리하고 종료 1,
 // linger → hang 과 같되 SIGTERM 뒤 정리에 LINGER_MS 가 걸림(정리 중에 신호가 더 오는 상황),
-// slow → 영상 길이 1000ms 를 알린 뒤 500ms 지나 done, 그 밖 → progress 뒤 mp3·JSON 을 쓰고 done.
+// slow → 영상 길이 1000ms 를 알린 뒤 500ms 지나 done, warn → 경고(VLM 시간 초과) 를 담아 done, 그 밖 → progress 뒤 mp3·JSON 을 쓰고 done.
 // 끝나지 않는 워커도 HANG_LIMIT_MS 뒤에는 스스로 끝내, 멈추기가 회귀해도 테스트 프로세스가 영영 남지 않게 한다.
 const HANG_LIMIT_MS = 30000;
 const LINGER_MS = 400;
@@ -22,7 +22,10 @@ function hangUntilLimit() {
   }, HANG_LIMIT_MS);
 }
 
+const WARN_WARNING_LIST = [{ code: 'vlm_timeout', count: 4, message: 'VLM 호출 시간 초과 4/16건' }];
+
 function writeDoneOutput({ job, outDir, runConcurrency }) {
+  const warningList = job.videoId.includes('warn') ? WARN_WARNING_LIST : [];
   const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
   fs.writeFileSync(pathMap.mp3Path, 'mp3');
   // AD 기록 JSON 과 같은 자리(video·seeonMeet·factory·config)에 작업 정보·코드 버전·결과 설정을 남긴다.
@@ -31,9 +34,10 @@ function writeDoneOutput({ job, outDir, runConcurrency }) {
     schemaVersion: 1, isComplete: true,
     video: { videoId: job.videoId, file: job.filePath, language: job.language }, ...versionMap,
     config: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded), resultConfig, runConcurrency },
+    incompleteReasonList: [], warningList,
   }));
   return {
-    videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: 2, droppedCount: 1,
+    videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: 2, droppedCount: 1, warningList,
     outputPathMap: { mp3: `${job.outStem}_SEEON_AD.mp3`, json: `${job.outStem}_SEEON_AD.json` },
   };
 }

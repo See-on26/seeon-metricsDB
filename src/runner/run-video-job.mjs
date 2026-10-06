@@ -16,27 +16,11 @@ import { EVAL_PRESET_MAP } from '../session/feature-preset.mjs';
 import { renderOutputMp3 } from '../output/render-mp3.mjs';
 import { buildAdReport, readPipelineRecordList } from '../output/ad-report.mjs';
 import { buildOutputPathMap } from './output-paths.mjs';
-
-export const INCOMPLETE_REASON_MAP = { frameSourceError: 'frame_source_error', frameCaptureFailed: 'frame_capture_failed' };
-
-// 공장 쪽 화면 입력이 실패하면 제품이 했을 판정(슬라이드·포인팅·지시 화면)이 빠져 실험실과 견줄 수 없다. 그런 결과는 완료로 치지 않는다.
-export function buildIncompleteReasonList({ sessionResult }) {
-  const reasonList = [];
-  const { frameSourceError, frameStats } = sessionResult;
-  if (frameSourceError) {
-    reasonList.push({ code: INCOMPLETE_REASON_MAP.frameSourceError, message: frameSourceError.message, videoTimeMs: frameSourceError.videoTimeMs });
-  }
-  if (frameStats?.captureFailCount > 0) reasonList.push({ code: INCOMPLETE_REASON_MAP.frameCaptureFailed, count: frameStats.captureFailCount });
-  return reasonList;
-}
-
-function describeIncompleteReason(reason) {
-  if (reason.code === INCOMPLETE_REASON_MAP.frameSourceError) return `프레임 읽기 실패(${Math.round(reason.videoTimeMs)}ms): ${reason.message}`;
-  return `JPEG 캡처 실패 ${reason.count}건`;
-}
+import { buildIncompleteReasonList, buildWarningList, describeIncompleteReason } from './result-health.mjs';
 
 // 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
-// 화면 입력이 실패한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다. 다시 돌리면 그 영상을 다시 처리한다.
+// 기반 문제(화면 입력 실패·서비스 장애·세션 종료 실패)로 불완전한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다.
+// 다시 돌리면 그 영상을 다시 처리한다. 부하로 생기는 품질 저하(시간 초과·판정 대체 등)는 완료로 두고 warningList 에 남긴다.
 // runConcurrency 는 이번 실행의 동시 수로, 결과 JSON 에 남긴다.
 export async function runVideoJob({ job, outDir, runConcurrency = null, onProgress = () => {}, log = console, openFrameReader = openSampleFrameReader }) {
   const realStartedAt = performance.now();
@@ -90,6 +74,9 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     outPath: pathMap.mp3Path, workDir: pathMap.workDir, sampleRate: probe.audioSampleRate, channelCount: probe.audioChannelCount, ffmpegPath,
   });
   const processingMs = performance.now() - realStartedAt;
+  const callLog = scopedFetch.getCallLog();
+  const judgeSourceCountMap = getJudgeSourceCountMap();
+  const swallowedErrorCountMap = { task: sessionResult.swallowedErrorCountMap, ipc: bridge.getSwallowedErrorCountMap() };
   // 토큰은 JSON 에 남기지 않는다.
   const { bedrockApiKey, ...modelConfig } = pipelineConfig;
   const report = buildAdReport({
@@ -103,11 +90,14 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     },
     sessionStartWallMs: sessionResult.sessionStartWallMs, pieceList: sessionResult.pieceList,
     captionRecordList: sessionResult.captionRecordList, adPlayList: sessionResult.adPlayList, dropRecordList: sessionResult.dropRecordList,
-    pipelineRecordList: readPipelineRecordList({ recordPath: sessionResult.recordPath }), callLog: scopedFetch.getCallLog(),
-    judgeSourceCountMap: getJudgeSourceCountMap(),
+    pipelineRecordList: readPipelineRecordList({ recordPath: sessionResult.recordPath }), callLog,
+    judgeSourceCountMap,
     adFileByRef, outputFileName: path.basename(pathMap.mp3Path), renderedDurationMs, processingMs,
   });
-  const incompleteReasonList = buildIncompleteReasonList({ sessionResult });
+  const incompleteReasonList = buildIncompleteReasonList({ sessionResult, callLog });
+  const warningList = buildWarningList({
+    callLog, judgeSourceCountMap, judgeBackend: pipelineConfig.judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList,
+  });
   // 공장 버전은 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
   const finalReport = {
     schemaVersion: report.schemaVersion, isComplete: report.isComplete, video: report.video, seeonMeet: report.seeonMeet, factory: versionMap.factory,
@@ -116,9 +106,9 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     // swallowedErrorCountMap: 연결 코드가 제품처럼 삼킨 오류 수(task: 비동기 작업 이름별, ipc: IPC 채널별). 0 이 아니면 연결 코드 버그를 의심한다.
     stats: {
       ...report.stats, frame: { sourceError: sessionResult.frameSourceError, ...sessionResult.frameStats },
-      swallowedErrorCountMap: { task: sessionResult.swallowedErrorCountMap, ipc: bridge.getSwallowedErrorCountMap() },
+      swallowedErrorCountMap,
     },
-    incompleteReasonList,
+    incompleteReasonList, warningList,
     session: {
       isDrainTimedOut: sessionResult.isDrainTimedOut, drainLimitMs: sessionResult.drainLimitMs, drainEndAfterVideoMs: sessionResult.drainEndAfterVideoMs,
       appendedTailMs: sessionResult.appendedTailMs, remainingTaskCount: sessionResult.remainingTaskCount, inFlightCallCount: sessionResult.inFlightCallCount,
@@ -132,7 +122,7 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   }
   return {
     videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: probe.durationMs, processingMs: Math.round(processingMs),
-    adCount: finalReport.adList.length, droppedCount: finalReport.droppedList.length,
+    adCount: finalReport.adList.length, droppedCount: finalReport.droppedList.length, warningList,
     outputPathMap: { mp3: path.basename(pathMap.mp3Path), json: path.basename(pathMap.jsonPath) },
   };
 }

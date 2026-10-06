@@ -8,7 +8,7 @@ const FAKE_WORKER_PATH = fileURLToPath(new URL('./fake-video-worker.mjs', import
 runFactoryCli({
   argList: process.argv.slice(2),
   workerPath: FAKE_WORKER_PATH,
-  checkPort: async () => true,
+  checkService: async () => ({ isUp: true, detail: 'HTTP 405' }),
   runVersion: async () => Buffer.from('ok'),
   startTunnel: async () => { throw new Error('포트가 열려 있으면 터널을 열지 않는다'); },
 })

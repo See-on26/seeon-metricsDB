@@ -7,9 +7,10 @@ import { parseFactoryArgs } from './parse-args.mjs';
 import { listInputVideos } from '../input/video-list.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/worker-pool.mjs';
 import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../runner/manifest.mjs';
-import { runPreflight, listClosedPorts, startProductTunnel } from '../runner/preflight.mjs';
+import { runPreflight, listDownServices, startProductTunnel } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
+import { formatWarningBrief } from '../runner/result-health.mjs';
 import { readResultIdentity } from '../runner/result-identity.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
@@ -24,10 +25,10 @@ function loadFactoryEnv() {
   if (fs.existsSync(envPath)) process.loadEnvFile(envPath);
 }
 
-// GPU 포트가 닫혀 있으면 제품 터널로 연 뒤 다시 점검한다. 연 터널은 돌려줘 실행이 끝날 때 닫는다.
-async function openGpuAccess({ preflight, env, pipelineConfig, checkPort, startTunnel, log }) {
-  if (!preflight.closedPortList.length) return null;
-  log.log(`[factory] GPU 포트 닫힘(${preflight.closedPortList.join(', ')}) — 제품 터널 모듈로 연결을 시도한다`);
+// GPU 서비스가 HTTP 로 답하지 않으면 제품 터널로 연 뒤 다시 점검한다. 연 터널은 돌려줘 실행이 끝날 때 닫는다.
+async function openGpuAccess({ preflight, env, pipelineConfig, checkService, startTunnel, log }) {
+  if (!preflight.downServiceList.length) return null;
+  log.log(`[factory] GPU 서비스 응답 없음(${preflight.downServiceList.join(', ')}) — 제품 터널 모듈로 연결을 시도한다`);
   let tunnel = null;
   try {
     tunnel = await startTunnel({ env, pipelineConfig });
@@ -35,9 +36,9 @@ async function openGpuAccess({ preflight, env, pipelineConfig, checkPort, startT
   } catch (error) {
     preflight.problemList.push(error.message);
   }
-  // 터널이 열려도 원격 주소를 쓰는 서비스는 터널로 넘기지 않으므로 닫힌 포트를 다시 본다.
-  const closedPortList = tunnel ? await listClosedPorts({ pipelineConfig, checkPort }) : preflight.closedPortList;
-  if (closedPortList.length) preflight.problemList.push(`GPU 서비스에 닿지 못했다: ${closedPortList.join(', ')}`);
+  // 터널이 열려도 원격 주소를 쓰는 서비스는 터널로 넘기지 않고, 터널 뒤 서비스가 죽었을 수도 있으므로 다시 본다.
+  const downServiceList = tunnel ? await listDownServices({ pipelineConfig, checkService }) : preflight.downServiceList;
+  if (downServiceList.length) preflight.problemList.push(`GPU 서비스에 닿지 못했다: ${downServiceList.join(', ')}`);
   return tunnel;
 }
 
@@ -85,8 +86,9 @@ function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPat
       if (type !== 'end') return;
       doneCount += 1;
       onResult(result);
+      const warningText = formatWarningBrief(result.warningList);
       log.log(result.status === 'done'
-        ? `[factory] ✔ [${doneCount}/${pendingJobList.length}] ${job.videoId} AD ${result.adCount}개 · ${Math.round(result.processingMs / 1000)}초`
+        ? `[factory] ✔ [${doneCount}/${pendingJobList.length}] ${job.videoId} AD ${result.adCount}개 · ${Math.round(result.processingMs / 1000)}초${warningText ? ` ${warningText}` : ''}`
         : `[factory] ✖ [${doneCount}/${pendingJobList.length}] ${job.videoId} ${result.errorMessage}`);
     },
   });
@@ -121,9 +123,9 @@ function listenStopSignal({ signalSource, onStop, onForce, now = () => performan
 }
 
 // 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGINT 130, SIGTERM 143).
-// workerPath·checkPort·runVersion·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 포트·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
+// workerPath·checkService·runVersion·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 서비스·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
 export async function runFactoryCli({
-  argList, env = process.env, log = console, workerPath, checkPort, runVersion, startTunnel = startProductTunnel, signalSource = process,
+  argList, env = process.env, log = console, workerPath, checkService, runVersion, startTunnel = startProductTunnel, signalSource = process,
   exitProcess = (exitCode) => process.exit(exitCode),
 }) {
   const options = parseFactoryArgs(argList);
@@ -138,8 +140,8 @@ export async function runFactoryCli({
   // 이전 manifest 가 깨져 있으면 영상을 다 돌린 뒤가 아니라 지금 멈춘다. 이어 쓸 내용은 잠금을 잡은 뒤 다시 읽는다.
   readManifest({ outDir });
 
-  const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkPort, runVersion });
-  const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkPort, startTunnel, log });
+  const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkService, runVersion });
+  const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkService, startTunnel, log });
   if (preflight.problemList.length) {
     for (const problem of preflight.problemList) log.error(`[factory] 시작 전 점검 실패: ${problem}`);
     await tunnel?.stop();

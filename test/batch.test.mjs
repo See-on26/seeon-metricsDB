@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +13,7 @@ import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../src/runner
 import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
 import { buildResultConfig } from '../src/runner/result-identity.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
-import { runPreflight, checkTcpPort, startProductTunnel } from '../src/runner/preflight.mjs';
+import { runPreflight, probeHttpService, startProductTunnel } from '../src/runner/preflight.mjs';
 
 const makeDir = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `factory-${name}-`));
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
@@ -369,45 +370,48 @@ test('manifest 읽기: 없으면 null, 있으면 객체', () => {
   assert.deepEqual(readManifest({ outDir }), { videoList: [] });
 });
 
-test('시작 전 점검: 닫힌 GPU 포트와 Bedrock 토큰 없음을 이유와 함께 낸다', async () => {
+const SERVICE_UP = { isUp: true, detail: 'HTTP 405' };
+const SERVICE_DOWN = { isUp: false, detail: '연결 거부(ECONNREFUSED)' };
+
+test('시작 전 점검: HTTP 로 답하지 않는 GPU 서비스와 Bedrock 토큰 없음을 이유와 함께 낸다', async () => {
   const pipelineConfig = {
     vlmUrl: 'http://127.0.0.1:8801/v1/chat/completions', asrUrl: 'http://127.0.0.1:8802/asr',
     ttsUrl: 'http://127.0.0.1:8803/tts', embedUrl: 'http://127.0.0.1:8804/embed', bedrockApiKey: '',
   };
-  const { problemList, closedPortList } = await runPreflight({
+  const { problemList, downServiceList } = await runPreflight({
     pipelineConfig, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe',
-    checkPort: async ({ port }) => port !== 8802, runVersion: async () => Buffer.from('ok'),
+    checkService: async ({ url }) => (url.includes(':8802/') ? SERVICE_DOWN : SERVICE_UP), runVersion: async () => Buffer.from('ok'),
   });
-  assert.deepEqual(closedPortList, ['ASR 127.0.0.1:8802']);
+  assert.deepEqual(downServiceList, ['ASR 127.0.0.1:8802 연결 거부(ECONNREFUSED)']);
   assert.ok(problemList.some((problem) => problem.includes('AWS_BEARER_TOKEN_BEDROCK')));
 });
 
-test('시작 전 점검: ffmpeg·ffprobe 를 못 돌리면 이유를 내고, 포트 없는 주소는 프로토콜 기본 포트로 본다', async () => {
+test('시작 전 점검: ffmpeg·ffprobe 를 못 돌리면 이유를 내고, 설정 주소 그대로 점검하며 포트 없는 주소는 프로토콜 기본 포트로 적는다', async () => {
   const checkedList = [];
-  const { problemList, closedPortList } = await runPreflight({
+  const { problemList, downServiceList } = await runPreflight({
     pipelineConfig: {
       vlmUrl: 'https://gpu.example.com/v1/chat/completions', asrUrl: 'http://gpu.example.com/asr',
       ttsUrl: 'http://127.0.0.1:18803/tts', embedUrl: 'http://127.0.0.1:18804/embed', bedrockApiKey: 'token',
     },
     ffmpegPath: '/없는/ffmpeg', ffprobePath: 'ffprobe',
-    checkPort: async ({ host, port }) => { checkedList.push(`${host}:${port}`); return true; },
+    checkService: async ({ url }) => { checkedList.push(url); return url.includes('gpu.example.com') ? SERVICE_DOWN : SERVICE_UP; },
     runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
   });
-  assert.deepEqual(checkedList, ['gpu.example.com:443', 'gpu.example.com:80', '127.0.0.1:18803', '127.0.0.1:18804']);
-  assert.deepEqual(closedPortList, []);
+  assert.deepEqual(checkedList, ['https://gpu.example.com/v1/chat/completions', 'http://gpu.example.com/asr', 'http://127.0.0.1:18803/tts', 'http://127.0.0.1:18804/embed']);
+  assert.deepEqual(downServiceList, ['VLM gpu.example.com:443 연결 거부(ECONNREFUSED)', 'ASR gpu.example.com:80 연결 거부(ECONNREFUSED)']);
   assert.deepEqual(problemList.length, 1);
   assert.match(problemList[0], /^ffmpeg 를 실행하지 못했다\(\/없는\/ffmpeg\)/);
 });
 
 test('시작 전 점검: 제품이 터널로 넘기는 긴 문장 TTS 주소(ttsLongUrl)도 본다', async () => {
-  const { closedPortList } = await runPreflight({
+  const { downServiceList } = await runPreflight({
     pipelineConfig: {
       vlmUrl: 'http://127.0.0.1:18801/v', asrUrl: 'http://127.0.0.1:18802/a', ttsUrl: 'http://127.0.0.1:18803/tts',
       ttsLongUrl: 'http://127.0.0.1:18805/tts-long', embedUrl: 'http://127.0.0.1:18804/e', bedrockApiKey: 'token',
     },
-    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', checkPort: async ({ port }) => port !== 18805, runVersion: async () => Buffer.from('ok'),
+    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', checkService: async ({ url }) => (url.includes(':18805/') ? SERVICE_DOWN : SERVICE_UP), runVersion: async () => Buffer.from('ok'),
   });
-  assert.deepEqual(closedPortList, ['TTS_LONG 127.0.0.1:18805']);
+  assert.deepEqual(downServiceList, ['TTS_LONG 127.0.0.1:18805 연결 거부(ECONNREFUSED)']);
 });
 
 test('시작 전 점검: Bedrock 토큰 없음 사유는 탐지 판정 백엔드(gpu·bedrock)에 맞춰 적는다', async () => {
@@ -418,7 +422,7 @@ test('시작 전 점검: Bedrock 토큰 없음 사유는 탐지 판정 백엔드
   const readKeyProblem = async (judgeBackend) => {
     const { problemList } = await runPreflight({
       pipelineConfig: { ...baseConfig, judgeBackend }, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe',
-      checkPort: async () => true, runVersion: async () => Buffer.from('ok'),
+      checkService: async () => SERVICE_UP, runVersion: async () => Buffer.from('ok'),
     });
     assert.equal(problemList.length, 1);
     return problemList[0];
@@ -434,43 +438,59 @@ test('시작 전 점검: Bedrock 토큰 없음 사유는 탐지 판정 백엔드
   assert.match(bedrockProblem, /라우터·무발화·지시 판정/);
 });
 
-test('시작 전 점검: 판정 GPU 주소가 VLM 과 다른 호스트·포트일 때만 그 포트를 JUDGE 로 따로 본다', async () => {
+test('시작 전 점검: 판정 GPU 주소가 VLM 과 다른 호스트·포트일 때만 그 주소를 JUDGE 로 따로 본다', async () => {
   const baseConfig = {
     vlmUrl: 'http://127.0.0.1:18801/v1/chat/completions', asrUrl: 'http://127.0.0.1:18802/a', ttsUrl: 'http://127.0.0.1:18803/t',
     embedUrl: 'http://127.0.0.1:18804/e', bedrockApiKey: 'token',
   };
   const runWithConfig = async (judgeConfig) => {
     const checkedList = [];
-    const { closedPortList } = await runPreflight({
+    const { downServiceList } = await runPreflight({
       pipelineConfig: { ...baseConfig, ...judgeConfig }, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe',
-      checkPort: async ({ host, port }) => { checkedList.push(`${host}:${port}`); return port !== 18806; }, runVersion: async () => Buffer.from('ok'),
+      checkService: async ({ url }) => { checkedList.push(new URL(url).port); return url.includes(':18806/') ? SERVICE_DOWN : SERVICE_UP; },
+      runVersion: async () => Buffer.from('ok'),
     });
-    return { checkedList, closedPortList };
+    return { checkedList, downServiceList };
   };
   const shared = await runWithConfig({ judgeBackend: 'gpu', judgeGpuUrl: 'http://127.0.0.1:18801/v1/chat/completions' });
-  assert.deepEqual(shared.checkedList, ['127.0.0.1:18801', '127.0.0.1:18802', '127.0.0.1:18803', '127.0.0.1:18804'], 'VLM 점검이 판정도 덮는다');
+  assert.deepEqual(shared.checkedList, ['18801', '18802', '18803', '18804'], 'VLM 점검이 판정도 덮는다');
   const dedicated = await runWithConfig({ judgeBackend: 'gpu', judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' });
-  assert.deepEqual(dedicated.closedPortList, ['JUDGE 127.0.0.1:18806']);
+  assert.deepEqual(dedicated.downServiceList, ['JUDGE 127.0.0.1:18806 연결 거부(ECONNREFUSED)']);
   const bedrockJudge = await runWithConfig({ judgeBackend: 'bedrock', judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' });
-  assert.equal(bedrockJudge.checkedList.includes('127.0.0.1:18806'), false, 'Bedrock 판정이면 GPU 판정 주소를 쓰지 않는다');
+  assert.equal(bedrockJudge.checkedList.includes('18806'), false, 'Bedrock 판정이면 GPU 판정 주소를 쓰지 않는다');
 });
 
 test('시작 전 점검: 실제 ffmpeg·ffprobe -version 은 통과한다', async () => {
   const { problemList } = await runPreflight({
     pipelineConfig: { vlmUrl: 'http://127.0.0.1:1/v', asrUrl: 'http://127.0.0.1:1/a', ttsUrl: 'http://127.0.0.1:1/t', embedUrl: 'http://127.0.0.1:1/e', bedrockApiKey: 'token' },
     ffmpegPath: process.env.SEEON_FACTORY_FFMPEG || 'ffmpeg', ffprobePath: process.env.SEEON_FACTORY_FFPROBE || 'ffprobe',
-    checkPort: async () => true,
+    checkService: async () => SERVICE_UP,
   });
   assert.deepEqual(problemList, []);
 });
 
-test('TCP 포트 점검: 듣는 포트는 열림, 닫힌 포트는 닫힘(GPU 실서비스 포트는 쓰지 않는다)', async () => {
-  const server = net.createServer((socket) => socket.destroy());
-  await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
-  const openPort = server.address().port;
-  assert.equal(await checkTcpPort({ host: '127.0.0.1', port: openPort, timeoutMs: 1000 }), true);
-  await new Promise((resolve) => { server.close(resolve); });
-  assert.equal(await checkTcpPort({ host: '127.0.0.1', port: openPort, timeoutMs: 1000 }), false);
+test('HTTP 점검: 상태 코드와 상관없이 HTTP 로 답하면 살아 있고, 닫힌 포트·받자마자 끊는 리스너(터널 뒤 서비스 죽음)·답하지 않는 서버는 죽었다', async () => {
+  // GPU 실서비스 포트(8801–8804)는 쓰지 않고 빈 포트를 받는다.
+  const listen = async (server) => {
+    await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+    return `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
+  };
+  const httpServer = http.createServer((request, response) => { response.writeHead(405); response.end(); });
+  const dropServer = net.createServer((socket) => socket.destroy());
+  const silentSocketList = [];
+  const silentServer = net.createServer((socket) => silentSocketList.push(socket));
+  const closedServer = net.createServer();
+  const [httpUrl, dropUrl, silentUrl, closedUrl] = [await listen(httpServer), await listen(dropServer), await listen(silentServer), await listen(closedServer)];
+  await new Promise((resolve) => { closedServer.close(resolve); });
+  try {
+    assert.deepEqual(await probeHttpService({ url: httpUrl, timeoutMs: 1000 }), { isUp: true, detail: 'HTTP 405' });
+    assert.deepEqual(await probeHttpService({ url: dropUrl, timeoutMs: 1000 }), { isUp: false, detail: '연결이 끊김(ECONNRESET)' });
+    assert.deepEqual(await probeHttpService({ url: silentUrl, timeoutMs: 300 }), { isUp: false, detail: '응답 없음(0.3초)' });
+    assert.deepEqual(await probeHttpService({ url: closedUrl, timeoutMs: 1000 }), { isUp: false, detail: '연결 거부(ECONNREFUSED)' });
+  } finally {
+    for (const socket of silentSocketList) socket.destroy();
+    await Promise.all([httpServer, dropServer, silentServer].map((server) => new Promise((resolve) => { server.close(resolve); })));
+  }
 });
 
 const TUNNEL_PIPELINE_CONFIG = {

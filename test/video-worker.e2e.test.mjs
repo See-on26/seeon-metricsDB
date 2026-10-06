@@ -80,6 +80,7 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
   assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} }, '실제 제품 응답에서 연결 코드가 삼킨 오류가 없다');
+  assert.deepEqual([report.incompleteReasonList, report.warningList], [[], []], '건강한 서비스면 불완전 사유도 경고도 없다');
   assert.match(report.factory.commit, /^[0-9a-f]{40}$/);
   assert.equal(report.config.runConcurrency, RUN_CONCURRENCY);
   const identity = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(WORKER_ENV) });
@@ -153,4 +154,20 @@ test('워커는 부모와 IPC 가 끊기면(부모가 죽음) 띄운 ffprobe 를
   child.disconnect();
   assert.deepEqual(await exitPromise, { code: 1, signal: null });
   assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+});
+
+test('ASR 이 계속 실패하면(서비스 장애) 결과를 불완전으로 남기고 워커는 실패로 끝나, 다시 돌리면 그 영상을 다시 처리한다', { timeout: 120000 }, async (t) => {
+  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-asr-down-'));
+  t.after(() => fs.rmSync(dirPath, { recursive: true, force: true }));
+  const filePath = await createTestClip({ dirPath, fileName: 'talk.mp4', colorTimeline: [['gray', 10]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,5),4)' });
+  const outDir = path.join(dirPath, 'out');
+  mock.setAsrStatus(500);
+  t.after(() => mock.setAsrStatus(200));
+  const result = await runWorker({ job: { videoId: 'talk', filePath, outStem: 'talk', language: 'ko', isPageTransitionIncluded: false }, outDir });
+  assert.equal(result.status, 'failed', result.logText.slice(-2000));
+  assert.match(result.message, /^결과가 불완전하다 — ASR 실패 (\d+)\/\1건\(100% > 10%\) — HTTP 500/);
+  const report = JSON.parse(fs.readFileSync(path.join(outDir, 'talk_SEEON_AD.json'), 'utf8'));
+  assert.equal(report.isComplete, false);
+  assert.deepEqual(report.incompleteReasonList.map((reason) => reason.code), ['asr_failure']);
+  assert.equal(inspectVideoResult({ outDir, outStem: 'talk' }).status, 'incomplete', '다시 돌리면 다시 처리한다');
 });
