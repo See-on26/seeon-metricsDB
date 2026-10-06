@@ -67,9 +67,11 @@ export function createOutputGlue({ ctx }) {
   }
 
   // main.js:1406-1446 resolveInsertionTimeMs
+  // 제품은 정지 때 지연 버퍼를 비워(main.js:376-379) 그 뒤 캡션은 틈 추론 없이 트리거 자리로 돌아간다.
+  // 공장은 멈춘 버퍼 객체가 남으므로 정지 여부(isEnded)로 같은 길을 타 어차피 버릴 캡션에 Bedrock 을 부르지 않는다.
   async function resolveInsertionTimeMs({ payload, captionCaptureMs, record }) {
     const { delayBuffer } = core;
-    if (!delayBuffer || !Number.isFinite(captionCaptureMs)) return captionCaptureMs;
+    if (isEnded || !delayBuffer || !Number.isFinite(captionCaptureMs)) return captionCaptureMs;
     const narrationType = toNarrationType({ source: payload.source });
     const gapList = core.gapCandidateStore.getCandidateList({
       triggerVideoTimeMs: captionCaptureMs,

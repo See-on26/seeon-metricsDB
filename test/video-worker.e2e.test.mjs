@@ -73,6 +73,7 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(modelConfig.judgeModelId, 'GPU 가 실패하면 넘어갈 Bedrock 판정 모델');
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
+  assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} }, '실제 제품 응답에서 연결 코드가 삼킨 오류가 없다');
 });
 
 test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', { timeout: 120000 }, async () => {
@@ -83,6 +84,7 @@ test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', 
   assert.equal(result.status, 'done', result.logText.slice(-2000));
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'mute_SEEON_AD.json'), 'utf8'));
   assert.equal(report.adList.length, 0);
+  assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} });
   assert.ok(Math.abs(report.output.sourceMediaMs - 6000) < 100);
   assert.ok(Math.abs(readMp3Ms(path.join(outDir, 'mute_SEEON_AD.mp3')) - report.output.timelineDurationMs) < 150);
 });

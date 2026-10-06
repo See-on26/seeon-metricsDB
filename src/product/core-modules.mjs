@@ -9,7 +9,7 @@ export {
   computeContextHoldMs, resolveBeforeAnchorTs, getCatchupRateRange,
 } from '../../seeon-meet/src/renderer/core/mode/mode-policy.js';
 export {
-  createFeatureToggleStore, listDisabledNarrationClass, FEATURE_KEY_MAP,
+  createFeatureToggleStore, listDisabledNarrationClass, FEATURE_KEY_MAP, FEATURE_TOGGLE_STORAGE_KEY,
 } from '../../seeon-meet/src/renderer/core/mode/feature-toggle-store.js';
 export { DelayBuffer, isCaptionDroppable, EXCESS_DROP_MS } from '../../seeon-meet/src/renderer/core/audio-renderer/delay-buffer.js';
 export { NarrationScheduler } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-scheduler.js';

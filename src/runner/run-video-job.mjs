@@ -56,9 +56,10 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
   let sessionResult = null;
   let scopedFetch = null;
   let pipelineConfig = null;
+  let bridge = null;
   try {
     const pipeline = bootProductPipeline({ outDir: pathMap.workDir, clock, log });
-    ({ scopedFetch, pipelineConfig } = pipeline);
+    ({ scopedFetch, pipelineConfig, bridge } = pipeline);
     const simulator = createSessionSimulator({
       clock, bridge: pipeline.bridge, video: { ...job, probe }, prep: { levelList, segmentList, segmentBufferMap, frameReader },
       options: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded), ffmpegPath }, workDir: pathMap.workDir, log, onProgress,
@@ -105,7 +106,11 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
   const finalReport = {
     ...report,
     isComplete: incompleteReasonList.length === 0,
-    stats: { ...report.stats, frame: { sourceError: sessionResult.frameSourceError, ...sessionResult.frameStats } },
+    // swallowedErrorCountMap: 연결 코드가 제품처럼 삼킨 오류 수(task: 비동기 작업 이름별, ipc: IPC 채널별). 0 이 아니면 연결 코드 버그를 의심한다.
+    stats: {
+      ...report.stats, frame: { sourceError: sessionResult.frameSourceError, ...sessionResult.frameStats },
+      swallowedErrorCountMap: { task: sessionResult.swallowedErrorCountMap, ipc: bridge.getSwallowedErrorCountMap() },
+    },
     incompleteReasonList,
     session: {
       isDrainTimedOut: sessionResult.isDrainTimedOut, drainLimitMs: sessionResult.drainLimitMs, drainEndAfterVideoMs: sessionResult.drainEndAfterVideoMs,

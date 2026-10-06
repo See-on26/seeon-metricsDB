@@ -7,6 +7,12 @@ const NULL_BODY_STATUS_LIST = [204, 205, 304];
 // JSON 문자열 값 안의 따옴표는 이스케이프되므로 이 토큰은 구조에만 나온다. 이미지가 든 VLM 몸통은 파싱하지 않고 거른다.
 const IMAGE_PART_TOKEN = '"image_url"';
 
+// undici 는 연결 거부·DNS·TLS 실패를 모두 'fetch failed' 로 던지고 실제 원인을 cause 에 둔다. 원인까지 붙여 기록한다.
+function describeFetchError(error) {
+  const causeText = [error.cause?.code, error.cause?.message].filter(Boolean).join(': ');
+  return causeText ? `${error.message} (${causeText})` : error.message;
+}
+
 function toOriginPath(urlText) {
   const url = new URL(String(urlText));
   return `${url.origin}${url.pathname}`;
@@ -109,8 +115,9 @@ export function createScopedFetch({
   async function scopedFetch(input, init) {
     const { service, modelId, isVlmFallback } = classifyServiceRequest({ url: input, body: init?.body, pipelineConfig });
     const requestContext = requestContextStorage.getStore() || null;
+    // errorName 은 시간 초과(TimeoutError)를 가르고, errorCode 는 연결 실패 원인(ECONNREFUSED 등)이다.
     const record = {
-      service, modelId, isVlmFallback, status: null, errorMessage: null,
+      service, modelId, isVlmFallback, status: null, errorMessage: null, errorName: null, errorCode: null,
       startedAtElapsedMs: Math.round(clock.elapsedMs()), elapsedMs: null,
       channel: requestContext?.channel ?? null, requestSeq: requestContext?.seq ?? null,
     };
@@ -122,7 +129,9 @@ export function createScopedFetch({
       record.status = response.status;
       return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
     } catch (error) {
-      record.errorMessage = error.message;
+      record.errorMessage = describeFetchError(error);
+      record.errorName = error.name ?? null;
+      record.errorCode = error.cause?.code ?? null;
       throw error;
     } finally {
       record.elapsedMs = Math.round(realNow() - realStartedAt);
