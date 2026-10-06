@@ -4,10 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleepReal } from 'node:timers/promises';
+import { createRequire } from 'node:module';
 import {
   installProductLoader, setProductScope, createProductScope, loadRegisterPipeline, getIpcRegistry, buildScopePrelude,
-  PRODUCT_SCOPE_KEY,
+  PRODUCT_SCOPE_KEY, getJudgeSourceCountMap,
 } from '../src/product/product-loader.mjs';
+import { resolveProductPath } from '../src/product/product-paths.mjs';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 
 // 제품은 프로세스마다 한 번만 로드한다. node --test 는 파일마다 프로세스를 따로 띄운다.
@@ -95,4 +97,34 @@ test('가상 시계가 실제 시간으로 흐른 뒤에도 범위 Date.now 는 
   } finally {
     setProductScope(fixedScope);
   }
+});
+
+test('탐지 판정 LLM 호출을 판정기·답한 곳(gpu·bedrock)·실패로 센다', async () => {
+  const productRequire = createRequire(import.meta.url);
+  const { createUnifiedRouter } = productRequire(resolveProductPath('src/main/caption-pipeline/router/unified-router.js'));
+  const { createSilenceJudge } = productRequire(resolveProductPath('src/main/caption-pipeline/router/silence-judge.js'));
+  const { createDeixisJudgeClient } = productRequire(resolveProductPath('src/main/caption-pipeline/router/deixis-judge.js'));
+  const config = {
+    judgeBackend: 'gpu', judgeGpuUrl: 'http://127.0.0.1:9/v1/chat/completions', judgeGpuModel: 'qwen', judgeModelId: 'judge', bedrockApiKey: '',
+  };
+  const zeroCountMap = { gpu: 0, bedrock: 0, error: 0 };
+  assert.deepEqual(getJudgeSourceCountMap(), { router: zeroCountMap, silence: zeroCountMap, deixis: zeroCountMap });
+  async function runWithFetch(fetch, run) {
+    setProductScope({ ...fixedScope, fetch });
+    try {
+      return await run();
+    } finally {
+      setProductScope(fixedScope);
+    }
+  }
+  const answerFetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"caption":true,"reason":"visual_referent"}' } }] }));
+  assert.equal((await runWithFetch(answerFetch, () => createUnifiedRouter({ config }).route({ utterance: '이 그래프' }))).source, 'gpu');
+  assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '여기 이 부분' }))).source, 'gpu');
+  assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '이 표' }))).source, 'gpu');
+  // GPU 가 실패하고 Bedrock 키가 없어 넘기지 못한다. 무발화 판정기는 실패를 error 로 돌려준다(로그를 찍지 않는다).
+  const failFetch = async () => { throw new Error('GPU 꺼짐'); };
+  assert.equal((await runWithFetch(failFetch, () => createSilenceJudge({ config }).judge({ transcript: '이 화면을 보시죠', silenceMs: 6000 }))).source, 'error');
+  assert.deepEqual(getJudgeSourceCountMap(), {
+    router: { ...zeroCountMap, gpu: 1 }, silence: { ...zeroCountMap, error: 1 }, deixis: { ...zeroCountMap, gpu: 2 },
+  });
 });

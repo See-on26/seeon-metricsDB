@@ -1,15 +1,93 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
-import { classifyServiceUrl, createScopedFetch, computeServiceStats } from '../src/clock/scoped-fetch.mjs';
+import {
+  classifyServiceUrl, classifyServiceRequest, isJudgeRequestBody, createScopedFetch, computeServiceStats,
+} from '../src/clock/scoped-fetch.mjs';
 import { createIpcBridge, createRequestContextStorage } from '../src/product/ipc-bridge.mjs';
+import { resolveProductPath } from '../src/product/product-paths.mjs';
+
+const require = createRequire(import.meta.url);
+const { buildVlmRequestBody } = require(resolveProductPath('src/main/caption-pipeline/agents/shared/vlm-gateway.js'));
+const { createJudgeLlm } = require(resolveProductPath('src/main/caption-pipeline/agents/shared/judge-llm.js'));
+const { createUnifiedRouter } = require(resolveProductPath('src/main/caption-pipeline/router/unified-router.js'));
+const { createSilenceJudge } = require(resolveProductPath('src/main/caption-pipeline/router/silence-judge.js'));
+const { createDeixisJudgeClient } = require(resolveProductPath('src/main/caption-pipeline/router/deixis-judge.js'));
 
 const pipelineConfig = {
   vlmUrl: 'http://127.0.0.1:8801/v1/chat/completions', vlmModel: 'qwen', asrUrl: 'http://127.0.0.1:8802/asr',
   ttsUrl: 'http://127.0.0.1:8803/tts', ttsLongUrl: 'http://127.0.0.1:8803/tts-long', embedUrl: 'http://127.0.0.1:8804/embed',
   vlmFallbackModelId: 'anthropic.claude-haiku-4-5-20251001-v1:0',
 };
+// 제품 기본값처럼 판정 GPU 주소가 VLM 주소와 같다. 모델 이름만 달리 둬 어느 쪽으로 셌는지 가린다.
+const sharedJudgeConfig = { ...pipelineConfig, judgeBackend: 'gpu', judgeGpuUrl: pipelineConfig.vlmUrl, judgeGpuModel: 'qwen-judge' };
+const FAKE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]);
+
+// 제품 판정기(라우터·무발화·지시)가 실제로 보내는 GPU 요청 몸통을 붙잡는다. 네트워크는 쓰지 않는다.
+async function captureJudgeBodyList() {
+  const bodyList = [];
+  const config = { ...sharedJudgeConfig, bedrockApiKey: '' };
+  const fetchImpl = async (_url, init) => {
+    bodyList.push(init.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }), { status: 200 });
+  };
+  const judgeLlm = createJudgeLlm({ config, fetchImpl });
+  await createUnifiedRouter({ config, judgeLlm }).route({ utterance: '이 그래프를 보시면', before: '매출입니다.', after: '' });
+  await createSilenceJudge({ config, judgeLlm }).judge({ transcript: '이 화면을 보시죠', silenceMs: 6000 });
+  await createDeixisJudgeClient({ config, judgeLlm }).judge({ utterance: '여기 이 부분', before: '', after: '' });
+  return bodyList;
+}
+
+test('판정 요청 몸통: 제품 판정기 세 개의 GPU 요청은 판정, VLM 요청은 이미지가 없는 글 요청(라벨링·질문 라우팅)까지 판정이 아니다', async () => {
+  const judgeBodyList = await captureJudgeBodyList();
+  assert.equal(judgeBodyList.length, 3);
+  for (const body of judgeBodyList) assert.equal(isJudgeRequestBody(body), true, body.slice(0, 200));
+  const imageBody = JSON.stringify(buildVlmRequestBody({ jpegBuffer: FAKE_JPEG, vlmModel: 'qwen', prompt: '화면 유형을 분류하라' }));
+  const textOnlyBody = JSON.stringify(buildVlmRequestBody({ vlmModel: 'qwen', prompt: '이 슬라이드에 라벨을 붙여라', temperature: 0 }));
+  assert.equal(isJudgeRequestBody(imageBody), false);
+  assert.equal(isJudgeRequestBody(textOnlyBody), false);
+  for (const body of [undefined, null, '', '깨진 JSON', '{}', '{"messages":[]}', new Uint8Array([1, 2])]) {
+    assert.equal(isJudgeRequestBody(body), false, String(body));
+  }
+});
+
+test('판정 GPU 주소가 VLM 과 같으면 몸통으로 판정과 VLM 을 가르고, 판정은 판정 GPU 모델로 센다', async () => {
+  const [routerBody] = await captureJudgeBodyList();
+  const textOnlyBody = JSON.stringify(buildVlmRequestBody({ vlmModel: 'qwen', prompt: '이 슬라이드에 라벨을 붙여라' }));
+  assert.deepEqual(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: routerBody, pipelineConfig: sharedJudgeConfig }),
+    { service: 'judge', modelId: 'qwen-judge', isVlmFallback: false });
+  assert.deepEqual(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: textOnlyBody, pipelineConfig: sharedJudgeConfig }),
+    { service: 'vlm', modelId: 'qwen', isVlmFallback: false });
+  assert.equal(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: undefined, pipelineConfig: sharedJudgeConfig }).service, 'vlm');
+  assert.equal(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: routerBody, pipelineConfig }).service, 'vlm', '판정 설정이 없는 제품');
+  assert.equal(classifyServiceRequest({ url: pipelineConfig.asrUrl, body: routerBody, pipelineConfig: sharedJudgeConfig }).service, 'asr');
+});
+
+test('판정 GPU 주소가 따로 있으면 주소만으로 판정으로 센다', () => {
+  const dedicatedJudgeConfig = { ...sharedJudgeConfig, judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' };
+  assert.deepEqual(classifyServiceUrl({ url: dedicatedJudgeConfig.judgeGpuUrl, pipelineConfig: dedicatedJudgeConfig }),
+    { service: 'judge', modelId: 'qwen-judge', isVlmFallback: false });
+  assert.equal(classifyServiceRequest({ url: dedicatedJudgeConfig.judgeGpuUrl, body: undefined, pipelineConfig: dedicatedJudgeConfig }).service, 'judge');
+  assert.equal(classifyServiceUrl({ url: pipelineConfig.vlmUrl, pipelineConfig: dedicatedJudgeConfig }).service, 'vlm');
+});
+
+test('같은 주소로 간 판정·VLM 호출은 서비스 통계에서 따로 잡힌다', async () => {
+  const [routerBody] = await captureJudgeBodyList();
+  const imageBody = JSON.stringify(buildVlmRequestBody({ jpegBuffer: FAKE_JPEG, vlmModel: 'qwen', prompt: '화면 유형을 분류하라' }));
+  const scoped = createScopedFetch({
+    clock: createVirtualClock(), pipelineConfig: sharedJudgeConfig, requestContextStorage: createRequestContextStorage(),
+    baseFetch: async () => new Response('{}', { status: 200 }),
+  });
+  await scoped.fetch(pipelineConfig.vlmUrl, { method: 'POST', body: routerBody });
+  await scoped.fetch(pipelineConfig.vlmUrl, { method: 'POST', body: imageBody });
+  await scoped.fetch(pipelineConfig.vlmUrl, { method: 'POST', body: routerBody });
+  assert.deepEqual(scoped.getCallLog().map((record) => [record.service, record.modelId]), [['judge', 'qwen-judge'], ['vlm', 'qwen'], ['judge', 'qwen-judge']]);
+  const { serviceMap } = scoped.summarizeServiceStats();
+  assert.equal(serviceMap.judge.count, 2);
+  assert.equal(serviceMap.vlm.count, 1);
+});
 
 test('URL 로 서비스와 Bedrock 모델·VLM 폴백 여부를 가린다', () => {
   assert.deepEqual(classifyServiceUrl({ url: 'http://127.0.0.1:8802/asr?startTs=1&language=ko', pipelineConfig }),

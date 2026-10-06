@@ -27,7 +27,7 @@ export function readPipelineRecordList({ recordPath }) {
 
 export function buildAdReport({
   video, seeonMeet, config, sessionStartWallMs, pieceList, captionRecordList, adPlayList, dropRecordList, pipelineRecordList,
-  callLog, adFileByRef, outputFileName, renderedDurationMs, processingMs,
+  callLog, judgeSourceCountMap = null, adFileByRef, outputFileName, renderedDurationMs, processingMs,
 }) {
   const recordBySeq = new Map(captionRecordList.map((record) => [record.captionSeq, record]));
   const playedSeqSet = new Set(adPlayList.map((adPlay) => adPlay.captionSeq));
@@ -95,8 +95,9 @@ export function buildAdReport({
     },
     adList, droppedList,
     timeline: pieceList.map((piece) => ({ ...piece, outStartMs: Math.round(piece.outStartMs), outEndMs: Math.round(piece.outEndMs) })),
+    // judgeSourceCountMap: 탐지 판정기(router·silence·deixis)마다 답한 곳(gpu·bedrock)·실패(error) 수. GPU 판정 호출의 지연은 serviceMap.judge 에 있다.
     stats: {
-      serviceMap, bedrockModelMap, processingMs: Math.round(processingMs),
+      serviceMap, bedrockModelMap, judgeSourceCountMap, processingMs: Math.round(processingMs),
       realtimeFactor: processingMs > 0 ? Math.round((video.durationMs / processingMs) * 100) / 100 : null,
     },
   };

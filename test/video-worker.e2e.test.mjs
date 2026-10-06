@@ -14,7 +14,7 @@ const WORKER_PATH = fileURLToPath(new URL('../src/runner/video-worker.mjs', impo
 const mock = await startMockServices();
 after(() => mock.close());
 
-// Bedrock 토큰 없이 돌린다: 라우터는 통과, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
+// Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock VLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
 function runWorker({ job, outDir }) {
   return new Promise((resolve, reject) => {
     const child = fork(WORKER_PATH, [], {
@@ -44,7 +44,9 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
     colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
   });
   const outDir = path.join(dirPath, 'out');
+  const countBefore = { ...mock.state.callCountMap };
   const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir });
+  const countAfter = { ...mock.state.callCountMap };
   assert.equal(result.status, 'done', result.logText.slice(-2000));
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
   assert.equal(report.isComplete, true);
@@ -56,6 +58,18 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(Math.abs(mp3Ms - expectedMs) <= 1000);
   assert.ok(Math.abs(report.output.sourceMediaMs - 24000) < 100, '원음을 끝까지 다 틀었다');
   assert.ok(report.stats.serviceMap.asr.count >= 3);
+  // 판정 요청은 VLM 주소로 가지만 VLM 통계를 부풀리지 않는다. mock 이 받은 수(따로 가른 것)와 기록이 같아야 한다.
+  const { serviceMap, judgeSourceCountMap } = report.stats;
+  assert.ok(serviceMap.judge.count >= 1, JSON.stringify(serviceMap));
+  assert.equal(serviceMap.judge.count, countAfter.judge - countBefore.judge);
+  assert.equal(serviceMap.vlm.count, countAfter.vlm - countBefore.vlm);
+  const judgeGpuCount = Object.values(judgeSourceCountMap).reduce((sum, countMap) => sum + countMap.gpu, 0);
+  assert.equal(judgeGpuCount, serviceMap.judge.count, JSON.stringify(judgeSourceCountMap));
+  assert.ok(judgeSourceCountMap.router.gpu >= 1, '지시 해설은 통합 라우터 GPU 판정을 거친다');
+  assert.ok(Object.values(judgeSourceCountMap).every((countMap) => countMap.bedrock === 0 && countMap.error === 0));
+  const { modelConfig } = report.config;
+  assert.deepEqual([modelConfig.judgeBackend, modelConfig.judgeGpuUrl, modelConfig.judgeGpuModel], ['gpu', modelConfig.vlmUrl, modelConfig.vlmModel]);
+  assert.ok(modelConfig.judgeModelId, 'GPU 가 실패하면 넘어갈 Bedrock 판정 모델');
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
 });
