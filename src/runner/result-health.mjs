@@ -91,7 +91,7 @@ function buildServiceWarningList({ callLog, incompleteReasonList }) {
   return warningList;
 }
 
-// 결과를 실패로 만들지 않는 품질 저하. 동시 처리로 GPU 가 포화되면 정상적으로도 생기므로(실측: 동시 3 에서 VLM 시간 초과 4/16)
+// 결과를 실패로 만들지 않는 품질 저하. 동시 처리로 GPU 가 포화되면 정상적으로도 생기므로(실측: 동시 3 에서 영상마다 VLM 시간 초과 4건)
 // 불완전으로 치면 재실행이 끝없이 같은 영상을 다시 돈다. 대신 JSON warningList 와 터미널·summary 의 ⚠ 로 드러낸다.
 export function buildWarningList({ callLog, judgeSourceCountMap, judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList }) {
   const warningList = buildServiceWarningList({ callLog, incompleteReasonList });
