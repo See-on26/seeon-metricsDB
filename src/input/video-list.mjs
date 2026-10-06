@@ -6,6 +6,7 @@ import { loadPipelineConfig } from '../product/product-loader.mjs';
 export const VIDEO_EXTENSION_LIST = ['.mp4', '.mov', '.mkv', '.webm'];
 
 // 실행 기록(manifest.json·summary.txt, 그 임시 파일) 이름과 겹치지 않게 앞에 video- 를 붙일 이름.
+// 점으로 시작하는 이름도 붙인다. 숨김 파일이 되고 실행 잠금(.factory.lock, 그 임시 파일)과 겹칠 수 있다.
 const RESERVED_STEM_LIST = ['manifest', 'summary'];
 // 영상마다 <이름>.log·<이름>_SEEON_AD.mp3·<이름>_SEEON_AD.json 파일과 <이름>/ 작업 폴더가 생긴다.
 // 이 끝말로 끝나는 이름을 그대로 쓰면 그 작업 폴더가 다른 영상의 출력 파일과 같은 경로가 되므로 끝말의 점을 _ 로 바꾼다.
@@ -15,7 +16,7 @@ const OUTPUT_SUFFIX_PATTERN = /(\.log|_SEEON_AD\.mp3|_SEEON_AD\.json)$/i;
 function toOutStem(name) {
   const stem = String(name).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim();
   if (/^\.*$/.test(stem)) return 'video';
-  if (RESERVED_STEM_LIST.includes(stem.split('.')[0].toLowerCase())) return `video-${stem}`;
+  if (stem.startsWith('.') || RESERVED_STEM_LIST.includes(stem.split('.')[0].toLowerCase())) return `video-${stem}`;
   return stem.replace(OUTPUT_SUFFIX_PATTERN, (suffix) => suffix.replace('.', '_'));
 }
 

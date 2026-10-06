@@ -9,6 +9,7 @@ import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/wor
 import { isVideoDone, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../runner/manifest.mjs';
 import { runPreflight, listClosedPorts, startProductTunnel } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
+import { acquireRunLock } from '../runner/run-lock.mjs';
 import { readSeeonMeetVersion } from '../product/product-version.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
@@ -117,8 +118,8 @@ export async function runFactoryCli({
     .map((job) => ({ ...job, isPageTransitionIncluded: options.isPageTransitionIncluded }));
   if (!jobList.length) { log.error('[factory] 처리할 영상이 없다'); return 1; }
   const outDir = path.resolve(options.out ?? path.join(FACTORY_ROOT, 'out', formatRunStamp(new Date())));
-  // 이전 manifest 가 깨져 있으면 영상을 다 돌린 뒤가 아니라 지금 멈춘다.
-  const previousManifest = readManifest({ outDir });
+  // 이전 manifest 가 깨져 있으면 영상을 다 돌린 뒤가 아니라 지금 멈춘다. 이어 쓸 내용은 잠금을 잡은 뒤 다시 읽는다.
+  readManifest({ outDir });
 
   const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkPort, runVersion });
   const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkPort, startTunnel, log });
@@ -134,6 +135,7 @@ export async function runFactoryCli({
   const forceController = new AbortController();
   let interruptedBy = null;
   let forceExitTimer = null;
+  let lock = null;
   let writeFinalRecord = () => {};
   const toSignalExitCode = (signalName) => 128 + os.constants.signals[signalName];
   // 점검을 마친 뒤부터 실행이 끝날 때까지 신호를 받는다. 워커를 띄우기 전에 받아도 기록을 남기고 끝낸다.
@@ -150,6 +152,7 @@ export async function runFactoryCli({
       // 정리가 어딘가에서 멈춰도(터널 닫기 등) 기록을 쓰고 끝낸다.
       forceExitTimer = setTimeout(() => {
         writeFinalRecord();
+        lock?.release();
         exitProcess(toSignalExitCode(interruptedBy));
       }, FORCE_EXIT_AFTER_MS);
       forceExitTimer.unref?.();
@@ -158,6 +161,15 @@ export async function runFactoryCli({
   let manifest;
   try {
     await fs.promises.mkdir(outDir, { recursive: true });
+    try {
+      lock = acquireRunLock({
+        outDir, onTakeOver: (holder) => log.warn(`[factory] 낡은 잠금(pid ${holder.pid} · ${holder.startedAt} 시작, 프로세스 없음)을 가져간다 — 그 실행은 정리 없이 끝났다`),
+      });
+    } catch (error) {
+      log.error(`[factory] ${error.message}`);
+      return 1;
+    }
+    const previousManifest = readManifest({ outDir });
     const skippedJobList = options.isForced ? [] : jobList.filter((job) => isVideoDone({ outDir, ...job }));
     const pendingJobList = jobList.filter((job) => !skippedJobList.includes(job));
     const startedAt = new Date().toISOString();
@@ -190,6 +202,7 @@ export async function runFactoryCli({
     manifest = buildCurrentManifest(new Date().toISOString());
     writeRunRecord({ outDir, manifest });
   } finally {
+    lock?.release();
     await tunnel?.stop();
     clearTimeout(forceExitTimer);
     stopListening();

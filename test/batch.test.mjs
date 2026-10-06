@@ -539,3 +539,11 @@ test('제품 터널: ssh2 가 제품 쪽에 없으면 포트를 열기 전에 �
     /제품 GPU 터널 모듈을 불러오지 못했다.*npm --prefix seeon-meet ci --omit=dev/,
   );
 });
+
+test('입력 목록 JSON: 점으로 시작하는 이름(숨김 파일·실행 잠금 .factory.lock 과 겹침)은 앞에 video- 를 붙인다', async () => {
+  const dirPath = makeDir('list-dot');
+  const listPath = path.join(dirPath, 'list.json');
+  fs.writeFileSync(listPath, JSON.stringify([{ videoId: '.factory.lock', file: 'a.mp4' }, { videoId: '.hidden', file: 'b.mp4' }]));
+  const jobList = await listInputVideos({ input: listPath });
+  assert.deepEqual(jobList.map((job) => [job.videoId, job.outStem]), [['.factory.lock', 'video-.factory.lock'], ['.hidden', 'video-.hidden']]);
+});

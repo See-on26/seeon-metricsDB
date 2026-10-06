@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -290,4 +291,43 @@ test('CLI: SIGINT 를 받으면 돌던 워커를 멈추고 남은 영상은 띄�
   assert.equal(fs.existsSync(path.join(outDir, 'c.log')), false, '중단 뒤에는 새 워커를 띄우지 않는다');
   assert.ok(lineList.some((line) => line.startsWith('[factory] SIGINT 받음')), lineList.join('\n'));
   assert.equal(signalSource.listenerCount('SIGINT') + signalSource.listenerCount('SIGTERM'), 0, '실행이 끝나면 신호 처리기를 뗀다');
+});
+
+// 이미 끝난 프로세스의 pid(낡은 잠금 시험용).
+function readDeadPid() {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('exit', () => resolve(child.pid));
+  });
+}
+
+test('CLI: 같은 출력 폴더에 이미 실행이 붙어 있으면 워커 없이 종료 코드 1, 끝난 실행은 잠금을 풀고, 죽은 실행의 잠금은 알린 뒤 가져간다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a-slow.mp4']);
+  const outDir = path.join(makeDir('lock'), 'run');
+  const lockPath = path.join(outDir, '.factory.lock');
+  const runOnce = ({ log, extraArgList = [] }) => runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, ...extraArgList], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  });
+  let secondRun = null;
+  const first = createLogCollector({
+    onLine: (line) => {
+      if (secondRun || !line.startsWith('[factory] ▶')) return;
+      const second = createLogCollector();
+      secondRun = runOnce({ log: second.log }).then((exitCode) => ({ exitCode, lineList: second.lineList }));
+    },
+  });
+  assert.equal(await runOnce({ log: first.log }), 0);
+  const { exitCode, lineList } = await secondRun;
+  assert.equal(exitCode, 1);
+  assert.ok(lineList.some((line) => line.startsWith(`[factory] 이 출력 폴더는 이미 다른 실행(pid ${process.pid}`)), lineList.join('\n'));
+  assert.equal(countStart({ outDir, outStem: 'a-slow' }), 1, '두 번째 실행은 워커를 띄우지 않는다');
+  assert.equal(fs.existsSync(lockPath), false, '끝난 실행은 잠금을 푼다');
+
+  const deadPid = await readDeadPid();
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: deadPid, host: os.hostname(), startedAt: '2026-10-06T00:00:00.000Z' }));
+  const takeOver = createLogCollector();
+  assert.equal(await runOnce({ log: takeOver.log, extraArgList: ['--force'] }), 0);
+  assert.ok(takeOver.lineList.some((line) => line.includes(`낡은 잠금(pid ${deadPid}`)), takeOver.lineList.join('\n'));
+  assert.equal(countStart({ outDir, outStem: 'a-slow' }), 2);
+  assert.equal(fs.existsSync(lockPath), false);
 });

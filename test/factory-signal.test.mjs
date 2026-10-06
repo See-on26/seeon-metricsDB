@@ -10,6 +10,7 @@ import { waitRealUntil } from './helpers/real-wait.mjs';
 
 const DRIVER_PATH = fileURLToPath(new URL('./helpers/factory-cli-driver.mjs', import.meta.url));
 const NODE_FLAG = '--disable-warning=MODULE_TYPELESS_PACKAGE_JSON';
+const LOCK_FILE_NAME = '.factory.lock';
 // GPU 실서비스 포트(8801–8804)에 닿지 않게 주소는 쓰지 않는 포트로 둔다. 점검은 드라이버의 대역이 한다.
 const DRIVER_ENV = {
   PATH: process.env.PATH, HOME: process.env.HOME, AWS_BEARER_TOKEN_BEDROCK: 'test-token',
@@ -71,6 +72,7 @@ function assertInterruptedManifest({ outDir, output }) {
     ['a-linger', 'failed', '중단됨(SIGINT)'], ['b-linger', 'failed', '중단됨(SIGINT)'], ['c', 'not_run', undefined],
   ]);
   assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), /SIGINT 로 중단/);
+  assert.equal(fs.existsSync(path.join(outDir, LOCK_FILE_NAME)), false, '중단돼도 잠금을 푼다');
 }
 
 test('진짜 프로세스: 그룹에 SIGINT 가 연달아 두 번(터미널 Ctrl-C + npm 전달) 와도 워커를 SIGTERM 으로 순서대로 멈추고 중단을 기록한 뒤 130 으로 끝난다', { timeout: 30000 }, async (t) => {
@@ -118,4 +120,5 @@ test('진짜 프로세스: 정리 중에 시간을 두고 신호를 한 번 더 
     ['a-stubborn', 'failed', '중단됨(SIGINT)'], ['b-stubborn', 'failed', '중단됨(SIGINT)'],
   ]);
   assert.match(run.output.text, /강제/);
+  assert.equal(fs.existsSync(path.join(outDir, LOCK_FILE_NAME)), false, '강제 종료여도 잠금을 푼다');
 });
