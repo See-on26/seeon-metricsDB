@@ -63,14 +63,14 @@ function waitWorkersStarted({ outDir, outStemList }) {
   return waitRealUntil(() => outStemList.every((outStem) => readLog({ outDir, outStem }).includes(`${outStem} 시작`)), { limitMs: 10000 });
 }
 
-function assertInterruptedManifest({ outDir, output }) {
+function assertInterruptedManifest({ outDir, output, signalName = 'SIGINT' }) {
   const manifest = readJson(path.join(outDir, 'manifest.json'));
-  assert.equal(manifest.interruptedBy, 'SIGINT', output.text);
+  assert.equal(manifest.interruptedBy, signalName, output.text);
   assert.ok(manifest.endedAt, '정리를 마치고 끝난 시각을 남긴다');
   assert.deepEqual(manifest.videoList.map((video) => [video.videoId, video.status, video.errorMessage]), [
-    ['a-linger', 'failed', '중단됨(SIGINT)'], ['b-linger', 'failed', '중단됨(SIGINT)'], ['c', 'not_run', undefined],
+    ['a-linger', 'failed', `중단됨(${signalName})`], ['b-linger', 'failed', `중단됨(${signalName})`], ['c', 'not_run', undefined],
   ]);
-  assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), /SIGINT 로 중단/);
+  assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), new RegExp(`${signalName} 로 중단`));
   assert.equal(fs.existsSync(path.join(outDir, LOCK_FILE_NAME)), false, '중단돼도 잠금을 푼다');
 }
 
@@ -120,4 +120,15 @@ test('진짜 프로세스: 정리 중에 시간을 두고 신호를 한 번 더 
   ]);
   assert.match(run.output.text, /강제/);
   assert.equal(fs.existsSync(path.join(outDir, LOCK_FILE_NAME)), false, '강제 종료여도 잠금을 푼다');
+});
+
+test('진짜 프로세스: 터미널이 닫혀(tmux·nohup 없는 SSH 연결 끊김) 그룹에 SIGHUP 이 오면 SIGINT 처럼 워커를 멈추고 중단을 기록하며 잠금을 푼 뒤 129 로 끝난다', { timeout: 30000 }, async (t) => {
+  const { inputDir, outDir } = prepareRun(['a-linger.mp4', 'b-linger.mp4', 'c.mp4']);
+  const run = spawnInGroup(t, { command: process.execPath, argList: [NODE_FLAG, DRIVER_PATH, '--input', inputDir, '--out', outDir, '--concurrency', '2'] });
+  assert.ok(await waitWorkersStarted({ outDir, outStemList: ['a-linger', 'b-linger'] }), run.output.text);
+  signalGroup({ child: run.child, signalName: 'SIGHUP' });
+  assert.deepEqual(await run.exited, { code: 129, signal: null }, run.output.text);
+  assertInterruptedManifest({ outDir, output: run.output, signalName: 'SIGHUP' });
+  assert.match(run.output.text, /\[factory\] SIGHUP 받음/);
+  assert.equal(fs.existsSync(path.join(outDir, 'c.log')), false, '중단 뒤에는 새 워커를 띄우지 않는다');
 });

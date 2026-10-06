@@ -18,7 +18,9 @@ import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
 import { loadPipelineConfig } from '../product/product-loader.mjs';
 
 const PROGRESS_LOG_MS = 5000;
-const STOP_SIGNAL_LIST = ['SIGINT', 'SIGTERM'];
+// SIGHUP 은 터미널이 닫힐 때(tmux·nohup 없이 SSH 로 돌리다 연결이 끊김) 온다. 받지 않으면 기본 동작으로 바로 죽어
+// manifest 가 "진행 중"으로 남으므로 Ctrl-C 와 같이 정리하고 끝낸다.
+const STOP_SIGNAL_LIST = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 
 // 직접 실행할 때만 저장소 .env 를 process.env 로 읽는다. 이미 있는 환경변수가 이긴다.
 function loadFactoryEnv() {
@@ -125,7 +127,7 @@ function listenStopSignal({ signalSource, onStop, onForce, now = () => performan
   };
 }
 
-// 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGINT 130, SIGTERM 143).
+// 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGHUP 129, SIGINT 130, SIGTERM 143).
 // workerPath·checkService·runVersion·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 서비스·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
 export async function runFactoryCli({
   argList, env = process.env, log = console, workerPath, checkService, runVersion, startTunnel = startProductTunnel, signalSource = process,

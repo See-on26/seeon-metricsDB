@@ -298,7 +298,7 @@ test('CLI: SIGINT 를 받으면 돌던 워커를 멈추고 남은 영상은 띄�
   assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), /SIGINT 로 중단/);
   assert.equal(fs.existsSync(path.join(outDir, 'c.log')), false, '중단 뒤에는 새 워커를 띄우지 않는다');
   assert.ok(lineList.some((line) => line.startsWith('[factory] SIGINT 받음')), lineList.join('\n'));
-  assert.equal(signalSource.listenerCount('SIGINT') + signalSource.listenerCount('SIGTERM'), 0, '실행이 끝나면 신호 처리기를 뗀다');
+  assert.deepEqual(['SIGINT', 'SIGTERM', 'SIGHUP'].map((signalName) => signalSource.listenerCount(signalName)), [0, 0, 0], '실행이 끝나면 신호 처리기를 뗀다');
 });
 
 // 이미 끝난 프로세스의 pid(낡은 잠금 시험용).
