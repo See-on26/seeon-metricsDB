@@ -123,6 +123,23 @@ test('원음 + 무음 + AD + 배속 원음을 이어 mp3 를 만들고 길이가
   assert.equal(fs.readdirSync(dirPath).some((name) => name.startsWith('render-')), false, '중간 파일을 지운다');
 });
 
+test('렌더 중 워커가 죽어 남은 render-* 임시 파일은 다음 렌더가 지우고, 작업 폴더의 다른 파일은 그대로 둔다', async () => {
+  const workDir = makeTempDir('factory-render-leftover-');
+  const sourcePath = await createTestClip({ dirPath: workDir, fileName: 'src.mp4', colorTimeline: [['black', 1]], audioExpr: '0.3*sin(2*PI*330*t)' });
+  fs.mkdirSync(path.join(workDir, 'ad'));
+  fs.writeFileSync(path.join(workDir, 'ad', 'ad-001.wav'), createToneWav({ durationMs: 300 }));
+  fs.writeFileSync(path.join(workDir, 'render-0.wav'), Buffer.alloc(1024));
+  fs.writeFileSync(path.join(workDir, 'render-list.txt'), "file 'render-0.wav'");
+  fs.mkdirSync(path.join(workDir, 'render-AbCd12'));
+  fs.writeFileSync(path.join(workDir, 'render-AbCd12', 'chunk-0.wav'), Buffer.alloc(1024));
+  await renderOutputMp3({
+    sourcePath, hasSourceAudio: true, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }], adPathByRef: new Map(),
+    outPath: path.join(workDir, 'out.mp3'), workDir, sampleRate: 48000, channelCount: 2, ffmpegPath,
+  });
+  assert.deepEqual(fs.readdirSync(workDir).sort(), ['ad', 'out.mp3', 'src.mp4']);
+  assert.deepEqual(fs.readdirSync(path.join(workDir, 'ad')), ['ad-001.wav']);
+});
+
 test('원음 오디오가 늦게 시작하는 영상도 영상(컨테이너) 시각에 맞춰 합성한다', async () => {
   const sourcePath = await createTestClip({ dirPath, fileName: 'late-audio.mp4', colorTimeline: [['black', 3]], audioExpr: '0.3*sin(2*PI*330*t)', audioStartSec: 1 });
   const outPath = path.join(dirPath, 'late-audio.mp3');
