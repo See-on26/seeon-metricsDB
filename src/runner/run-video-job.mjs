@@ -16,6 +16,7 @@ import { EVAL_PRESET_MAP } from '../session/feature-preset.mjs';
 import { renderOutputMp3 } from '../output/render-mp3.mjs';
 import { buildAdReport, readPipelineRecordList } from '../output/ad-report.mjs';
 import { buildOutputPathMap } from './output-paths.mjs';
+import { prepareWorkDir } from './work-dir.mjs';
 import { buildIncompleteReasonList, buildWarningList, describeIncompleteReason } from './result-health.mjs';
 
 // 결과 JSON 의 config. 토큰은 남기지 않고, modelConfig 는 buildAdReport 가 기록 허용 목록으로 한 번 더 거른다.
@@ -39,6 +40,8 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   const versionMap = readVersionMap();
   const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
   const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
+  // 작업 폴더를 표식과 함께 만든다. 같은 자리에 공장이 만들지 않은 폴더가 있으면 그 안에 쓰지 않고 실패한다.
+  prepareWorkDir({ workDir: pathMap.workDir });
   await fs.promises.mkdir(pathMap.adDir, { recursive: true });
   const probe = await probeVideo({ filePath: job.filePath, ffprobePath });
   // 워커 풀이 영상 길이로 시간 상한을 잡도록 긴 준비 단계 전에 길이를 먼저 알린다.

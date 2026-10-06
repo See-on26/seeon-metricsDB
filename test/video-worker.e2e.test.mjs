@@ -190,3 +190,16 @@ test('TTS 가 죽어 해설이 모두 소리를 잃으면 AD 없는 결과를 �
   assert.equal(report.warningList.some((warning) => warning.code.startsWith('tts_')), false, '불완전 사유로 센 TTS 실패는 경고로 다시 세지 않는다');
   assert.equal(inspectVideoResult({ outDir, outStem: 'deck' }).status, 'incomplete', '다시 돌리면 다시 처리한다');
 });
+
+test('워커는 작업 폴더 자리에 공장이 만들지 않은 같은 이름의 폴더가 있으면 그 안에 쓰지 않고 실패로 끝난다', { timeout: 60000 }, async () => {
+  const dirPath = makeTempDir('factory-e2e-user-folder-');
+  const filePath = await createTestClip({ dirPath, fileName: 'lecture.mp4', colorTimeline: [['gray', 2]], hasAudio: false });
+  const userDir = path.join(dirPath, 'lecture');
+  fs.mkdirSync(userDir);
+  fs.writeFileSync(path.join(userDir, 'notes.txt'), '사용자 자료');
+  const result = await runWorker({ job: { videoId: 'lecture', filePath, outStem: 'lecture', language: 'ko', isPageTransitionIncluded: false }, outDir: dirPath });
+  assert.equal(result.status, 'failed', result.logText.slice(-2000));
+  assert.match(result.message, /공장 표식\(\.seeon-factory-work\)이 없는 폴더가 있어 지우지도 쓰지도 않는다/);
+  assert.deepEqual(fs.readdirSync(userDir), ['notes.txt']);
+  assert.equal(fs.existsSync(path.join(dirPath, 'lecture_SEEON_AD.mp3')), false);
+});

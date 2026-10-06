@@ -10,6 +10,7 @@ import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatR
 import { runPreflight, listDownServices, startProductTunnel } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
+import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
 import { formatWarningBrief } from '../runner/result-health.mjs';
 import { readResultIdentity } from '../runner/result-identity.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
@@ -46,11 +47,13 @@ async function openGpuAccess({ preflight, env, pipelineConfig, checkService, sta
 // 끝남 표시(JSON)는 이번 작업이 마지막에 새로 써야만 믿을 수 있다. JSON·mp3 를 먼저 지워 --force 재실행 등이 도중에 죽었을 때
 // 잘린 mp3 와 이전 JSON 이 끝난 영상으로 보이지 않게 한다. 작업 폴더(AD wav·제품 기록·합성 조각)도 비워 이전 실행의 파일이 섞이지 않게 한다.
 function clearPreviousOutput({ outDir, pathMap }) {
-  fs.rmSync(pathMap.jsonPath, { force: true });
-  fs.rmSync(pathMap.mp3Path, { force: true });
   // 작업 폴더는 출력 폴더 바로 아래 <출력 이름>/ 이다. 이름이 어긋나 다른 곳을 가리키면 지우지 않고 멈춘다.
   if (path.dirname(pathMap.workDir) !== outDir) throw new Error(`작업 폴더가 출력 폴더 바로 아래가 아니다: ${pathMap.workDir}`);
-  fs.rmSync(pathMap.workDir, { recursive: true, force: true });
+  // 그 자리에 공장 표식이 없는 사용자 폴더 등이 있으면 아무것도 지우지 않고 이 영상을 실패로 둔다.
+  assertRemovableWorkDir({ workDir: pathMap.workDir });
+  fs.rmSync(pathMap.jsonPath, { force: true });
+  fs.rmSync(pathMap.mp3Path, { force: true });
+  removeWorkDir({ workDir: pathMap.workDir });
 }
 
 // 지금과 같은 영상·코드 버전·결과 설정으로 끝난 영상만 건너뛴다. 끝났는데 달라서 다시 만드는 영상은 이유를 한 줄씩 찍는다.

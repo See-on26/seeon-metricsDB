@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { runFactoryCli } from '../src/cli/factory-cli.mjs';
 import { readResultIdentity } from '../src/runner/result-identity.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
+import { WORK_DIR_MARKER_NAME } from '../src/runner/work-dir.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
@@ -342,7 +343,7 @@ test('CLI: 같은 출력 폴더에 이미 실행이 붙어 있으면 워커 없�
 test('CLI: 다시 처리하는 영상은 이전 실행이 남긴 작업 폴더(AD wav·합성 조각)를 먼저 비우고, 건너뛴 영상의 작업 폴더는 그대로 둔다', async () => {
   const inputDir = makeInputDir(['a.mp4', 'b.mp4']);
   const outDir = path.join(makeDir('workdir'), 'run');
-  const staleFileList = ['ad/ad-009.wav', 'render-3.wav', 'pipeline-1.jsonl'];
+  const staleFileList = [WORK_DIR_MARKER_NAME, 'ad/ad-009.wav', 'render-3.wav', 'pipeline-1.jsonl'];
   for (const outStem of ['a', 'b']) {
     fs.mkdirSync(path.join(outDir, outStem, 'ad'), { recursive: true });
     for (const name of staleFileList) fs.writeFileSync(path.join(outDir, outStem, name), 'old');
@@ -354,6 +355,25 @@ test('CLI: 다시 처리하는 영상은 이전 실행이 남긴 작업 폴더(A
   assert.equal(countStart({ outDir, outStem: 'a' }), 1);
   assert.equal(fs.existsSync(path.join(outDir, 'a')), false, '이전 실행의 작업 폴더를 비운다');
   for (const name of staleFileList) assert.ok(fs.existsSync(path.join(outDir, 'b', name)), `건너뛴 영상의 ${name} 은 결과가 가리키므로 남긴다`);
+});
+
+test('CLI: --out 을 영상 폴더와 같게 주고 영상과 같은 이름의 사용자 폴더가 있으면, 그 폴더는 지우지도 쓰지도 않고 그 영상만 실패로 둔다', async () => {
+  const inputDir = makeInputDir(['lecture.mp4', 'b.mp4']);
+  const userDir = path.join(inputDir, 'lecture');
+  fs.mkdirSync(path.join(userDir, 'slides'), { recursive: true });
+  fs.writeFileSync(path.join(userDir, 'slides', 'deck.pdf'), '사용자 자료');
+  const { lineList, log } = createLogCollector();
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', inputDir], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 1);
+  assert.equal(fs.readFileSync(path.join(userDir, 'slides', 'deck.pdf'), 'utf8'), '사용자 자료');
+  assert.deepEqual(fs.readdirSync(userDir), ['slides'], '사용자 폴더에 표식도 쓰지 않는다');
+  assert.equal(fs.existsSync(path.join(inputDir, 'lecture.log')), false, '그 영상의 워커는 띄우지 않는다');
+  const videoById = Object.fromEntries(readJson(path.join(inputDir, 'manifest.json')).videoList.map((video) => [video.videoId, video]));
+  assert.equal(videoById.lecture.status, 'failed');
+  assert.match(videoById.lecture.errorMessage, /공장 표식\(\.seeon-factory-work\)이 없는 폴더가 있어 지우지도 쓰지도 않는다/);
+  assert.equal(videoById.b.status, 'done', '다른 영상은 그대로 처리한다');
+  assert.ok(lineList.some((line) => line.startsWith('[factory] ✖') && line.includes('lecture')), lineList.join('\n'));
 });
 
 test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모델)이 지금과 다르면 이유를 한 줄 찍고 다시 만들고, 주소만 바뀐 것은 건너뛴다', { timeout: 20000 }, async () => {
