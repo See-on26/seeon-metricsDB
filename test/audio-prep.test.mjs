@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { computeMeterLevel, computeMeterLevelList, createMeterLevelAccumulator, decodeMeterLevelList, readLevelAt } from '../src/media/audio-levels.mjs';
 import { planAsrSegmentList } from '../src/media/asr-segment-plan.mjs';
@@ -11,9 +9,10 @@ import { readWavInfo } from '../src/media/wav.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-audio-'));
+const dirPath = makeTempDir('factory-audio-');
 
 // [길이ms, 레벨] 목록 → 100ms tick 레벨 목록. tick k(시각 k×100)는 그 시각을 덮는 구간의 레벨이다.
 // 임계값과 정확히 같은 0.02 를 담으려고 배정밀도로 만든다(Float32 에서는 0.0199999995 가 된다).

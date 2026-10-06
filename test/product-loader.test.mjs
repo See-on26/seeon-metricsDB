@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { createRequire } from 'node:module';
@@ -11,9 +9,10 @@ import {
 } from '../src/product/product-loader.mjs';
 import { resolveProductPath } from '../src/product/product-paths.mjs';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 // 제품은 프로세스마다 한 번만 로드한다. node --test 는 파일마다 프로세스를 따로 띄운다.
-const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-loader-'));
+const outDir = makeTempDir('factory-loader-');
 const FIXED_WALL_MS = 1_800_000_000_000;
 const callCountMap = { nowWall: 0, fetch: 0 };
 const fixedScope = {

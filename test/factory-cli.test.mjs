@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runFactoryCli } from '../src/cli/factory-cli.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
 // GPU 실서비스 포트(8801–8804)에 닿지 않게 모든 주소를 쓰지 않는 포트로 두고, 포트 점검은 대역으로 바꾼다.
@@ -20,7 +20,7 @@ const PASSING_PREFLIGHT = {
   startTunnel: async () => assert.fail('포트가 열려 있으면 터널을 열지 않는다'),
 };
 
-const makeDir = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `factory-cli-${name}-`));
+const makeDir = (name) => makeTempDir(`factory-cli-${name}-`);
 
 function makeInputDir(nameList) {
   const dirPath = makeDir('input');

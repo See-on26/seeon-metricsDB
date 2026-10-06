@@ -1,17 +1,16 @@
-import { test, after } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { computeBestCorrelation, computeExpectedOutputMs, computePlayedAdMs, verifyOutput } from '../src/output/verify-output.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
 import { summarizeTimeline } from '../src/session/playback-recorder.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-verify-'));
-after(() => fs.rmSync(dirPath, { recursive: true, force: true }));
+const dirPath = makeTempDir('factory-verify-');
 
 test('AD 소리가 출력에 있으면 상관이 1 에 가깝고 지연(lag)도 찾는다', () => {
   const reference = Float32Array.from({ length: 4000 }, (_, i) => Math.sin(i * (0.01 + i * 0.00001)));

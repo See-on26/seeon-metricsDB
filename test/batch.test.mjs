@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleepReal } from 'node:timers/promises';
@@ -11,8 +10,9 @@ import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../src/runner/worker-pool.mjs';
 import { isVideoDone, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
 import { runPreflight, checkTcpPort, startProductTunnel } from '../src/runner/preflight.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
-const makeDir = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `factory-${name}-`));
+const makeDir = (name) => makeTempDir(`factory-${name}-`);
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
 
 test('인자: 기본값(동시 3·auto)과 잘못된 값', () => {

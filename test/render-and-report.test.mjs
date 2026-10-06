@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { resolveOutputAudioFormat, buildPieceFilter, buildRenderChunkList } from '../src/output/render-plan.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
@@ -10,9 +9,10 @@ import { execFileSync } from 'node:child_process';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-render-'));
+const dirPath = makeTempDir('factory-render-');
 
 // mp3 를 f32 PCM 으로 풀어 채널마다 [fromSec, toSec) 구간 RMS 를 잰다.
 async function readChannelRmsList({ filePath, channelCount, sampleRate = 48000, fromSec, toSec }) {

@@ -20,7 +20,11 @@ const deckPath = await createTestClip({
   box: { x: 40, y: 40, w: 40, h: 40, fromSec: 1.0, toSec: 1.5 },
 });
 const readerList = [];
-after(() => readerList.forEach((reader) => reader.close()));
+// 리더(ffmpeg)를 먼저 닫고 그 리더가 읽던 임시 폴더를 지운다.
+after(() => {
+  readerList.forEach((reader) => reader.close());
+  fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3 });
+});
 function openReader(filePath = deckPath) {
   const reader = openSampleFrameReader({ filePath, ffmpegPath });
   readerList.push(reader);

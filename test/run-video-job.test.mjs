@@ -1,13 +1,13 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { startMockServices } from './helpers/mock-services.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { openSampleFrameReader } from '../src/media/frame-source.mjs';
 import { runVideoJob } from '../src/runner/run-video-job.mjs';
 import { isVideoDone } from '../src/runner/manifest.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 // 제품 파이프라인은 프로세스마다 한 번만 세운다. 이 파일은 영상 하나만 같은 프로세스에서 돌린다.
 const mock = await startMockServices();
@@ -18,7 +18,7 @@ after(() => mock.close());
 const FRAME_ERROR_MESSAGE = 'ffmpeg 프레임 디코드 실패(종료 코드 1): 손상된 프레임';
 
 test('프레임 읽기가 중간에 실패하면 mp3·JSON 은 남기되 JSON 을 isComplete=false·사유와 함께 쓰고 영상은 실패로 끝낸다', { timeout: 120000 }, async () => {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-job-'));
+  const dirPath = makeTempDir('factory-job-');
   const filePath = await createTestClip({ dirPath, fileName: 'broken.mp4', colorTimeline: [['gray', 6]], hasAudio: false });
   const outDir = path.join(dirPath, 'out');
   const openFrameReader = (option) => {

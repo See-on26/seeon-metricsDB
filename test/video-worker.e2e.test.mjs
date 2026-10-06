@@ -1,7 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fork, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +8,7 @@ import { startMockServices } from './helpers/mock-services.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { waitRealUntil } from './helpers/real-wait.mjs';
 import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffprobePath } = resolveFfmpegPaths({ env: process.env });
 const WORKER_PATH = fileURLToPath(new URL('../src/runner/video-worker.mjs', import.meta.url));
@@ -39,7 +39,7 @@ function runWorker({ job, outDir }) {
 const readMp3Ms = (filePath) => Number(execFileSync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath]).toString()) * 1000;
 
 test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이 나오고 길이 공식이 맞는다', { timeout: 180000 }, async () => {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-'));
+  const dirPath = makeTempDir('factory-e2e-');
   const filePath = await createTestClip({
     dirPath, fileName: 'deck.mp4', width: 640, height: 360,
     colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
@@ -76,7 +76,7 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
 });
 
 test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', { timeout: 120000 }, async () => {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-silent-'));
+  const dirPath = makeTempDir('factory-e2e-silent-');
   const filePath = await createTestClip({ dirPath, fileName: 'mute.mp4', colorTimeline: [['gray', 6]], hasAudio: false });
   const outDir = path.join(dirPath, 'out');
   const result = await runWorker({ job: { videoId: 'mute', filePath, outStem: 'mute', language: 'auto', isPageTransitionIncluded: false }, outDir });
@@ -92,7 +92,7 @@ function listProcessByArg(text) {
 }
 
 test('워커는 SIGTERM 을 받으면 띄운 ffmpeg·ffprobe 를 죽이고 143 으로 끝난다', { timeout: 60000 }, async () => {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-sigterm-'));
+  const dirPath = makeTempDir('factory-e2e-sigterm-');
   // 쓰는 쪽이 없는 FIFO 를 영상으로 주면 ffprobe 가 열다가 멈춘다.
   const fifoPath = path.join(dirPath, 'stuck.mp4');
   execFileSync('mkfifo', [fifoPath]);

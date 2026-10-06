@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 import { createFrameAccess } from '../src/session/frame-access.mjs';
@@ -9,9 +8,10 @@ import { openSampleFrameReader } from '../src/media/frame-source.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { waitRealUntil } from './helpers/real-wait.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-frame-access-'));
+const dirPath = makeTempDir('factory-frame-access-');
 const silentLog = { log() {}, warn() {} };
 
 const isBlue = ({ data }) => data[2] > 200 && data[0] < 80;
