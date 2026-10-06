@@ -132,3 +132,55 @@ test('400ms 격자 시각마다 차례로 프레임을 읽고, stop 뒤나 캡�
   assert.equal(readTimeList.length, 5);
   assert.deepEqual(harness.warnList, []);
 });
+
+test('프레임 읽기가 400ms 를 넘기면 그 사이 tick 은 건너뛰고 같은 시각 샘플을 두 번 돌리지 않는다', async () => {
+  const readTimeList = [];
+  const harness = setupSlides({
+    frameAt: (timeMs) => {
+      readTimeList.push(timeMs);
+      if (timeMs !== 400) return RED;
+      return new Promise((resolve) => { harness.clock.setTimeout(() => resolve(RED), 900); });
+    },
+  });
+  harness.slideGlue.start();
+  await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 2000 });
+  assert.deepEqual(readTimeList, [400, 1600, 2000], '읽는 중에 온 800·1200 tick 은 버린다');
+  const sampleTsList = harness.ctx.core.pointingLocator.sampleList.map(({ ts }) => ts);
+  assert.equal(new Set(sampleTsList).size, sampleTsList.length, `같은 시각 표본이 겹쳤다: ${sampleTsList}`);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('프레임 읽기가 실패하면 샘플러를 멈추고 경고 한 번과 함께 오류를 상태에 남긴다', async () => {
+  const readTimeList = [];
+  const harness = setupSlides({
+    frameAt: (timeMs) => {
+      readTimeList.push(timeMs);
+      if (timeMs >= 1200) throw new Error('ffmpeg 프레임 디코드 실패(종료 코드 1)');
+      return RED;
+    },
+  });
+  assert.equal(harness.ctx.state.frameSourceError, null);
+  harness.slideGlue.start();
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 3000 });
+  assert.deepEqual(readTimeList, [400, 800, 1200], '실패 뒤로는 읽지 않는다');
+  assert.deepEqual(harness.ctx.state.frameSourceError, { message: 'ffmpeg 프레임 디코드 실패(종료 코드 1)', videoTimeMs: 1200 });
+  assert.equal(harness.warnList.length, 1);
+  assert.match(harness.warnList[0], /ffmpeg 프레임 디코드 실패/);
+});
+
+test('stop 은 읽는 중인 샘플 결과도 버리고 다음 tick 을 막는다', async () => {
+  const readTimeList = [];
+  const harness = setupSlides({
+    frameAt: (timeMs) => {
+      readTimeList.push(timeMs);
+      return new Promise((resolve) => { harness.clock.setTimeout(() => resolve(RED), 300); });
+    },
+  });
+  harness.slideGlue.start();
+  harness.clock.setTimeout(() => harness.slideGlue.stop(), 500);
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 2000 });
+  assert.deepEqual(readTimeList, [400]);
+  assert.equal(harness.ctx.core.pointingLocator.sampleList.length, 0, '읽는 사이 stop 된 샘플은 처리하지 않는다');
+  assert.equal(callsOf(harness.bridge, 'embed-frame').length, 0);
+  assert.deepEqual(harness.warnList, []);
+});

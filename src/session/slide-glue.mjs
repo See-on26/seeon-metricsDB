@@ -12,12 +12,15 @@ const LOCAL_EMBEDDING_WARNING = '[slide] GPU 임베딩 서버 미연결 — 로�
 // main.js 의 slideDwellGate 콜백(528-549)·samplePointingFrame(625-643)·detectSlideTransition(645-661)·
 // confirmSlideCandidate(663-708)·requestPageTransitionNarration(710-745)·attachPointingMotion(886-899)·
 // saveSlideFrameWithMark(902-909)·saveAnnotationSnapshot(911-923).
-// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:539, 707).
+// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:538, 707).
 export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   const { clock, bridge, state, core } = ctx;
   const { dwellMs } = core.slideDwellGate;
   let samplerTimer = null;
-  let samplingChain = Promise.resolve();
+  let isSampling = false;
+  let isStopped = false;
+  // 프레임 읽기가 실패하면 그 뒤 슬라이드·포인팅 감지가 꺼진다. 뒤 단계가 결과 완전성에 반영하도록 남긴다.
+  state.frameSourceError = null;
 
   // src/main/ipc.js:80-89(save-slide-frame) 와 같은 폴더 규칙이다. base 프레임은 슬라이드마다 한 번만 쓴다.
   async function saveSlideFrame({ slideLabel, frameKind, buffer }) {
@@ -127,16 +130,17 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     const { region, pointingOrderHint } = ctx.getPointingSequence();
     noteAnnotation();
     const isAttached = core.candidateScheduler.attachPointing({ region: region || motion.rect, pointingOrderHint });
-    ctx.log.log(`[deixis] 포인팅 모션 changedRatio=${(motion.changedRatio ?? 0).toFixed(3)}`
+    ctx.log.log(`[deixis] ✍ 포인팅 모션 changedRatio=${(motion.changedRatio ?? 0).toFixed(3)}`
       + ` → ${isAttached ? '대기 중인 발화 후보에 영역 첨부' : '대기 후보 없음 (포인터는 트리거가 아니다)'}`);
   }
 
   // 제품은 그 순간 화면에 보이는 프레임을 동기로 읽는다. 공장은 같은 순간의 시각·영상 시각을 잡아 두고 그 시각 프레임을 읽는다.
   async function sampleFrame() {
-    if (!state.isCaptureActive) return;
+    if (isStopped || !state.isCaptureActive) return;
     const ts = clock.nowPerf();
     const imageData = await readFrameAt(ctx.videoTimeMs());
-    if (!imageData) return;
+    // 읽는 사이 샘플러가 멈췄거나 캡처가 끝났으면 그 프레임은 버린다.
+    if (!imageData || isStopped || !state.isCaptureActive) return;
     core.pointingLocator.sample({ imageData, ts });
     detectSlideTransition({ imageData, ts });
     attachPointingMotion();
@@ -157,19 +161,36 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     });
   };
 
+  function stop() {
+    isStopped = true;
+    if (samplerTimer !== null) clock.clearInterval(samplerTimer);
+    samplerTimer = null;
+  }
+
+  // frame-source 는 디코드 실패 뒤 같은 오류를 매번 던진다. 400ms 마다 경고만 쌓이지 않게 첫 오류에서 멈춘다.
+  function handleSampleError(error) {
+    if (state.frameSourceError) return;
+    stop();
+    state.frameSourceError = { message: error.message, videoTimeMs: ctx.videoTimeMs() };
+    ctx.log.warn(`[slide] 프레임 읽기 실패 — 슬라이드·포인팅 샘플을 멈춘다: ${error.message}`);
+  }
+
+  // 제품 samplePointingFrame 은 동기라 겹치지 않는다. 외부 호출 중에는 가상 시간이 실제처럼 흘러 프레임 읽기가 400ms 를
+  // 넘길 수 있는데, 그 사이 온 tick 을 쌓으면 밀린 샘플이 거의 같은 영상 시각으로 연달아 돌아 히스토그램 게이트와
+  // 포인팅 창에 같은 프레임이 겹친다. 그래서 읽는 중에 온 tick 은 버린다. 프레임 리더가 받는 차례 읽기도 이것으로 지켜진다.
+  function tickSampler() {
+    if (isSampling || isStopped) return;
+    isSampling = true;
+    ctx.trackTask(sampleFrame().catch(handleSampleError).finally(() => { isSampling = false; }), 'frame-sample');
+  }
+
   return {
-    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1759). 프레임 리더는 시각이 줄지 않는 차례 읽기만 받으므로
-    // 앞 샘플이 끝난 뒤 다음 샘플을 잇는다.
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1759).
     start() {
-      samplerTimer = clock.setInterval(() => {
-        samplingChain = samplingChain.then(sampleFrame).catch((error) => ctx.log.warn(`[slide] 프레임 샘플 실패(무시): ${error.message}`));
-        ctx.trackTask(samplingChain, 'frame-sample');
-      }, POINTING_SAMPLE_MS);
+      isStopped = false;
+      samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);
     },
-    stop() {
-      if (samplerTimer !== null) clock.clearInterval(samplerTimer);
-      samplerTimer = null;
-    },
+    stop,
     sampleFrame, detectSlideTransition, confirmSlideCandidate, requestPageTransitionNarration, attachPointingMotion,
   };
 }
