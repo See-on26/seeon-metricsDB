@@ -1,18 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { resolveOutputAudioFormat, buildPieceFilter, buildRenderChunkList } from '../src/output/render-plan.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
-import { buildAdReport, readPipelineRecordList } from '../src/output/ad-report.mjs';
+import { REPORT_MODEL_CONFIG_KEY_LIST, buildAdReport, readPipelineRecordList } from '../src/output/ad-report.mjs';
 import { execFileSync } from 'node:child_process';
-import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
+import { createRequire } from 'node:module';
+import { resolveProductPath } from '../src/product/product-paths.mjs';
+import { ALIGN_TO_VIDEO_TIME_FILTER, resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-render-'));
+const dirPath = makeTempDir('factory-render-');
 
 // mp3 를 f32 PCM 으로 풀어 채널마다 [fromSec, toSec) 구간 RMS 를 잰다.
 async function readChannelRmsList({ filePath, channelCount, sampleRate = 48000, fromSec, toSec }) {
@@ -53,7 +55,7 @@ test('조각이 1000개면 100개씩 10청크로 나누고, 청크마다 원음�
   const chunkList = buildRenderChunkList({ pieceList, sourcePath: '/v.mp4', hasSourceAudio: true, adPathByRef: new Map(), sampleRate: 48000, channelLayout: 'stereo' });
   assert.equal(chunkList.length, 10);
   assert.deepEqual(chunkList[3].inputArgList, ['-ss', '300.000', '-i', '/v.mp4']);
-  assert.match(chunkList[3].filterScript, /^\[0:a\]aresample=async=1:first_pts=0,asplit=100/);
+  assert.ok(chunkList[3].filterScript.startsWith(`[0:a]${ALIGN_TO_VIDEO_TIME_FILTER},asplit=100`), chunkList[3].filterScript.slice(0, 80));
   assert.equal(chunkList[3].outDurationMs, 100000);
 });
 
@@ -119,6 +121,23 @@ test('원음 + 무음 + AD + 배속 원음을 이어 mp3 를 만들고 길이가
   const probedMs = Number(execFileSync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', outPath]).toString()) * 1000;
   assert.ok(Math.abs(probedMs - 6520) < 80, `mp3 ${probedMs}ms`);
   assert.equal(fs.readdirSync(dirPath).some((name) => name.startsWith('render-')), false, '중간 파일을 지운다');
+});
+
+test('렌더 중 워커가 죽어 남은 render-* 임시 파일은 다음 렌더가 지우고, 작업 폴더의 다른 파일은 그대로 둔다', async () => {
+  const workDir = makeTempDir('factory-render-leftover-');
+  const sourcePath = await createTestClip({ dirPath: workDir, fileName: 'src.mp4', colorTimeline: [['black', 1]], audioExpr: '0.3*sin(2*PI*330*t)' });
+  fs.mkdirSync(path.join(workDir, 'ad'));
+  fs.writeFileSync(path.join(workDir, 'ad', 'ad-001.wav'), createToneWav({ durationMs: 300 }));
+  fs.writeFileSync(path.join(workDir, 'render-0.wav'), Buffer.alloc(1024));
+  fs.writeFileSync(path.join(workDir, 'render-list.txt'), "file 'render-0.wav'");
+  fs.mkdirSync(path.join(workDir, 'render-AbCd12'));
+  fs.writeFileSync(path.join(workDir, 'render-AbCd12', 'chunk-0.wav'), Buffer.alloc(1024));
+  await renderOutputMp3({
+    sourcePath, hasSourceAudio: true, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }], adPathByRef: new Map(),
+    outPath: path.join(workDir, 'out.mp3'), workDir, sampleRate: 48000, channelCount: 2, ffmpegPath,
+  });
+  assert.deepEqual(fs.readdirSync(workDir).sort(), ['ad', 'out.mp3', 'src.mp4']);
+  assert.deepEqual(fs.readdirSync(path.join(workDir, 'ad')), ['ad-001.wav']);
 });
 
 test('원음 오디오가 늦게 시작하는 영상도 영상(컨테이너) 시각에 맞춰 합성한다', async () => {
@@ -271,4 +290,37 @@ test('파이프라인 기록은 줄마다 JSON 으로 읽고 깨진 줄·없는 
   assert.deepEqual(readPipelineRecordList({ recordPath }).map((record) => record.kind), ['narration', 'deixis']);
   assert.deepEqual(readPipelineRecordList({ recordPath: path.join(dirPath, 'none.jsonl') }), []);
   assert.deepEqual(readPipelineRecordList({ recordPath: null }), []);
+});
+
+test('AD 기록: 모델 설정은 허용 목록의 이름만 남겨 제품이 키·토큰 필드를 더해도 기록에 실리지 않고, 주소의 사용자 정보는 지운다', () => {
+  const { readPipelineConfig } = createRequire(import.meta.url)(resolveProductPath('src/main/caption-pipeline/config.js'));
+  const productConfig = readPipelineConfig({ AWS_BEARER_TOKEN_BEDROCK: 'secret-bearer', SEEON_ASR_URL: 'http://user:secret-pass@127.0.0.1:8802/asr' });
+  const unknownFieldMap = { newServiceApiKey: 'secret-key', gpuAccessToken: 'secret-token', futureSetting: 'secret-unknown' };
+  const report = buildAdReport({
+    video: { videoId: 'v1', file: '/v1.mp4', durationMs: 1000, width: 320, height: 180, language: 'ko' },
+    seeonMeet: { commit: 'c0ebca0', isDirty: false }, config: { mode: 'delayed', modelConfig: { ...productConfig, ...unknownFieldMap } },
+    sessionStartWallMs: 0, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }],
+    captionRecordList: [], adPlayList: [], dropRecordList: [], pipelineRecordList: [], callLog: [],
+    adFileByRef: new Map(), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 1000, processingMs: 100,
+  });
+  const reportedConfig = report.config.modelConfig;
+  assert.deepEqual(Object.keys(reportedConfig).sort(), [...REPORT_MODEL_CONFIG_KEY_LIST].sort());
+  assert.equal(reportedConfig.asrUrl, 'http://127.0.0.1:8802/asr');
+  assert.equal(reportedConfig.vlmUrl, productConfig.vlmUrl, '사용자 정보가 없는 주소는 그대로');
+  assert.deepEqual(reportedConfig.gapModelByModeMap, productConfig.gapModelByModeMap);
+  assert.equal(reportedConfig.hasBedrockCredentials, true);
+  assert.equal(JSON.stringify(report).includes('secret'), false);
+  // 제품 설정에 새 필드가 생기면 여기서 알린다. 비밀이 아니면 허용 목록에 더하고, 비밀이면 아래 목록에 더한다.
+  assert.deepEqual(Object.keys(productConfig).filter((key) => !REPORT_MODEL_CONFIG_KEY_LIST.includes(key)), ['bedrockApiKey']);
+});
+
+test('AD 기록: 모델 설정이 없는 기록은 그대로 둔다', () => {
+  const report = buildAdReport({
+    video: { videoId: 'v1', file: '/v1.mp4', durationMs: 1000, width: 320, height: 180, language: 'ko' },
+    seeonMeet: { commit: 'c0ebca0', isDirty: false }, config: { mode: 'delayed' },
+    sessionStartWallMs: 0, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }],
+    captionRecordList: [], adPlayList: [], dropRecordList: [], pipelineRecordList: [], callLog: [],
+    adFileByRef: new Map(), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 1000, processingMs: 100,
+  });
+  assert.deepEqual(report.config, { mode: 'delayed' });
 });

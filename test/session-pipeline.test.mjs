@@ -1,7 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { startMockServices } from './helpers/mock-services.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
@@ -12,6 +11,7 @@ import { openSampleFrameReader } from '../src/media/frame-source.mjs';
 import { probeVideo } from '../src/media/probe.mjs';
 import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
 import { readPipelineRecordList } from '../src/output/ad-report.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 // 제품 파이프라인은 프로세스마다 한 번만 세운다. 이 파일은 세션 하나만 돌린다.
 const mock = await startMockServices();
@@ -21,7 +21,7 @@ after(() => mock.close());
 
 test('runToEnd 가 돌아오면 제품 기록 파일에 세션 끝 기록까지 다 쓰여 있다(파일 쓰기 정착)', { timeout: 60000 }, async () => {
   const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-session-pipeline-'));
+  const dirPath = makeTempDir('factory-session-pipeline-');
   const filePath = await createTestClip({ dirPath, fileName: 'gray.mp4', colorTimeline: [['gray', 3]], hasAudio: false });
   const probe = await probeVideo({ filePath, ffprobePath });
   const workDir = path.join(dirPath, 'work');

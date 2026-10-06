@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 test('진행 중인 외부 호출이 없으면 다음 타이머로 바로 건너뛴다', async () => {
   const clock = createVirtualClock({ startWallMs: 1_000_000 });
@@ -59,12 +59,14 @@ test('hold 중에는 시간이 멈추고, 끝난 뒤에야 다음 타이머로 �
 
 test('끝나지 않은 파일 쓰기가 있으면 건너뛰지 않는다', async () => {
   const clock = createVirtualClock();
-  const filePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'clock-')), 'big.bin');
+  const filePath = path.join(makeTempDir('clock-'), 'big.bin');
   let isWritten = false;
-  fs.promises.writeFile(filePath, Buffer.alloc(32 * 1024 * 1024)).then(() => { isWritten = true; });
+  const writePromise = fs.promises.writeFile(filePath, Buffer.alloc(32 * 1024 * 1024)).then(() => { isWritten = true; });
   let isWrittenAtFire = null;
   clock.setTimeout(() => { isWrittenAtFire = isWritten; }, 10);
   await clock.runUntil({ isDone: () => isWrittenAtFire !== null });
+  // 임시 폴더를 지우기 전에 쓰기가 끝나게 기다린다.
+  await writePromise;
   assert.equal(isWrittenAtFire, true);
 });
 

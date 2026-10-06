@@ -1,10 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { createSlideGlue } from '../src/session/slide-glue.mjs';
 import { createTestContext } from './helpers/session-fakes.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const WIDTH = 480;
 const HEIGHT = 270;
@@ -27,7 +26,7 @@ function setupSlides({ frameAt, embedHandler }) {
   const harness = createTestContext({
     handlerMap: { 'embed-frame': embedHandler ?? (async () => ({ isOk: true, embedding: [1, 0, 0] })) },
   });
-  const slideFrameDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-slides-'));
+  const slideFrameDir = makeTempDir('factory-slides-');
   const slideGlue = createSlideGlue({ ctx: harness.ctx, readFrameAt: async (timeMs) => frameAt(timeMs), slideFrameDir });
   return { ...harness, slideGlue, slideFrameDir };
 }

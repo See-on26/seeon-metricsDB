@@ -12,6 +12,36 @@ const roundOrNull = (value) => (Number.isFinite(value) ? Math.round(value) : nul
 const normalizeType = (source) => (source === LEGACY_TRANSITION_SOURCE ? 'page_transition' : source || null);
 const buildCaptionKey = ({ ts, text }) => `${ts}|${text}`;
 
+// 기록에 남기는 모델·서비스 설정 이름. 제품 설정(readPipelineConfig)에서 비밀이 아닌 것만 고른 허용 목록이라, 제품이 키·토큰 같은
+// 새 필드를 더해도 여기에 넣기 전에는 기록에 실리지 않는다(Bedrock 토큰 bedrockApiKey 는 넣지 않는다).
+export const REPORT_MODEL_CONFIG_KEY_LIST = [
+  'vlmUrl', 'vlmModel', 'asrUrl', 'asrLanguage', 'questionAsrLanguage', 'ttsUrl', 'ttsLongUrl', 'embedUrl',
+  'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend', 'judgeGpuUrl', 'judgeGpuModel',
+  'summaryModelId', 'summaryRewriteModelId', 'gapModelByModeMap', 'routerMode', 'isScaleEnabled',
+  'isVlmFallbackEnabled', 'vlmFallbackModelId', 'hasBedrockCredentials',
+];
+
+// 서비스 주소에 사용자 정보(user:pass@)를 넣었으면 지운다. 주소가 아니거나 사용자 정보가 없으면 그대로 둔다.
+function stripUrlCredential(value) {
+  if (typeof value !== 'string' || !value.includes('@')) return value;
+  try {
+    const url = new URL(value);
+    if (!url.username && !url.password) return value;
+    url.username = '';
+    url.password = '';
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+// 제품 모델 설정에서 허용 목록의 이름만 골라 기록용으로 만든다.
+export function buildReportModelConfig({ modelConfig }) {
+  return Object.fromEntries(REPORT_MODEL_CONFIG_KEY_LIST
+    .filter((key) => Object.hasOwn(modelConfig, key))
+    .map((key) => [key, stripUrlCredential(modelConfig[key])]));
+}
+
 function parseAnchorText(summary) {
   const text = /근거 표현=([^·]*)/.exec(summary || '')?.[1]?.trim() || '';
   return text === '(없음)' ? '' : text;
@@ -86,8 +116,9 @@ export function buildAdReport({
 
   const summary = summarizeTimeline(pieceList);
   const { serviceMap, bedrockModelMap } = computeServiceStats({ callLog });
+  const reportConfig = config?.modelConfig ? { ...config, modelConfig: buildReportModelConfig({ modelConfig: config.modelConfig }) } : config;
   return {
-    schemaVersion: 1, isComplete: true, video, seeonMeet, config,
+    schemaVersion: 1, isComplete: true, video, seeonMeet, config: reportConfig,
     output: {
       file: outputFileName, renderedDurationMs: roundOrNull(renderedDurationMs), timelineDurationMs: roundOrNull(summary.outputDurationMs),
       sourceMediaMs: roundOrNull(summary.sourceMediaMs), adTotalMs: roundOrNull(summary.adTotalMs),

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { compareAdTimeline, formatCompareMarkdown } from '../src/compare/compare-ad-timeline.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const repoPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 실험실(experiment, 균형, 평가 프리셋, ko)로 sample-5slides 를 돌린 ad-timeline.json 그대로다.
@@ -113,7 +113,7 @@ test('표: 문장 속 | 와 줄바꿈은 표를 깨지 않게 바꾸고, 한쪽�
 });
 
 test('compare-lab 도구: 두 JSON 경로를 받아 비교 표를 stdout 으로 내고, 인자가 모자라면 사용법과 함께 2 로 끝난다', () => {
-  const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-compare-'));
+  const dirPath = makeTempDir('factory-compare-');
   const factoryJsonPath = path.join(dirPath, 'sample-5slides_SEEON_AD.json');
   fs.writeFileSync(factoryJsonPath, JSON.stringify(createFactoryReport()));
   const toolPath = path.join(repoPath, 'tools/compare-lab.mjs');
@@ -125,5 +125,4 @@ test('compare-lab 도구: 두 JSON 경로를 받아 비교 표를 stdout 으로 
   const missing = spawnSync(process.execPath, [toolPath, factoryJsonPath], { encoding: 'utf8' });
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /사용법: node tools\/compare-lab\.mjs/);
-  fs.rmSync(dirPath, { recursive: true, force: true });
 });

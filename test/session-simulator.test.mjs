@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 import { createSessionSimulator } from '../src/session/session-simulator.mjs';
@@ -14,9 +13,10 @@ import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
 import { runBinary } from '../src/media/ffmpeg.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-simulator-'));
+const dirPath = makeTempDir('factory-simulator-');
 const stillClipPath = await createTestClip({ dirPath, fileName: 'still.mp4', colorTimeline: [['gray', 6]], hasAudio: false });
 const DRAIN_LIMIT_AFTER_END_MS = 10000 + 8000 + 15000;
 
@@ -58,7 +58,7 @@ function setupSimulator({
     video: { videoId: 'clip', filePath, language: 'ko', probe: { durationMs: mediaDurationMs, width: 320, height: 180, hasAudio: false } },
     prep: { levelList: new Float32Array(Math.floor(mediaDurationMs / 100)), segmentList, segmentBufferMap, frameReader },
     options: { isPageTransitionIncluded: false, ffmpegPath, ...options },
-    workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'factory-simulator-work-')),
+    workDir: makeTempDir('factory-simulator-work-'),
     log: { log() {}, warn: (message) => warnList.push(message) },
     onProgress: (progress) => progressList.push(progress),
   });
@@ -162,7 +162,7 @@ test('배수 상한에서 멈춰도 결과 mp3 에는 원음이 끝까지 들어
   await harness.simulator.start();
   const result = await harness.simulator.runToEnd();
   assert.equal(result.isDrainTimedOut, true);
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-simulator-render-'));
+  const workDir = makeTempDir('factory-simulator-render-');
   const recordBySeq = new Map(result.captionRecordList.map((record) => [record.captionSeq, record]));
   const adPathByRef = new Map();
   for (const adPlay of result.adPlayList) {

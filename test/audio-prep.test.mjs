@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { computeMeterLevel, computeMeterLevelList, createMeterLevelAccumulator, decodeMeterLevelList, readLevelAt } from '../src/media/audio-levels.mjs';
 import { planAsrSegmentList } from '../src/media/asr-segment-plan.mjs';
-import { encodeVoicedSegmentList } from '../src/media/segment-encoder.mjs';
+import { buildSegmentEncodeArgList, encodeVoicedSegmentList } from '../src/media/segment-encoder.mjs';
 import { probeVideo } from '../src/media/probe.mjs';
 import { readWavInfo } from '../src/media/wav.mjs';
-import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
+import { ALIGN_TO_VIDEO_TIME_FILTER, resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
-const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-audio-'));
+const dirPath = makeTempDir('factory-audio-');
 
 // [길이ms, 레벨] 목록 → 100ms tick 레벨 목록. tick k(시각 k×100)는 그 시각을 덮는 구간의 레벨이다.
 // 임계값과 정확히 같은 0.02 를 담으려고 배정밀도로 만든다(Float32 에서는 0.0199999995 가 된다).
@@ -114,12 +114,46 @@ test('오디오 stream 이 늦게 시작해도 레벨 격자는 영상(컨테이
 test('조각 인코딩도 영상 시각 기준이라 오디오가 시작하기 전 구간은 무음으로 들어간다', async () => {
   const filePath = await createTestClip({ dirPath, fileName: 'offset-encode.mp4', colorTimeline: [['black', 3]], audioExpr: `${TONE_EXPR}*lt(t,1)`, audioStartSec: 1 });
   const segmentList = [{ startMs: 0, endMs: 3000, voicedMs: 1000, isVoiced: true }];
-  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, ffmpegPath });
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, channelCount: 2, ffmpegPath });
   const pcm = await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-i', 'pipe:0', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1'], inputBuffer: bufferMap.get(0) });
   const levelList = computeMeterLevelList({ sampleList: toFloat32List(pcm) });
   assert.ok(Math.abs(levelList.length - 30) <= 1, `조각 길이는 3초(${levelList.length} tick)`);
   assert.ok(readLevelAt({ levelList, timeMs: 500 }) < 0.02, '조각 앞 1초는 무음');
   assert.ok(readLevelAt({ levelList, timeMs: 1500 }) > 0.2, '톤은 조각 1–2초에 있다');
+});
+
+// 오디오 타임스탬프 약 2.005초에 50ms 틈이 있는 모노 mkv. 톤은 틈 뒤라 영상 2.13초부터 들린다(틈을 무시하면 2.08초로 당겨진다).
+// mkv 타임스탬프는 1ms 로 반올림돼 조각마다 1ms 안팎 흔들린다.
+async function createAudioGapClip(fileName) {
+  const filePath = path.join(dirPath, fileName);
+  await runBinary({
+    binaryPath: ffmpegPath,
+    argList: [
+      '-v', 'error', '-y', '-f', 'lavfi', '-i', `aevalsrc='${TONE_EXPR}*gte(t,2.08)':c=mono:s=48000:d=3`,
+      '-af', "asetpts='PTS+gte(T,2)*0.05/TB'", '-c:a', 'pcm_s16le', filePath,
+    ],
+  });
+  return filePath;
+}
+
+const findOnsetMs = (sampleList, sampleRate = 48000) => (sampleList.findIndex((sample) => Math.abs(sample) > 0.1) * 1000) / sampleRate;
+
+test('100ms 보다 짧은 오디오 타임스탬프 틈도 무음으로 채워 레벨 격자가 영상 시각에 맞는다', async () => {
+  const filePath = await createAudioGapClip('gap-level.mkv');
+  const levelList = await decodeMeterLevelList({ filePath, probe: { durationMs: 3050, hasAudio: true, audioChannelCount: 1 }, ffmpegPath });
+  assert.ok(readLevelAt({ levelList, timeMs: 2100 }) < 0.02, '톤은 영상 2.13초에 시작해 2.1초는 무음이다');
+  assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 2200 }) - 0.354) < 0.06);
+});
+
+test('처음부터 푼 원음과 -ss 로 연 원음이 틈 뒤 같은 영상 시각을 가리킨다(레벨·조각 인코딩·합성 청크가 같은 정렬 필터를 쓴다)', async () => {
+  const filePath = await createAudioGapClip('gap-seek.mkv');
+  const decodeAligned = async (seekArgList) => toFloat32List(await runBinary({
+    binaryPath: ffmpegPath, argList: ['-v', 'error', ...seekArgList, '-i', filePath, '-af', ALIGN_TO_VIDEO_TIME_FILTER, '-f', 'f32le', 'pipe:1'],
+  }));
+  const fullOnsetMs = findOnsetMs(await decodeAligned([]));
+  const seekOnsetMs = 2100 + findOnsetMs(await decodeAligned(['-ss', '2.100']));
+  assert.ok(Math.abs(fullOnsetMs - 2130) <= 3, `처음부터 푼 톤 시작 ${fullOnsetMs}ms`);
+  assert.ok(Math.abs(seekOnsetMs - fullOnsetMs) <= 3, `-ss 로 연 톤 시작 ${seekOnsetMs}ms, 처음부터 ${fullOnsetMs}ms`);
 });
 
 test('모노 96kHz 오디오도 48kHz 미터 격자로 같은 레벨을 낸다', async () => {
@@ -131,8 +165,9 @@ test('모노 96kHz 오디오도 48kHz 미터 격자로 같은 레벨을 낸다',
   assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 1000 }) - 0.354) < 0.06);
 });
 
+// LFE 칸은 60Hz 다. AAC 는 LFE 를 저역만 담아 440Hz 를 −46dB 로 깎으므로, 440Hz 로는 LFE 를 섞는 잘못도 무음처럼 보인다.
 test('5.1 은 Web Audio speakers 다운믹스(√½·L + C + ½·SL, LFE 제외)대로 레벨을 낸다', async () => {
-  const exprList = [`${TONE_EXPR}*lt(t,1)`, '0', `${TONE_EXPR}*between(t,1,2)`, `${TONE_EXPR}*between(t,3,4)`, `${TONE_EXPR}*between(t,2,3)`, '0'];
+  const exprList = [`${TONE_EXPR}*lt(t,1)`, '0', `${TONE_EXPR}*between(t,1,2)`, '0.5*sin(2*PI*60*t)*between(t,3,4)', `${TONE_EXPR}*between(t,2,3)`, '0'];
   const filePath = await createTestClip({ dirPath, fileName: 'surround.mp4', colorTimeline: [['black', 4]], audioExpr: exprList, audioChannelCount: 6 });
   const probe = await probeVideo({ filePath, ffprobePath });
   assert.equal(probe.audioChannelCount, 6);
@@ -164,9 +199,44 @@ test('오디오 트랙이 없으면 레벨은 모두 0 이고 보낼 조각이 �
 test('말이 있는 조각만 webm/opus 로 인코딩한다', async () => {
   const filePath = await createTestClip({ dirPath, fileName: 'speech.mp4', colorTimeline: [['black', 6]], audioExpr: '0.4*sin(2*PI*220*t)*lt(t,3)' });
   const segmentList = [{ startMs: 0, endMs: 3000, voicedMs: 3000, isVoiced: true }, { startMs: 3000, endMs: 6000, voicedMs: 0, isVoiced: false }];
-  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, ffmpegPath });
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, channelCount: 2, ffmpegPath });
   assert.deepEqual([...bufferMap.keys()], [0]);
   assert.equal(bufferMap.get(0).readUInt32BE(0), 0x1a45dfa3, 'EBML(webm) 머리');
+});
+
+const readPeak = (sampleList) => sampleList.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0);
+
+test('조각 인코딩은 레벨과 같은 모노 다운믹스(스테레오 ½L+½R)라 L=R 스테레오를 키우지 않고 진폭 0.9 도 잘리지 않는다', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'loud-stereo.mp4', colorTimeline: [['black', 2]], audioExpr: '0.9*sin(2*PI*440*t)' });
+  const probe = await probeVideo({ filePath, ffprobePath });
+  const segmentList = [{ startMs: 0, endMs: 2000, voicedMs: 2000, isVoiced: true }];
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, channelCount: probe.audioChannelCount, ffmpegPath });
+  const pcm = await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-i', 'pipe:0', '-f', 'f32le', 'pipe:1'], inputBuffer: bufferMap.get(0) });
+  const peak = readPeak(toFloat32List(pcm));
+  assert.ok(Math.abs(peak - 0.9) < 0.06, `조각 최고값 ${peak.toFixed(3)} — 원본 0.9 와 같은 크기여야 한다(√2 로 키우면 1.3 안팎)`);
+  assert.ok(peak < 1, '1 을 넘으면 ASR 서버의 s16 변환에서 잘린다');
+});
+
+test('조각 인코더는 채널 수를 받아야 한다(모르면 ffmpeg 기본 다운믹스로 조용히 바뀌지 않게 거부)', () => {
+  assert.throws(() => buildSegmentEncodeArgList({ filePath: 'a.mp4', startMs: 0, endMs: 1000 }), /채널 수/);
+});
+
+test('길이 정보가 없는 webm(MediaRecorder 녹화처럼 파이프로 쓴 것)은 다시 담는 방법을 알려 주며 거부한다', async () => {
+  const webmBuffer = await runBinary({
+    binaryPath: ffmpegPath,
+    argList: [
+      '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=160x90:r=10:d=1', '-f', 'lavfi', '-i', 'sine=f=440:d=1',
+      '-c:v', 'libvpx', '-b:v', '100k', '-c:a', 'libopus', '-f', 'webm', 'pipe:1',
+    ],
+  });
+  const filePath = path.join(dirPath, 'recorded.webm');
+  fs.writeFileSync(filePath, webmBuffer);
+  await assert.rejects(probeVideo({ filePath, ffprobePath }), (error) => {
+    assert.match(error.message, /영상 길이를 읽지 못했다/);
+    assert.match(error.message, /-c copy/, '다시 담는 명령을 알려 준다');
+    assert.ok(error.message.includes(filePath));
+    return true;
+  });
 });
 
 test('WAV 길이를 읽는다', () => {

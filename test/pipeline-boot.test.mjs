@@ -1,16 +1,14 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { startMockServices } from './helpers/mock-services.mjs';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 import { bootProductPipeline } from '../src/product/boot-pipeline.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const mock = await startMockServices();
 Object.assign(process.env, mock.urlEnv);
 delete process.env.AWS_BEARER_TOKEN_BEDROCK;
-const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-boot-'));
+const outDir = makeTempDir('factory-boot-');
 const clock = createVirtualClock({ startWallMs: 1_800_000_000_000 });
 const { bridge, scopedFetch } = bootProductPipeline({ outDir, clock, log: console });
 const eventList = [];

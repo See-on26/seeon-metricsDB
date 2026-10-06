@@ -16,6 +16,18 @@ async function readAdChannelCountByRef(adPathByRef) {
   return channelCountByRef;
 }
 
+// 렌더 임시 파일(청크 WAV 는 1시간에 약 1.4GB)은 작업 폴더 안 이 이름으로 시작하는 폴더 하나에 모아 끝나면 통째로 지운다.
+const RENDER_TEMP_PREFIX = 'render-';
+
+// 워커가 렌더 중에 죽으면(SIGKILL, 시간 상한) finally 가 돌지 않아 임시 파일이 남는다. 작업 폴더는 영상마다 따로라
+// 다음 렌더를 시작할 때 이전에 남은 render-* 를 지운다.
+async function removeLeftoverRenderTemp(workDir) {
+  const nameList = await fs.promises.readdir(workDir);
+  await Promise.all(nameList
+    .filter((name) => name.startsWith(RENDER_TEMP_PREFIX))
+    .map((name) => fs.promises.rm(path.join(workDir, name), { recursive: true, force: true })));
+}
+
 // 청크마다 WAV(f32)로 렌더하고 concat 으로 이어 한 번만 mp3 로 인코딩한다. 원본 샘플레이트·채널을 mp3 가 받는 범위에서 지키고 192kbps 로 낸다.
 // 청크 WAV 는 몇 시간짜리 영상이면 4GB 를 넘을 수 있어 RF64 를 허용한다.
 export async function renderOutputMp3({ sourcePath, hasSourceAudio, pieceList, adPathByRef, outPath, workDir, sampleRate, channelCount, ffmpegPath, bitrate = '192k' }) {
@@ -25,13 +37,13 @@ export async function renderOutputMp3({ sourcePath, hasSourceAudio, pieceList, a
     adChannelCountByRef: await readAdChannelCountByRef(adPathByRef),
   });
   if (!chunkList.length) throw new Error('합성할 재생 조각이 없다');
-  const tempPathList = [];
+  await removeLeftoverRenderTemp(workDir);
+  const renderDir = await fs.promises.mkdtemp(path.join(path.resolve(workDir), RENDER_TEMP_PREFIX));
   try {
     const chunkPathList = [];
     for (const [index, chunk] of chunkList.entries()) {
-      const scriptPath = path.join(workDir, `render-${index}.filter`);
-      const chunkPath = path.resolve(workDir, `render-${index}.wav`);
-      tempPathList.push(scriptPath, chunkPath);
+      const scriptPath = path.join(renderDir, `chunk-${index}.filter`);
+      const chunkPath = path.join(renderDir, `chunk-${index}.wav`);
       await fs.promises.writeFile(scriptPath, chunk.filterScript);
       // -filter_complex_script 는 ffmpeg 5.1–8.0 이 모두 읽는다. 7.0 에 생긴 -/filter_complex 는 6.x 에 없다(8.0 은 폐기 예정 경고만 낸다).
       await runBinary({
@@ -40,8 +52,7 @@ export async function renderOutputMp3({ sourcePath, hasSourceAudio, pieceList, a
       });
       chunkPathList.push(chunkPath);
     }
-    const listPath = path.join(workDir, 'render-list.txt');
-    tempPathList.push(listPath);
+    const listPath = path.join(renderDir, 'chunk-list.txt');
     await fs.promises.writeFile(listPath, chunkPathList.map((chunkPath) => `file '${chunkPath.replaceAll("'", "'\\''")}'`).join('\n'));
     await runBinary({
       binaryPath: ffmpegPath,
@@ -50,6 +61,6 @@ export async function renderOutputMp3({ sourcePath, hasSourceAudio, pieceList, a
     const totalSampleCount = chunkList.reduce((sum, chunk) => sum + chunk.sampleCount, 0);
     return { durationMs: Math.round((totalSampleCount * 1000) / format.sampleRate) };
   } finally {
-    await Promise.all(tempPathList.map((tempPath) => fs.promises.rm(tempPath, { force: true })));
+    await fs.promises.rm(renderDir, { recursive: true, force: true });
   }
 }
