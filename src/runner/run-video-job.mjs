@@ -48,7 +48,7 @@ export async function runVideoJob({ job, outDir, onProgress = () => {}, log = co
   const policy = getModePolicy({ mode: MODE_MAP.delayed });
   const levelList = await decodeMeterLevelList({ filePath: job.filePath, probe, ffmpegPath });
   const segmentList = planAsrSegmentList({ levelList, durationMs: probe.durationMs, segmentMs: policy.asrSegmentMs, minSegmentMs: policy.asrMinSegmentMs });
-  const segmentBufferMap = probe.hasAudio ? await encodeVoicedSegmentList({ filePath: job.filePath, segmentList, ffmpegPath }) : new Map();
+  const segmentBufferMap = probe.hasAudio ? await encodeVoicedSegmentList({ filePath: job.filePath, segmentList, channelCount: probe.audioChannelCount, ffmpegPath }) : new Map();
   log.log(`[factory] ${job.videoId} 준비 끝 — 길이 ${probe.durationMs}ms · ASR 조각 ${segmentBufferMap.size}개 · 언어 ${job.language}`);
 
   const frameReader = openFrameReader({ filePath: job.filePath, ffmpegPath });

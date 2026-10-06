@@ -63,8 +63,9 @@ const DOWNMIX_FILTER_MAP = {
   6: 'pan=mono|c0=0.7071068*c0+0.7071068*c1+c2+0.5*c4+0.5*c5',
 };
 
-// 오디오가 늦게 시작한 앞부분과 중간 빈 곳을 무음으로 채워 표본 위치 = 영상 시각이 되게 한 뒤 모노로 줄인다.
-function buildMeterDecodeArgList(channelCount) {
+// 오디오가 늦게 시작한 앞부분과 중간 빈 곳을 무음으로 채워 표본 위치 = 영상 시각이 되게 한 뒤 모노로 줄이는 ffmpeg 인자.
+// 레벨(VAD)과 ASR 조각이 같은 모노 신호를 보도록 둘 다 이것을 쓴다.
+export function buildAlignedMonoArgList({ channelCount }) {
   const downmixFilter = DOWNMIX_FILTER_MAP[channelCount];
   if (channelCount === 1) return ['-af', ALIGN_TO_VIDEO_TIME_FILTER];
   if (downmixFilter) return ['-af', `${ALIGN_TO_VIDEO_TIME_FILTER},${downmixFilter}`];
@@ -74,7 +75,7 @@ function buildMeterDecodeArgList(channelCount) {
 export async function decodeMeterLevelList({ filePath, probe, ffmpegPath }) {
   if (!probe.hasAudio) return new Float32Array(Math.floor(probe.durationMs / VAD_SAMPLE_MS));
   const child = spawnTracked(ffmpegPath, [
-    '-v', 'error', '-i', filePath, '-vn', '-map', '0:a:0', ...buildMeterDecodeArgList(probe.audioChannelCount),
+    '-v', 'error', '-i', filePath, '-vn', '-map', '0:a:0', ...buildAlignedMonoArgList({ channelCount: probe.audioChannelCount }),
     '-ar', String(METER_SAMPLE_RATE), '-f', 'f32le', 'pipe:1',
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   // 실행 파일을 띄우지 못하면 ChildProcess 가 'error' 를 내는데, 듣는 곳이 없으면 프로세스가 죽는다. 받아 두었다가 거부한다.

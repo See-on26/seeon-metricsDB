@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { computeMeterLevel, computeMeterLevelList, createMeterLevelAccumulator, decodeMeterLevelList, readLevelAt } from '../src/media/audio-levels.mjs';
 import { planAsrSegmentList } from '../src/media/asr-segment-plan.mjs';
-import { encodeVoicedSegmentList } from '../src/media/segment-encoder.mjs';
+import { buildSegmentEncodeArgList, encodeVoicedSegmentList } from '../src/media/segment-encoder.mjs';
 import { probeVideo } from '../src/media/probe.mjs';
 import { readWavInfo } from '../src/media/wav.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
@@ -113,7 +113,7 @@ test('오디오 stream 이 늦게 시작해도 레벨 격자는 영상(컨테이
 test('조각 인코딩도 영상 시각 기준이라 오디오가 시작하기 전 구간은 무음으로 들어간다', async () => {
   const filePath = await createTestClip({ dirPath, fileName: 'offset-encode.mp4', colorTimeline: [['black', 3]], audioExpr: `${TONE_EXPR}*lt(t,1)`, audioStartSec: 1 });
   const segmentList = [{ startMs: 0, endMs: 3000, voicedMs: 1000, isVoiced: true }];
-  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, ffmpegPath });
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, channelCount: 2, ffmpegPath });
   const pcm = await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-i', 'pipe:0', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1'], inputBuffer: bufferMap.get(0) });
   const levelList = computeMeterLevelList({ sampleList: toFloat32List(pcm) });
   assert.ok(Math.abs(levelList.length - 30) <= 1, `조각 길이는 3초(${levelList.length} tick)`);
@@ -163,9 +163,26 @@ test('오디오 트랙이 없으면 레벨은 모두 0 이고 보낼 조각이 �
 test('말이 있는 조각만 webm/opus 로 인코딩한다', async () => {
   const filePath = await createTestClip({ dirPath, fileName: 'speech.mp4', colorTimeline: [['black', 6]], audioExpr: '0.4*sin(2*PI*220*t)*lt(t,3)' });
   const segmentList = [{ startMs: 0, endMs: 3000, voicedMs: 3000, isVoiced: true }, { startMs: 3000, endMs: 6000, voicedMs: 0, isVoiced: false }];
-  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, ffmpegPath });
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, channelCount: 2, ffmpegPath });
   assert.deepEqual([...bufferMap.keys()], [0]);
   assert.equal(bufferMap.get(0).readUInt32BE(0), 0x1a45dfa3, 'EBML(webm) 머리');
+});
+
+const readPeak = (sampleList) => sampleList.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0);
+
+test('조각 인코딩은 레벨과 같은 모노 다운믹스(스테레오 ½L+½R)라 L=R 스테레오를 키우지 않고 진폭 0.9 도 잘리지 않는다', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'loud-stereo.mp4', colorTimeline: [['black', 2]], audioExpr: '0.9*sin(2*PI*440*t)' });
+  const probe = await probeVideo({ filePath, ffprobePath });
+  const segmentList = [{ startMs: 0, endMs: 2000, voicedMs: 2000, isVoiced: true }];
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, channelCount: probe.audioChannelCount, ffmpegPath });
+  const pcm = await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-i', 'pipe:0', '-f', 'f32le', 'pipe:1'], inputBuffer: bufferMap.get(0) });
+  const peak = readPeak(toFloat32List(pcm));
+  assert.ok(Math.abs(peak - 0.9) < 0.06, `조각 최고값 ${peak.toFixed(3)} — 원본 0.9 와 같은 크기여야 한다(√2 로 키우면 1.3 안팎)`);
+  assert.ok(peak < 1, '1 을 넘으면 ASR 서버의 s16 변환에서 잘린다');
+});
+
+test('조각 인코더는 채널 수를 받아야 한다(모르면 ffmpeg 기본 다운믹스로 조용히 바뀌지 않게 거부)', () => {
+  assert.throws(() => buildSegmentEncodeArgList({ filePath: 'a.mp4', startMs: 0, endMs: 1000 }), /채널 수/);
 });
 
 test('WAV 길이를 읽는다', () => {
