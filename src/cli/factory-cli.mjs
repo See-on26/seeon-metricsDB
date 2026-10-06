@@ -41,6 +41,17 @@ async function openGpuAccess({ preflight, env, pipelineConfig, checkPort, startT
   return tunnel;
 }
 
+// 다시 처리하는 영상의 이전 출력을 워커를 띄우기 전에 지운다.
+// 끝남 표시(JSON)는 이번 작업이 마지막에 새로 써야만 믿을 수 있다. JSON·mp3 를 먼저 지워 --force 재실행 등이 도중에 죽었을 때
+// 잘린 mp3 와 이전 JSON 이 끝난 영상으로 보이지 않게 한다. 작업 폴더(AD wav·제품 기록·합성 조각)도 비워 이전 실행의 파일이 섞이지 않게 한다.
+function clearPreviousOutput({ outDir, pathMap }) {
+  fs.rmSync(pathMap.jsonPath, { force: true });
+  fs.rmSync(pathMap.mp3Path, { force: true });
+  // 작업 폴더는 출력 폴더 바로 아래 <출력 이름>/ 이다. 이름이 어긋나 다른 곳을 가리키면 지우지 않고 멈춘다.
+  if (path.dirname(pathMap.workDir) !== outDir) throw new Error(`작업 폴더가 출력 폴더 바로 아래가 아니다: ${pathMap.workDir}`);
+  fs.rmSync(pathMap.workDir, { recursive: true, force: true });
+}
+
 // 영상마다 워커 프로세스를 띄워 결과를 모은다. 진행은 영상마다 PROGRESS_LOG_MS 간격으로만 찍고, 영상 하나가 끝날 때마다 onResult 를 부른다.
 function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPath, videoTimeout, signal, forceSignal, onResult, log }) {
   const lastLogAtMap = new Map();
@@ -49,10 +60,7 @@ function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPat
     jobList: pendingJobList, concurrency, signal, forceSignal,
     startWorker: (job) => {
       const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
-      // 끝남 표시(JSON)는 이번 작업이 마지막에 새로 써야만 믿을 수 있다. 이전 실행의 JSON·mp3 를 먼저 지워
-      // --force 재실행 등이 도중에 죽었을 때 잘린 mp3 와 이전 JSON 이 끝난 영상으로 보이지 않게 한다.
-      fs.rmSync(pathMap.jsonPath, { force: true });
-      fs.rmSync(pathMap.mp3Path, { force: true });
+      clearPreviousOutput({ outDir, pathMap });
       return forkVideoWorker({
         job, outDir, logPath: pathMap.logPath, env, workerPath, ...videoTimeout,
         onProgress: ({ videoTimeMs, durationMs, adCount }) => {

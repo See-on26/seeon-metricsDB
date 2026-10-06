@@ -331,3 +331,20 @@ test('CLI: 같은 출력 폴더에 이미 실행이 붙어 있으면 워커 없�
   assert.equal(countStart({ outDir, outStem: 'a-slow' }), 2);
   assert.equal(fs.existsSync(lockPath), false);
 });
+
+test('CLI: 다시 처리하는 영상은 이전 실행이 남긴 작업 폴더(AD wav·합성 조각)를 먼저 비우고, 건너뛴 영상의 작업 폴더는 그대로 둔다', async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b.mp4']);
+  const outDir = path.join(makeDir('workdir'), 'run');
+  const staleFileList = ['ad/ad-009.wav', 'render-3.wav', 'pipeline-1.jsonl'];
+  for (const outStem of ['a', 'b']) {
+    fs.mkdirSync(path.join(outDir, outStem, 'ad'), { recursive: true });
+    for (const name of staleFileList) fs.writeFileSync(path.join(outDir, outStem, name), 'old');
+  }
+  writeDonePair({ outDir, outStem: 'b', videoId: 'b', filePath: path.join(inputDir, 'b.mp4') });
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir], env: BASE_ENV, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 0);
+  assert.equal(countStart({ outDir, outStem: 'a' }), 1);
+  assert.equal(fs.existsSync(path.join(outDir, 'a')), false, '이전 실행의 작업 폴더를 비운다');
+  for (const name of staleFileList) assert.ok(fs.existsSync(path.join(outDir, 'b', name)), `건너뛴 영상의 ${name} 은 결과가 가리키므로 남긴다`);
+});
