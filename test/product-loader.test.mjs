@@ -3,21 +3,25 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as sleepReal } from 'node:timers/promises';
 import {
-  installProductLoader, setProductScope, loadRegisterPipeline, getIpcRegistry, buildScopePrelude, PRODUCT_SCOPE_KEY,
+  installProductLoader, setProductScope, createProductScope, loadRegisterPipeline, getIpcRegistry, buildScopePrelude,
+  PRODUCT_SCOPE_KEY,
 } from '../src/product/product-loader.mjs';
+import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 
 // 제품은 프로세스마다 한 번만 로드한다. node --test 는 파일마다 프로세스를 따로 띄운다.
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-loader-'));
 const FIXED_WALL_MS = 1_800_000_000_000;
 const callCountMap = { nowWall: 0, fetch: 0 };
-installProductLoader({ outDir });
-setProductScope({
+const fixedScope = {
   nowWall: () => { callCountMap.nowWall += 1; return FIXED_WALL_MS; },
   nowPerf: () => 10_000,
   setTimeout, clearTimeout, setInterval, clearInterval,
   fetch: async () => { callCountMap.fetch += 1; throw new Error('이 테스트는 네트워크를 쓰지 않는다'); },
-});
+};
+installProductLoader({ outDir });
+setProductScope(fixedScope);
 
 test('prelude 는 한 줄이라 제품 오류 행 번호가 원본과 같다', () => {
   assert.equal(buildScopePrelude().includes('\n'), false);
@@ -63,4 +67,32 @@ test('코어 재사용 목록이 모두 실제로 export 된다', async () => {
   const coreModuleMap = await import('../src/product/core-modules.mjs');
   for (const [name, value] of Object.entries(coreModuleMap)) assert.notEqual(value, undefined, name);
   assert.equal(typeof coreModuleMap.CaptionNarrator, 'function');
+});
+
+test('제품 범위로 넘긴 메서드는 this 없이 불려도 같은 시계를 쓴다', async () => {
+  const clock = createVirtualClock({ startWallMs: 2_000_000 });
+  const scope = createProductScope({ clock, fetch: null });
+  const { setTimeout: setTimer, clearTimeout: clearTimer, setInterval: setRepeat, clearInterval: clearRepeat } = scope;
+  const owner = { setTimer, firedList: [] };
+  owner.setTimer(() => owner.firedList.push(scope.nowWall()), 300);
+  clearTimer(setTimer(() => owner.firedList.push('cleared'), 100));
+  const repeatTimer = setRepeat(() => { owner.firedList.push('repeat'); clearRepeat(repeatTimer); }, 200);
+  await clock.runUntil({ isDone: () => clock.pendingTimerCount === 0 });
+  assert.deepEqual(owner.firedList, ['repeat', 2_000_300]);
+  assert.equal(scope.nowPerf(), 10_000 + 300);
+});
+
+test('가상 시계가 실제 시간으로 흐른 뒤에도 범위 Date.now 는 정수이고 new Date() 와 같다', async () => {
+  const clock = createVirtualClock({ startWallMs: FIXED_WALL_MS });
+  setProductScope(createProductScope({ clock, fetch: fixedScope.fetch }));
+  try {
+    clock.beginExternal();
+    await sleepReal(7);
+    clock.endExternal();
+    const ScopedDate = globalThis[PRODUCT_SCOPE_KEY].Date;
+    assert.ok(Number.isInteger(ScopedDate.now()), `Date.now ${ScopedDate.now()}`);
+    assert.equal(ScopedDate.now(), new ScopedDate().getTime());
+  } finally {
+    setProductScope(fixedScope);
+  }
 });
