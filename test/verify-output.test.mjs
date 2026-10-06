@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { computeBestCorrelation, computeExpectedOutputMs, computePlayedAdMs, findSourceCoverageIssueList, verifyOutput } from '../src/output/verify-output.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
 import { summarizeTimeline } from '../src/session/playback-recorder.mjs';
@@ -161,4 +163,43 @@ test('실제 mp3: 원음 중간이 1초 미만 빠지면 길이는 허용 오차
   assert.deepEqual(result.sourceCoverage.issueList, [{ kind: 'gap', fromMs: 3000, toMs: 3300 }]);
   assert.ok(result.adCheckList.every((check) => check.isOk), 'AD 는 제자리에 있다');
   assert.equal(result.isOk, false);
+});
+
+const TOOL_PATH = fileURLToPath(new URL('../tools/verify-output.mjs', import.meta.url));
+const runTool = ({ argList, env = {} }) => spawnSync(process.execPath, [TOOL_PATH, ...argList], { encoding: 'utf8', env: { ...process.env, ...env } });
+function writeReportJson({ name, report }) {
+  const jsonPath = path.join(dirPath, `${name}_SEEON_AD.json`);
+  fs.writeFileSync(jsonPath, JSON.stringify(report));
+  return jsonPath;
+}
+
+test('검사 도구: 통과하면 0, 검사에서 어긋나면 1 로 끝나고 결과 JSON 을 찍는다', async () => {
+  await fixturePromise;
+  const passRun = runTool({ argList: [writeReportJson({ name: 'clip', report: buildMinimalReport({ outputFileName: 'clip_SEEON_AD.mp3' }) })] });
+  assert.equal(passRun.status, 0, passRun.stderr);
+  assert.equal(JSON.parse(passRun.stdout).isOk, true);
+  const failRun = runTool({ argList: [writeReportJson({ name: 'no-tail', report: buildMinimalReport({ outputFileName: 'no-tail_SEEON_AD.mp3', pieceList: NO_TAIL_PIECE_LIST }) })] });
+  assert.equal(failRun.status, 1, failRun.stderr);
+  assert.equal(JSON.parse(failRun.stdout).isOk, false);
+});
+
+test('검사 도구: 검사를 하지 못한 실행 오류(사용법, 없는 JSON, 깨진 JSON, mp3 없음, ffmpeg 실패)는 검사 불통과(1)와 가르게 2 로 끝난다', async () => {
+  await fixturePromise;
+  const brokenJsonPath = path.join(dirPath, 'broken_SEEON_AD.json');
+  fs.writeFileSync(brokenJsonPath, '{ "output": ');
+  const noMp3JsonPath = writeReportJson({ name: 'no-mp3', report: buildMinimalReport({ outputFileName: 'no-mp3_SEEON_AD.mp3' }) });
+  const okJsonPath = writeReportJson({ name: 'clip', report: buildMinimalReport({ outputFileName: 'clip_SEEON_AD.mp3' }) });
+  const caseList = [
+    ['사용법', { argList: [] }, /사용법/],
+    ['없는 JSON', { argList: [path.join(dirPath, 'none_SEEON_AD.json')] }, /ENOENT/],
+    ['깨진 JSON', { argList: [brokenJsonPath] }, /JSON/],
+    ['mp3 없음', { argList: [noMp3JsonPath] }, /no-mp3_SEEON_AD\.mp3/],
+    ['ffmpeg 실패', { argList: [okJsonPath], env: { SEEON_FACTORY_FFMPEG: path.join(dirPath, 'no-ffmpeg') } }, /ENOENT/],
+  ];
+  for (const [label, option, stderrPattern] of caseList) {
+    const run = runTool(option);
+    assert.equal(run.status, 2, `${label}: 종료 코드 ${run.status}, stderr ${run.stderr}`);
+    assert.match(run.stderr, stderrPattern, label);
+    assert.equal(run.stdout, '', `${label}: 검사 결과를 찍지 않는다`);
+  }
 });
