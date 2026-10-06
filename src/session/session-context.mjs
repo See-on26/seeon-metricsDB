@@ -25,6 +25,8 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     slideEventVideoTimeMap: new Map(), slideTransitionWallTsMap: new Map(), currentSessionId: null, recordPath: null,
   };
   let taskCount = 0;
+  // 제품처럼 삼키는 오류도 연결 코드 버그일 수 있어 이름별로 세어 결과 기록(stats)에 남긴다.
+  const swallowedErrorCountMap = {};
 
   // main.js:859-864 getLastSpeechWallTs
   function getLastSpeechWallTs() {
@@ -73,10 +75,14 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     trackTask(promise, label) {
       taskCount += 1;
       Promise.resolve(promise)
-        .catch((error) => log.warn(`[factory] ${label} 실패(무시): ${error.message}`))
+        .catch((error) => {
+          swallowedErrorCountMap[label] = (swallowedErrorCountMap[label] || 0) + 1;
+          log.warn(`[factory] ${label} 실패(무시): ${error.message}`);
+        })
         .finally(() => { taskCount -= 1; });
     },
     getTaskCount: () => taskCount,
+    getSwallowedErrorCountMap: () => ({ ...swallowedErrorCountMap }),
     // main.js:227-241 buildWordBudget·buildWordBudgetMap. 제품처럼 currentDelayMs 는 0 으로 둔다.
     buildWordBudget: ({ narrationType, subKind = null }) => computeWordBudget({ mode, narrationType, subKind, currentDelayMs: 0 }),
     buildWordBudgetMap() {

@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runFactoryCli } from '../src/cli/factory-cli.mjs';
+import { readResultIdentity } from '../src/runner/result-identity.mjs';
+import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
@@ -14,8 +18,10 @@ const BASE_ENV = {
   SEEON_VLM_URL: 'http://127.0.0.1:9/v1/chat/completions', SEEON_ASR_URL: 'http://127.0.0.1:9/asr',
   SEEON_TTS_URL: 'http://127.0.0.1:9/tts', SEEON_TTS_LONG_URL: 'http://127.0.0.1:9/tts-long', SEEON_EMBED_URL: 'http://127.0.0.1:9/embed',
 };
+const SERVICE_UP = { isUp: true, detail: 'HTTP 405' };
+const SERVICE_DOWN = { isUp: false, detail: '연결 거부(ECONNREFUSED)' };
 const PASSING_PREFLIGHT = {
-  checkPort: async () => true,
+  checkService: async () => SERVICE_UP,
   runVersion: async () => Buffer.from('ok'),
   startTunnel: async () => assert.fail('포트가 열려 있으면 터널을 열지 않는다'),
 };
@@ -38,12 +44,13 @@ function createLogCollector({ onLine = () => {} } = {}) {
   return { lineList, log: { log: push, error: push, warn: push } };
 }
 
-// 가짜 워커가 남기는 것과 같은 모양의 끝난 결과(mp3 + isComplete JSON)를 미리 둔다.
+// 가짜 워커가 남기는 것과 같은 모양의 끝난 결과(mp3 + isComplete JSON)를 지금 코드 버전·결과 설정으로 미리 둔다.
 function writeDonePair({ outDir, outStem, videoId, filePath, language = 'auto', isPageTransitionIncluded = false }) {
+  const { versionMap, resultConfig } = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(BASE_ENV) });
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, `${outStem}_SEEON_AD.mp3`), 'old mp3');
   fs.writeFileSync(path.join(outDir, `${outStem}_SEEON_AD.json`), JSON.stringify({
-    isComplete: true, video: { videoId, file: filePath, language }, config: { isPageTransitionIncluded },
+    isComplete: true, video: { videoId, file: filePath, language }, ...versionMap, config: { isPageTransitionIncluded, resultConfig },
   }));
 }
 
@@ -115,21 +122,22 @@ test('CLI: 목록 JSON 의 같은 이름 영상은 출력 이름을 나눠 둘 �
   ]);
 });
 
-test('CLI: GPU 포트가 닫혀 있고 터널도 못 열면 이유를 찍고 워커 없이 종료 코드 1', async () => {
+test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이유를 찍고 워커 없이 종료 코드 1', async () => {
   const inputDir = makeInputDir(['a.mp4']);
   const outDir = path.join(makeDir('closed'), 'run');
   const { lineList, log } = createLogCollector();
   let tunnelCallCount = 0;
   const exitCode = await runFactoryCli({
     argList: ['--input', inputDir, '--out', outDir], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
-    checkPort: async ({ host, port }) => !(host === '127.0.0.1' && port === 9),
+    checkService: async ({ url }) => (url.startsWith('http://127.0.0.1:9/') ? SERVICE_DOWN : SERVICE_UP),
     runVersion: async () => Buffer.from('ok'),
     startTunnel: async () => { tunnelCallCount += 1; return null; },
   });
   assert.equal(exitCode, 1);
   assert.equal(tunnelCallCount, 1);
-  assert.ok(lineList.some((line) => line.startsWith('[factory] GPU 포트 닫힘(VLM 127.0.0.1:9, ASR 127.0.0.1:9, TTS 127.0.0.1:9, TTS_LONG 127.0.0.1:9, EMBED 127.0.0.1:9)')), lineList.join('\n'));
-  assert.ok(lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: VLM 127.0.0.1:9')), lineList.join('\n'));
+  const downText = ['VLM', 'ASR', 'TTS', 'TTS_LONG', 'EMBED'].map((label) => `${label} 127.0.0.1:9 연결 거부(ECONNREFUSED)`).join(', ');
+  assert.ok(lineList.includes(`[factory] GPU 서비스 응답 없음(${downText}) — 제품 터널 모듈로 연결을 시도한다`), lineList.join('\n'));
+  assert.ok(lineList.includes(`[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: ${downText}`), lineList.join('\n'));
   assert.equal(fs.existsSync(outDir), false, '점검에 실패하면 출력 폴더를 만들지 않는다');
 });
 
@@ -137,7 +145,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
   const { lineList, log } = createLogCollector();
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-error'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
-    checkPort: async () => false, runVersion: async () => Buffer.from('ok'),
+    checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
     startTunnel: async () => { throw new Error('GPU 터널이 제때 연결되지 않았다'); },
   });
   assert.equal(exitCode, 1);
@@ -152,7 +160,7 @@ test('CLI: 닫힌 포트를 제품 터널로 열면 다시 점검해 돌리고, 
   let tunnelEnv = null;
   const exitCode = await runFactoryCli({
     argList: ['--input', inputDir, '--out', outDir], env: { ...BASE_ENV, SEEON_GPU_SSH_KEY: '/keys/app' }, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH,
-    checkPort: async () => isTunnelOpen, runVersion: async () => Buffer.from('ok'),
+    checkService: async () => (isTunnelOpen ? SERVICE_UP : SERVICE_DOWN), runVersion: async () => Buffer.from('ok'),
     startTunnel: async ({ env, pipelineConfig }) => {
       tunnelEnv = { key: env.SEEON_GPU_SSH_KEY, asrUrl: pipelineConfig.asrUrl };
       isTunnelOpen = true;
@@ -165,17 +173,17 @@ test('CLI: 닫힌 포트를 제품 터널로 열면 다시 점검해 돌리고, 
   assert.equal(readJson(path.join(outDir, 'manifest.json')).counts.done, 1);
 });
 
-test('CLI: 터널이 열렸는데도 포트가 닫혀 있으면(원격 주소 등) 점검 실패로 터널을 닫고 종료 코드 1', async () => {
+test('CLI: 터널이 열렸는데도 서비스가 답하지 않으면(원격 주소·터널 뒤 서비스 죽음 등) 점검 실패로 터널을 닫고 종료 코드 1', async () => {
   let stopCount = 0;
   const { lineList, log } = createLogCollector();
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-still-closed'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
-    checkPort: async ({ port }) => port !== 9, runVersion: async () => Buffer.from('ok'),
+    checkService: async ({ url }) => (url.includes(':9/') ? { isUp: false, detail: '연결이 끊김(ECONNRESET)' } : SERVICE_UP), runVersion: async () => Buffer.from('ok'),
     startTunnel: async () => ({ stop: async () => { stopCount += 1; } }),
   });
   assert.equal(exitCode, 1);
   assert.equal(stopCount, 1);
-  assert.ok(lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: VLM 127.0.0.1:9')), lineList.join('\n'));
+  assert.ok(lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: VLM 127.0.0.1:9 연결이 끊김(ECONNRESET)')), lineList.join('\n'));
 });
 
 test('CLI: Bedrock 토큰이 없거나 ffmpeg 를 못 돌리면 종료 코드 1', async () => {
@@ -184,7 +192,7 @@ test('CLI: Bedrock 토큰이 없거나 ffmpeg 를 못 돌리면 종료 코드 1'
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('no-token'), 'run')],
     env: { ...envWithoutToken, SEEON_FACTORY_FFMPEG: '/없는/ffmpeg' }, log, workerPath: FAKE_WORKER_PATH,
-    checkPort: async () => true, runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
+    checkService: async () => SERVICE_UP, runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
     startTunnel: PASSING_PREFLIGHT.startTunnel,
   });
   assert.equal(exitCode, 1);
@@ -290,4 +298,112 @@ test('CLI: SIGINT 를 받으면 돌던 워커를 멈추고 남은 영상은 띄�
   assert.equal(fs.existsSync(path.join(outDir, 'c.log')), false, '중단 뒤에는 새 워커를 띄우지 않는다');
   assert.ok(lineList.some((line) => line.startsWith('[factory] SIGINT 받음')), lineList.join('\n'));
   assert.equal(signalSource.listenerCount('SIGINT') + signalSource.listenerCount('SIGTERM'), 0, '실행이 끝나면 신호 처리기를 뗀다');
+});
+
+// 이미 끝난 프로세스의 pid(낡은 잠금 시험용).
+function readDeadPid() {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('exit', () => resolve(child.pid));
+  });
+}
+
+test('CLI: 같은 출력 폴더에 이미 실행이 붙어 있으면 워커 없이 종료 코드 1, 끝난 실행은 잠금을 풀고, 죽은 실행의 잠금은 알린 뒤 가져간다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a-slow.mp4']);
+  const outDir = path.join(makeDir('lock'), 'run');
+  const lockPath = path.join(outDir, '.factory.lock');
+  const runOnce = ({ log, extraArgList = [] }) => runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, ...extraArgList], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  });
+  let secondRun = null;
+  const first = createLogCollector({
+    onLine: (line) => {
+      if (secondRun || !line.startsWith('[factory] ▶')) return;
+      const second = createLogCollector();
+      secondRun = runOnce({ log: second.log }).then((exitCode) => ({ exitCode, lineList: second.lineList }));
+    },
+  });
+  assert.equal(await runOnce({ log: first.log }), 0);
+  const { exitCode, lineList } = await secondRun;
+  assert.equal(exitCode, 1);
+  assert.ok(lineList.some((line) => line.startsWith(`[factory] 이 출력 폴더는 이미 다른 실행(pid ${process.pid}`)), lineList.join('\n'));
+  assert.equal(countStart({ outDir, outStem: 'a-slow' }), 1, '두 번째 실행은 워커를 띄우지 않는다');
+  assert.equal(fs.existsSync(lockPath), false, '끝난 실행은 잠금을 푼다');
+
+  const deadPid = await readDeadPid();
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: deadPid, host: os.hostname(), startedAt: '2026-10-06T00:00:00.000Z' }));
+  const takeOver = createLogCollector();
+  assert.equal(await runOnce({ log: takeOver.log, extraArgList: ['--force'] }), 0);
+  assert.ok(takeOver.lineList.some((line) => line.includes(`낡은 잠금(pid ${deadPid}`)), takeOver.lineList.join('\n'));
+  assert.equal(countStart({ outDir, outStem: 'a-slow' }), 2);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test('CLI: 다시 처리하는 영상은 이전 실행이 남긴 작업 폴더(AD wav·합성 조각)를 먼저 비우고, 건너뛴 영상의 작업 폴더는 그대로 둔다', async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b.mp4']);
+  const outDir = path.join(makeDir('workdir'), 'run');
+  const staleFileList = ['ad/ad-009.wav', 'render-3.wav', 'pipeline-1.jsonl'];
+  for (const outStem of ['a', 'b']) {
+    fs.mkdirSync(path.join(outDir, outStem, 'ad'), { recursive: true });
+    for (const name of staleFileList) fs.writeFileSync(path.join(outDir, outStem, name), 'old');
+  }
+  writeDonePair({ outDir, outStem: 'b', videoId: 'b', filePath: path.join(inputDir, 'b.mp4') });
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir], env: BASE_ENV, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 0);
+  assert.equal(countStart({ outDir, outStem: 'a' }), 1);
+  assert.equal(fs.existsSync(path.join(outDir, 'a')), false, '이전 실행의 작업 폴더를 비운다');
+  for (const name of staleFileList) assert.ok(fs.existsSync(path.join(outDir, 'b', name)), `건너뛴 영상의 ${name} 은 결과가 가리키므로 남긴다`);
+});
+
+test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모델)이 지금과 다르면 이유를 한 줄 찍고 다시 만들고, 주소만 바뀐 것은 건너뛴다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b.mp4']);
+  const outDir = path.join(makeDir('identity'), 'run');
+  const runOnce = async (env = BASE_ENV) => {
+    const { lineList, log } = createLogCollector();
+    assert.equal(await runFactoryCli({ argList: ['--input', inputDir, '--out', outDir], env, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT }), 0);
+    return lineList.filter((line) => line.startsWith('[factory] ↻'));
+  };
+  const countStartPair = () => [countStart({ outDir, outStem: 'a' }), countStart({ outDir, outStem: 'b' })];
+  assert.deepEqual(await runOnce(), []);
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.match(manifest.factory.commit, /^[0-9a-f]{40}$/);
+  assert.equal(typeof manifest.factory.isDirty, 'boolean');
+  assert.equal(manifest.resultConfig.vlmModel, 'qwen3.5-35b-a3b');
+  assert.equal(manifest.runOptions.concurrency, 3);
+  assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), new RegExp(`공장 ${manifest.factory.commit.slice(0, 7)}`));
+  const aReport = readJson(path.join(outDir, 'a_SEEON_AD.json'));
+  assert.deepEqual([aReport.factory, aReport.config.runConcurrency], [manifest.factory, 3], '결과 JSON 에 공장 버전·동시 수를 남긴다');
+  assert.deepEqual(await runOnce(), [], '같은 코드·설정이면 건너뛴다');
+  assert.deepEqual(countStartPair(), [1, 1]);
+
+  fs.writeFileSync(path.join(outDir, 'a_SEEON_AD.json'), JSON.stringify({ ...aReport, seeonMeet: { ...aReport.seeonMeet, commit: '0'.repeat(40) } }));
+  assert.deepEqual(await runOnce(), [`[factory] ↻ a 이전 완료 결과와 달라 다시 만든다 — seeon-meet 커밋 0000000 → ${manifest.seeonMeet.commit.slice(0, 7)}`]);
+  assert.deepEqual(countStartPair(), [2, 1]);
+
+  const modelEnv = { ...BASE_ENV, SEEON_VLM_MODEL: 'other-vlm' };
+  // 판정 GPU 모델은 따로 주지 않으면 VLM 모델을 따른다(제품 설정).
+  assert.deepEqual(await runOnce(modelEnv), ['a', 'b'].map((videoId) => `[factory] ↻ ${videoId} 이전 완료 결과와 달라 다시 만든다 — `
+    + '결과 설정 vlmModel qwen3.5-35b-a3b → other-vlm · 결과 설정 judgeGpuModel qwen3.5-35b-a3b → other-vlm'));
+  assert.deepEqual(countStartPair(), [3, 2]);
+  assert.deepEqual(await runOnce({ ...modelEnv, SEEON_ASR_URL: 'http://127.0.0.1:10/asr' }), [], '서비스 주소(터널·직접 연결)는 결과 설정이 아니다');
+  assert.deepEqual(countStartPair(), [3, 2]);
+});
+
+test('CLI: 경고(부하로 생긴 시간 초과 등)가 있는 영상은 완료로 치되 터미널·summary 에 ⚠ 와 수를 찍고 manifest 에 남기며, 다시 돌지 않는다', async () => {
+  const inputDir = makeInputDir(['a-warn.mp4', 'b.mp4']);
+  const outDir = path.join(makeDir('warning'), 'run');
+  const runOnce = (log) => runFactoryCli({ argList: ['--input', inputDir, '--out', outDir], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT });
+  const { lineList, log } = createLogCollector();
+  assert.equal(await runOnce(log), 0, '경고는 실패가 아니다');
+  assert.ok(lineList.some((line) => /^\[factory\] ✔ \[\d\/2\] a-warn AD 2개 · 1초 ⚠ vlm_timeout 4$/.test(line)), lineList.join('\n'));
+  assert.ok(lineList.some((line) => /^\[factory\] ✔ \[\d\/2\] b AD 2개 · 1초$/.test(line)), lineList.join('\n'));
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.deepEqual(manifest.videoList.map((video) => video.warningList), [[{ code: 'vlm_timeout', count: 4, message: 'VLM 호출 시간 초과 4/16건' }], []]);
+  const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(summary, /영상 2 · 완료 2\(경고 1\) · 실패 0 · 건너뜀 0/);
+  assert.match(summary, /\n {2}✔ a-warn: AD 2개 ⚠ vlm_timeout 4\n/);
+  assert.match(summary, /\n {2}✔ b: AD 2개\n/);
+  assert.equal(await runOnce(createLogCollector().log), 0);
+  assert.equal(countStart({ outDir, outStem: 'a-warn' }), 1);
 });

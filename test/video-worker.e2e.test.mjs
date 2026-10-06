@@ -8,6 +8,9 @@ import { startMockServices } from './helpers/mock-services.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { waitRealUntil } from './helpers/real-wait.mjs';
 import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
+import { inspectVideoResult } from '../src/runner/manifest.mjs';
+import { readResultIdentity } from '../src/runner/result-identity.mjs';
+import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffprobePath } = resolveFfmpegPaths({ env: process.env });
@@ -15,12 +18,15 @@ const WORKER_PATH = fileURLToPath(new URL('../src/runner/video-worker.mjs', impo
 const mock = await startMockServices();
 after(() => mock.close());
 
+const WORKER_ENV = { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv };
+const RUN_CONCURRENCY = 2;
+
 // Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock VLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
 function runWorker({ job, outDir }) {
   return new Promise((resolve, reject) => {
     const child = fork(WORKER_PATH, [], {
       execArgv: ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON'],
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv },
+      env: WORKER_ENV,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     let result = null;
@@ -32,7 +38,7 @@ function runWorker({ job, outDir }) {
       if (message.type === 'failed') result = { status: 'failed', message: message.message };
     });
     child.on('exit', (code) => (result ? resolve({ ...result, logText, code }) : reject(new Error(`워커가 결과 없이 끝남(${code}): ${logText.slice(-1500)}`))));
-    child.send({ type: 'run', job, outDir });
+    child.send({ type: 'run', job, outDir, runConcurrency: RUN_CONCURRENCY });
   });
 }
 
@@ -73,6 +79,15 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(modelConfig.judgeModelId, 'GPU 가 실패하면 넘어갈 Bedrock 판정 모델');
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
+  assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} }, '실제 제품 응답에서 연결 코드가 삼킨 오류가 없다');
+  assert.deepEqual([report.incompleteReasonList, report.warningList], [[], []], '건강한 서비스면 불완전 사유도 경고도 없다');
+  assert.match(report.factory.commit, /^[0-9a-f]{40}$/);
+  assert.equal(report.config.runConcurrency, RUN_CONCURRENCY);
+  const identity = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(WORKER_ENV) });
+  assert.deepEqual(
+    inspectVideoResult({ outDir, outStem: 'deck', videoId: 'deck', filePath, language: 'ko', isPageTransitionIncluded: false, identity }),
+    { status: 'done', mismatchList: [] }, '실제 워커가 남긴 코드 버전·결과 설정을 CLI 가 지금과 같은 것으로 본다',
+  );
 });
 
 test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', { timeout: 120000 }, async () => {
@@ -83,6 +98,7 @@ test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', 
   assert.equal(result.status, 'done', result.logText.slice(-2000));
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'mute_SEEON_AD.json'), 'utf8'));
   assert.equal(report.adList.length, 0);
+  assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} });
   assert.ok(Math.abs(report.output.sourceMediaMs - 6000) < 100);
   assert.ok(Math.abs(readMp3Ms(path.join(outDir, 'mute_SEEON_AD.mp3')) - report.output.timelineDurationMs) < 150);
 });
@@ -105,4 +121,51 @@ test('워커는 SIGTERM 을 받으면 띄운 ffmpeg·ffprobe 를 죽이고 143 �
   child.kill('SIGTERM');
   assert.deepEqual(await exitPromise, { code: 143, signal: null });
   assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+});
+
+// 쓰는 쪽이 없는 FIFO 를 영상으로 준 워커를 띄워, ffprobe 가 열다가 멈춘 상태를 만든다.
+async function startStuckWorker({ name }) {
+  const dirPath = makeTempDir(`factory-e2e-${name}-`);
+  const fifoPath = path.join(dirPath, 'stuck.mp4');
+  execFileSync('mkfifo', [fifoPath]);
+  const child = fork(WORKER_PATH, [], {
+    execArgv: ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON'], env: { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  });
+  const exitPromise = new Promise((resolve) => { child.once('exit', (code, signal) => resolve({ code, signal })); });
+  child.send({ type: 'run', job: { videoId: 'stuck', filePath: fifoPath, outStem: 'stuck', language: 'ko', isPageTransitionIncluded: false }, outDir: path.join(dirPath, 'out') });
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length > 0, { limitMs: 10000, pollMs: 50 }), 'ffprobe 가 떠 있어야 한다');
+  return { child, fifoPath, exitPromise };
+}
+
+test('워커는 터미널 Ctrl-C 의 SIGINT 로 죽지 않고, 부모가 보낸 SIGTERM 에 정리하고 끝난다', { timeout: 60000 }, async () => {
+  const { child, fifoPath, exitPromise } = await startStuckWorker({ name: 'sigint' });
+  let exitState = null;
+  exitPromise.then((state) => { exitState = state; });
+  child.kill('SIGINT');
+  assert.equal(await waitRealUntil(() => exitState !== null, { limitMs: 500, pollMs: 20 }), false, `SIGINT 에 끝나면 안 된다: ${JSON.stringify(exitState)}`);
+  child.kill('SIGTERM');
+  assert.deepEqual(await exitPromise, { code: 143, signal: null });
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+});
+
+test('워커는 부모와 IPC 가 끊기면(부모가 죽음) 띄운 ffprobe 를 죽이고 스스로 끝난다', { timeout: 60000 }, async () => {
+  const { child, fifoPath, exitPromise } = await startStuckWorker({ name: 'disconnect' });
+  child.disconnect();
+  assert.deepEqual(await exitPromise, { code: 1, signal: null });
+  assert.ok(await waitRealUntil(() => listProcessByArg(fifoPath).length === 0, { limitMs: 3000, pollMs: 50 }), `남은 자식: ${listProcessByArg(fifoPath).join(' | ')}`);
+});
+
+test('ASR 이 계속 실패하면(서비스 장애) 결과를 불완전으로 남기고 워커는 실패로 끝나, 다시 돌리면 그 영상을 다시 처리한다', { timeout: 120000 }, async (t) => {
+  const dirPath = makeTempDir('factory-e2e-asr-down-');
+  const filePath = await createTestClip({ dirPath, fileName: 'talk.mp4', colorTimeline: [['gray', 10]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,5),4)' });
+  const outDir = path.join(dirPath, 'out');
+  mock.setAsrStatus(500);
+  t.after(() => mock.setAsrStatus(200));
+  const result = await runWorker({ job: { videoId: 'talk', filePath, outStem: 'talk', language: 'ko', isPageTransitionIncluded: false }, outDir });
+  assert.equal(result.status, 'failed', result.logText.slice(-2000));
+  assert.match(result.message, /^결과가 불완전하다 — ASR 실패 (\d+)\/\1건\(100% > 10%\) — HTTP 500/);
+  const report = JSON.parse(fs.readFileSync(path.join(outDir, 'talk_SEEON_AD.json'), 'utf8'));
+  assert.equal(report.isComplete, false);
+  assert.deepEqual(report.incompleteReasonList.map((reason) => reason.code), ['asr_failure']);
+  assert.equal(inspectVideoResult({ outDir, outStem: 'talk' }).status, 'incomplete', '다시 돌리면 다시 처리한다');
 });

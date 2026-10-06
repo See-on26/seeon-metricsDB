@@ -6,12 +6,15 @@ export function createRequestContextStorage() {
 
 export function createIpcBridge({ registry, requestContextStorage, log = console }) {
   const rendererListenerMap = new Map();
+  // 리스너 오류는 Electron 처럼 삼키되, 연결 코드 버그일 수 있어 채널별로 세어 결과 기록(stats)에 남긴다.
+  const swallowedErrorCountMap = {};
   let nextSeq = 0;
 
   function runSafely(label, run) {
     try {
       run();
     } catch (error) {
+      swallowedErrorCountMap[label] = (swallowedErrorCountMap[label] || 0) + 1;
       log.warn(`[factory] ${label} 처리 실패(무시): ${error.message}`);
     }
   }
@@ -55,7 +58,7 @@ export function createIpcBridge({ registry, requestContextStorage, log = console
   }
 
   return {
-    invoke, invokeWithContext, send, onRendererEvent,
+    invoke, invokeWithContext, send, onRendererEvent, getSwallowedErrorCountMap: () => ({ ...swallowedErrorCountMap }),
     createViewerView: () => ({ webContents: { send: deliverToRenderer, isDestroyed: () => false } }),
   };
 }

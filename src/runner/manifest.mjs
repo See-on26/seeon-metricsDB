@@ -2,6 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildOutputPathMap } from './output-paths.mjs';
+import { listIdentityMismatch } from './result-identity.mjs';
+import { formatWarningBrief } from './result-health.mjs';
 
 const MANIFEST_FILE_NAME = 'manifest.json';
 const SUMMARY_FILE_NAME = 'summary.txt';
@@ -11,25 +13,35 @@ export function formatRunStamp(date) {
   return `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}-${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`;
 }
 
-// JSON 은 mp3 합성 뒤 마지막에 쓰고 워커를 띄우기 전에 지우므로, 둘 다 있고 isComplete 면 끝난 영상이다.
-// 지금 작업(videoId·영상 파일·언어·전환 고지)을 주면 AD 기록의 video·config 와 같을 때만 끝난 것으로 친다 — 같은 출력 이름이라도 다른 영상·설정으로 만든 결과는 다시 돈다.
-export function isVideoDone({ outDir, outStem, videoId, filePath, language, isPageTransitionIncluded }) {
+// JSON 은 mp3 합성 뒤 마지막에 쓰고 워커를 띄우기 전에 지우므로, 둘 다 있고 isComplete 면 끝난 결과다(아니면 missing·incomplete).
+// 지금 작업(videoId·영상 파일·언어·전환 고지)과 identity(코드 버전·결과 설정)를 주면 AD 기록과 같을 때만 끝난 것(done)으로 친다.
+// 다르면 mismatch 와 다른 곳을 문장 목록(mismatchList)으로 돌려준다. 같은 출력 이름이라도 다른 영상·코드·설정으로 만든 결과는 다시 돈다.
+// 주지 않은 항목은 견주지 않는다.
+export function inspectVideoResult({ outDir, outStem, videoId, filePath, language, isPageTransitionIncluded, identity }) {
   const { mp3Path, jsonPath } = buildOutputPathMap({ outDir, outStem });
-  if (!fs.existsSync(mp3Path) || !fs.existsSync(jsonPath)) return false;
+  if (!fs.existsSync(mp3Path) || !fs.existsSync(jsonPath)) return { status: 'missing', mismatchList: [] };
   let report;
   try {
     report = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
   } catch {
-    return false;
+    return { status: 'incomplete', mismatchList: [] };
   }
-  if (report?.isComplete !== true) return false;
-  const pairList = [
-    [videoId, report.video?.videoId],
-    [filePath, report.video?.file],
-    [language, report.video?.language],
-    [isPageTransitionIncluded === undefined ? undefined : Boolean(isPageTransitionIncluded), report.config?.isPageTransitionIncluded],
+  if (report?.isComplete !== true) return { status: 'incomplete', mismatchList: [] };
+  const fieldList = [
+    ['videoId', videoId, report.video?.videoId],
+    ['영상 파일', filePath, report.video?.file],
+    ['언어', language, report.video?.language],
+    ['전환 고지', isPageTransitionIncluded === undefined ? undefined : Boolean(isPageTransitionIncluded), report.config?.isPageTransitionIncluded],
   ];
-  return pairList.every(([expected, actual]) => expected === undefined || expected === actual);
+  const mismatchList = fieldList
+    .filter(([, expected, actual]) => expected !== undefined && expected !== actual)
+    .map(([label, expected, actual]) => `${label} ${actual} → ${expected}`);
+  if (identity) mismatchList.push(...listIdentityMismatch({ identity, report }));
+  return { status: mismatchList.length ? 'mismatch' : 'done', mismatchList };
+}
+
+export function isVideoDone(option) {
+  return inspectVideoResult(option).status === 'done';
 }
 
 // 임시 파일에 다 쓴 뒤 이름을 바꿔, 쓰는 도중 죽어도 반쯤 쓴 파일이 남지 않게 한다.
@@ -56,7 +68,10 @@ export function readManifest({ outDir }) {
 }
 
 // resultList 에 없는 영상은 not_run(아직 돌지 않았거나 중단으로 띄우지 않음). endedAt 이 null 이면 실행 중 기록이다.
-export function buildManifest({ previousManifest, runOptions, seeonMeet, jobList, resultList, skippedJobList, startedAt, endedAt, interruptedBy = null }) {
+// seeonMeet·factory·resultConfig 는 이번 실행이 견준 코드 버전·결과 설정이다(건너뛴 영상도 이와 같을 때만 건너뛴다).
+export function buildManifest({
+  previousManifest, runOptions, seeonMeet, factory = null, resultConfig = null, jobList, resultList, skippedJobList, startedAt, endedAt, interruptedBy = null,
+}) {
   const previousMap = new Map((previousManifest?.videoList || []).map((video) => [video.outStem, video]));
   const resultMap = new Map(resultList.map((result) => [result.outStem, result]));
   const skippedSet = new Set(skippedJobList.map((job) => job.outStem));
@@ -70,7 +85,8 @@ export function buildManifest({ previousManifest, runOptions, seeonMeet, jobList
     return { ...job, status: 'not_run' };
   });
   return {
-    seeonMeet, runOptions, startedAt, endedAt, ...(interruptedBy ? { interruptedBy } : {}), videoList,
+    seeonMeet, ...(factory ? { factory } : {}), ...(resultConfig ? { resultConfig } : {}),
+    runOptions, startedAt, endedAt, ...(interruptedBy ? { interruptedBy } : {}), videoList,
     counts: {
       total: videoList.length,
       done: videoList.filter((video) => video.status === 'done').length,
@@ -80,16 +96,23 @@ export function buildManifest({ previousManifest, runOptions, seeonMeet, jobList
   };
 }
 
+// 완료 영상 중 경고(부하로 생긴 시간 초과·판정 대체 등)가 있는 것은 수와 ⚠ 로 드러낸다. 자세한 내용은 영상 JSON 의 warningList 에 있다.
 export function formatSummary(manifest) {
   const remainingCount = manifest.counts.total - manifest.counts.done - manifest.counts.failed;
+  const warnedCount = manifest.videoList.filter((video) => video.status === 'done' && video.warningList?.length).length;
   const lineList = [
-    `seeon-meet ${manifest.seeonMeet?.commit || '-'}${manifest.seeonMeet?.isDirty ? ' (수정됨)' : ''}`,
-    `영상 ${manifest.counts.total} · 완료 ${manifest.counts.done} · 실패 ${manifest.counts.failed} · 건너뜀 ${manifest.counts.skipped}${remainingCount > 0 ? ` · 남음 ${remainingCount}` : ''}`,
+    `seeon-meet ${manifest.seeonMeet?.commit || '-'}${manifest.seeonMeet?.isDirty ? ' (수정됨)' : ''}`
+      + ` · 공장 ${manifest.factory?.commit || '-'}${manifest.factory?.isDirty ? ' (수정됨)' : ''}`,
+    `영상 ${manifest.counts.total} · 완료 ${manifest.counts.done}${warnedCount ? `(경고 ${warnedCount})` : ''} · 실패 ${manifest.counts.failed}`
+      + ` · 건너뜀 ${manifest.counts.skipped}${remainingCount > 0 ? ` · 남음 ${remainingCount}` : ''}`,
     `시작 ${manifest.startedAt} · 끝 ${manifest.endedAt || '진행 중'}${manifest.interruptedBy ? ` · ${manifest.interruptedBy} 로 중단` : ''}`,
   ];
   for (const video of manifest.videoList) {
     if (video.status === 'failed') lineList.push(`  ✖ ${video.videoId}: ${video.errorMessage}`);
-    else if (video.status === 'done') lineList.push(`  ✔ ${video.videoId}: AD ${video.adCount ?? '-'}개${video.isSkipped ? ' (이전 실행)' : ''}`);
+    else if (video.status === 'done') {
+      const warningText = formatWarningBrief(video.warningList);
+      lineList.push(`  ✔ ${video.videoId}: AD ${video.adCount ?? '-'}개${video.isSkipped ? ' (이전 실행)' : ''}${warningText ? ` ${warningText}` : ''}`);
+    }
   }
   return `${lineList.join('\n')}\n`;
 }

@@ -30,9 +30,10 @@ function formatLimit(limitMs) {
 // 영상 하나 = 워커 하나. 콘솔 출력(제품 파이프라인 로그 포함)은 그대로 <영상>.log 로 간다.
 // timeoutMs 를 넘기면(첫 진행 보고 뒤에는 resolveTimeoutMs(영상 길이) 와 큰 쪽, 상한은 줄지 않는다) 멈추고 시간 초과로 실패한다.
 // 멈출 때는 SIGTERM 으로 정리할 틈을 주고 killGraceMs 뒤에도 살아 있으면 SIGKILL 한다.
+// runConcurrency 는 결과 JSON 에 남길 이번 실행의 동시 수다(GPU 포화로 결과가 달라질 수 있다).
 export function forkVideoWorker({
   job, outDir, logPath, env = process.env, workerPath = DEFAULT_WORKER_PATH, onProgress = () => {},
-  timeoutMs = null, resolveTimeoutMs = null, killGraceMs = DEFAULT_KILL_GRACE_MS,
+  timeoutMs = null, resolveTimeoutMs = null, killGraceMs = DEFAULT_KILL_GRACE_MS, runConcurrency = null,
 }) {
   const logFd = fs.openSync(logPath, 'a');
   let child;
@@ -58,6 +59,15 @@ export function forkVideoWorker({
     clearTimeout(timeoutTimer);
     child.kill('SIGTERM');
     graceTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
+  }
+
+  // 사람이 중단을 한 번 더 요청하면 정리 유예를 기다리지 않고 바로 죽인다. 이미 멈추는 중이면 그 이유를 그대로 둔다.
+  function forceStop(reason) {
+    if (isClosed) return;
+    stopReason ??= reason;
+    clearTimeout(timeoutTimer);
+    clearTimeout(graceTimer);
+    child.kill('SIGKILL');
   }
 
   function armTimeout() {
@@ -99,19 +109,27 @@ export function forkVideoWorker({
       else reject(outcome?.error || new Error(`워커가 결과 없이 종료(코드 ${code ?? signal})`));
     });
   });
-  child.send({ type: 'run', job, outDir });
-  return { promise, kill: ({ reason = '중단됨' } = {}) => stop(reason) };
+  child.send({ type: 'run', job, outDir, runConcurrency });
+  return {
+    promise,
+    kill: ({ reason = '중단됨', isForced = false } = {}) => (isForced ? forceStop(reason) : stop(reason)),
+  };
 }
 
 // 동시에 concurrency 개까지만 워커를 띄운다. 한 영상의 실패는 다른 영상에 영향이 없다. 결과는 입력 순서다.
 // signal 이 중단되면 돌던 워커를 '중단됨(<이유>)' 로 멈추고, 아직 시작하지 않은 영상은 띄우지 않고 결과를 null 로 둔다.
-export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent = () => {}, signal = null }) {
+// forceSignal 이 중단되면 돌던 워커를 정리 유예 없이 바로 죽인다(결과는 같은 '중단됨').
+export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent = () => {}, signal = null, forceSignal = null }) {
   const activeWorkerSet = new Set();
-  const formatStopReason = () => `중단됨(${typeof signal.reason === 'string' ? signal.reason : '중단'})`;
+  const formatStopReason = () => `중단됨(${typeof signal?.reason === 'string' ? signal.reason : '중단'})`;
   const stopActiveWorkers = () => {
     for (const worker of activeWorkerSet) worker.kill({ reason: formatStopReason() });
   };
+  const forceStopActiveWorkers = () => {
+    for (const worker of activeWorkerSet) worker.kill({ reason: formatStopReason(), isForced: true });
+  };
   signal?.addEventListener('abort', stopActiveWorkers, { once: true });
+  forceSignal?.addEventListener('abort', forceStopActiveWorkers, { once: true });
   try {
     return await mapWithConcurrency({
       itemList: jobList,
@@ -137,5 +155,6 @@ export async function runWorkerPool({ jobList, concurrency, startWorker, onEvent
     });
   } finally {
     signal?.removeEventListener('abort', stopActiveWorkers);
+    forceSignal?.removeEventListener('abort', forceStopActiveWorkers);
   }
 }

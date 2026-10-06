@@ -249,6 +249,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
       recordPath: ctx.state.recordPath, sessionStartWallMs: ctx.state.sessionStartWall,
       isDrainTimedOut: isTimedOut, drainLimitMs, drainEndAfterVideoMs, appendedTailMs, remainingTaskCount, inFlightCallCount, endResult,
       frameSourceError: ctx.state.frameSourceError ?? null, frameStats: frameAccess.getStats(),
+      swallowedErrorCountMap: ctx.getSwallowedErrorCountMap(),
     };
   }
 

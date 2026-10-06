@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import http from 'node:http';
+import net from 'node:net';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 import {
@@ -171,4 +173,48 @@ test('IPC 다리는 다음 차례에 핸들러를 부르고, main 이 보낸 이
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(receivedDebugList, [{ reason: '테스트' }]);
   await assert.rejects(bridge.invoke('없는-채널', {}), /ipcMain 핸들러가 없다/);
+});
+
+test('IPC 다리는 리스너 오류를 경고만 하고 삼키되 채널별로 센다', async () => {
+  const warnList = [];
+  const listenerMap = new Map([['pipeline-debug', [() => { throw new Error('리스너 버그'); }]]]);
+  const bridge = createIpcBridge({ registry: { handlerMap: new Map(), listenerMap }, requestContextStorage: createRequestContextStorage(), log: { warn: (message) => warnList.push(message) } });
+  bridge.onRendererEvent('pipeline-event', () => { throw new Error('렌더러 버그'); });
+  assert.deepEqual(bridge.getSwallowedErrorCountMap(), {});
+  bridge.send('pipeline-debug', { reason: '하나' });
+  bridge.send('pipeline-debug', { reason: '둘' });
+  bridge.createViewerView().webContents.send('pipeline-event', { type: 'asr' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(bridge.getSwallowedErrorCountMap(), { 'pipeline-debug': 2, 'pipeline-event': 1 });
+  assert.equal(warnList.length, 3);
+});
+
+test('실제 fetch 가 실패하면 undici 가 cause 에 둔 원인(코드·문구)과 오류 이름까지 기록한다', async () => {
+  const clock = createVirtualClock();
+  // 닫힌 포트(연결 거부)와 받기만 하고 답하지 않는 서버(시간 초과). GPU 실서비스 포트는 쓰지 않는다.
+  const closedServer = net.createServer();
+  await new Promise((resolve) => { closedServer.listen(0, '127.0.0.1', resolve); });
+  const closedUrl = `http://127.0.0.1:${closedServer.address().port}/asr`;
+  await new Promise((resolve) => { closedServer.close(resolve); });
+  const silentServer = http.createServer(() => {});
+  await new Promise((resolve) => { silentServer.listen(0, '127.0.0.1', resolve); });
+  const silentUrl = `http://127.0.0.1:${silentServer.address().port}/tts`;
+  try {
+    const scoped = createScopedFetch({
+      clock, pipelineConfig: { ...pipelineConfig, asrUrl: closedUrl, ttsUrl: silentUrl }, requestContextStorage: createRequestContextStorage(),
+    });
+    await assert.rejects(scoped.fetch(closedUrl, { method: 'POST' }), /fetch failed/);
+    await assert.rejects(scoped.fetch(silentUrl, { method: 'POST', signal: AbortSignal.timeout(100) }), { name: 'TimeoutError' });
+    const [refused, timedOut] = scoped.getCallLog();
+    assert.equal(refused.service, 'asr');
+    assert.equal(refused.errorName, 'TypeError');
+    assert.equal(refused.errorCode, 'ECONNREFUSED');
+    assert.match(refused.errorMessage, /^fetch failed \(ECONNREFUSED: connect ECONNREFUSED 127\.0\.0\.1:\d+\)$/);
+    assert.equal(timedOut.service, 'tts');
+    assert.equal(timedOut.errorName, 'TimeoutError');
+    assert.equal(timedOut.errorCode, null);
+  } finally {
+    silentServer.closeAllConnections();
+    await new Promise((resolve) => { silentServer.close(resolve); });
+  }
 });

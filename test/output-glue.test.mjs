@@ -329,3 +329,29 @@ test('재생한 캡션은 wav 를 복사 없이 참조로 두고, 버린 캡션�
   assert.deepEqual([dropped.hasAudio, dropped.audioDurationMs], [true, 1500]);
   assert.equal(harness.outputGlue.getDropRecordList()[0].reason, 'feature_off');
 });
+
+test('배수 상한으로 멈춘 뒤 늦게 온 캡션은 틈 추론(Bedrock)을 부르지 않고 트리거 자리 기준으로 버린다(제품은 정지 때 지연 버퍼를 비운다)', async () => {
+  const harness = setupOutput({ mediaDurationMs: 20000, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '문장 끝' }) } });
+  harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '매출이 늘었습니다.' });
+  await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 16000 });
+  harness.outputGlue.dropPendingAfterEnd({ isDrainTimedOut: true });
+  harness.outputGlue.handleCaptionEvent({ payload: buildCaption({ text: '늦게 온 해설', eventVideoTimeMs: 12000 }), requestContext });
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getDropRecordList().length === 1, deadlineElapsedMs: harness.clock.elapsedMs() + 5000 });
+  assert.equal(harness.bridge.invokeList.some((call) => call.channel === 'pipeline-gap'), false);
+  assert.deepEqual(harness.outputGlue.getDropRecordList().map(({ text, reason }) => [text, reason]), [['늦게 온 해설', 'drain_timeout']]);
+  const [record] = harness.outputGlue.getCaptionRecordList();
+  assert.equal(record.insertVideoTimeMs, 12000);
+  assert.equal(record.gap, null);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('연결 코드가 삼킨 비동기 작업 오류는 경고와 함께 이름별로 센다', async () => {
+  const harness = setupOutput();
+  assert.deepEqual(harness.ctx.getSwallowedErrorCountMap(), {});
+  harness.ctx.core.gapCandidateStore.getCandidateList = () => { throw new Error('후보 표 손상'); };
+  deliverAt(harness, 16000, buildCaption({ text: '발행 실패 해설', eventVideoTimeMs: 12000 }));
+  deliverAt(harness, 17000, buildCaption({ text: '또 발행 실패 해설', eventVideoTimeMs: 13000 }));
+  await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 17000 && harness.ctx.getTaskCount() === 0 });
+  assert.deepEqual(harness.ctx.getSwallowedErrorCountMap(), { caption: 2 });
+  assert.equal(harness.warnList.length, 2);
+});
