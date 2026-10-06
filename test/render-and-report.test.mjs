@@ -6,7 +6,7 @@ import { resolveOutputAudioFormat, buildPieceFilter, buildRenderChunkList } from
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
 import { buildAdReport, readPipelineRecordList } from '../src/output/ad-report.mjs';
 import { execFileSync } from 'node:child_process';
-import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
+import { ALIGN_TO_VIDEO_TIME_FILTER, resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
@@ -53,7 +53,7 @@ test('조각이 1000개면 100개씩 10청크로 나누고, 청크마다 원음�
   const chunkList = buildRenderChunkList({ pieceList, sourcePath: '/v.mp4', hasSourceAudio: true, adPathByRef: new Map(), sampleRate: 48000, channelLayout: 'stereo' });
   assert.equal(chunkList.length, 10);
   assert.deepEqual(chunkList[3].inputArgList, ['-ss', '300.000', '-i', '/v.mp4']);
-  assert.match(chunkList[3].filterScript, /^\[0:a\]aresample=async=1:first_pts=0,asplit=100/);
+  assert.ok(chunkList[3].filterScript.startsWith(`[0:a]${ALIGN_TO_VIDEO_TIME_FILTER},asplit=100`), chunkList[3].filterScript.slice(0, 80));
   assert.equal(chunkList[3].outDurationMs, 100000);
 });
 
