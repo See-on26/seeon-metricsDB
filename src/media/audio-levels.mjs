@@ -1,4 +1,4 @@
-import { spawnTracked } from './ffmpeg.mjs';
+import { ALIGN_TO_VIDEO_TIME_FILTER, spawnTracked } from './ffmpeg.mjs';
 import { METER_FFT_SIZE, METER_SAMPLE_RATE, VAD_SAMPLE_MS } from '../session/renderer-constants.mjs';
 
 const toMeterByte = (sample) => Math.min(255, Math.max(0, Math.floor(128 * (1 + sample))));
@@ -56,17 +56,25 @@ export function createMeterLevelAccumulator({ sampleRate = METER_SAMPLE_RATE, ti
   };
 }
 
-// Web Audio "speakers" 다운믹스(스테레오 → 0.5L+0.5R)에 맞춘다. 3채널 이상은 ffmpeg 기본 다운믹스.
-function buildDownmixArgList(channelCount) {
-  if (channelCount === 1) return [];
-  if (channelCount === 2) return ['-af', 'pan=mono|c0=0.5*c0+0.5*c1'];
-  return ['-ac', '1'];
+// Web Audio "speakers" 모노 다운믹스: 스테레오 0.5(L+R), 5.1 √½(L+R) + C + ½(SL+SR)(LFE 제외).
+// 그 밖의 채널 수는 ffmpeg 기본 다운믹스(-ac 1)에 맡긴다.
+const DOWNMIX_FILTER_MAP = {
+  2: 'pan=mono|c0=0.5*c0+0.5*c1',
+  6: 'pan=mono|c0=0.7071068*c0+0.7071068*c1+c2+0.5*c4+0.5*c5',
+};
+
+// 오디오가 늦게 시작한 앞부분과 중간 빈 곳을 무음으로 채워 표본 위치 = 영상 시각이 되게 한 뒤 모노로 줄인다.
+function buildMeterDecodeArgList(channelCount) {
+  const downmixFilter = DOWNMIX_FILTER_MAP[channelCount];
+  if (channelCount === 1) return ['-af', ALIGN_TO_VIDEO_TIME_FILTER];
+  if (downmixFilter) return ['-af', `${ALIGN_TO_VIDEO_TIME_FILTER},${downmixFilter}`];
+  return ['-af', ALIGN_TO_VIDEO_TIME_FILTER, '-ac', '1'];
 }
 
 export async function decodeMeterLevelList({ filePath, probe, ffmpegPath }) {
   if (!probe.hasAudio) return new Float32Array(Math.floor(probe.durationMs / VAD_SAMPLE_MS));
   const child = spawnTracked(ffmpegPath, [
-    '-v', 'error', '-i', filePath, '-vn', '-map', '0:a:0', ...buildDownmixArgList(probe.audioChannelCount),
+    '-v', 'error', '-i', filePath, '-vn', '-map', '0:a:0', ...buildMeterDecodeArgList(probe.audioChannelCount),
     '-ar', String(METER_SAMPLE_RATE), '-f', 'f32le', 'pipe:1',
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   // 실행 파일을 띄우지 못하면 ChildProcess 가 'error' 를 내는데, 듣는 곳이 없으면 프로세스가 죽는다. 받아 두었다가 거부한다.

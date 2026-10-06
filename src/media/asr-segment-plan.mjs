@@ -8,6 +8,10 @@ export function planAsrSegmentList({
   levelList, durationMs, segmentMs, minSegmentMs, tickMs = VAD_SAMPLE_MS,
   voiceThreshold = ASR_VOICE_LEVEL_THRESHOLD, minVoicedMs = ASR_MIN_VOICED_MS, silenceCutMs = ASR_SILENCE_CUT_MS,
 }) {
+  // 조각 길이가 0 이하이면 조각이 앞으로 나가지 않고, 길이가 무한이면 끝나지 않는다. 계획 전에 막는다.
+  if (!(Number.isFinite(segmentMs) && segmentMs > 0)) throw new RangeError(`segmentMs 는 0 보다 큰 유한수여야 한다: ${segmentMs}`);
+  if (!(Number.isFinite(tickMs) && tickMs > 0)) throw new RangeError(`tickMs 는 0 보다 큰 유한수여야 한다: ${tickMs}`);
+  if (!(Number.isFinite(durationMs) && durationMs >= 0)) throw new RangeError(`durationMs 는 0 이상 유한수여야 한다: ${durationMs}`);
   const effectiveMinSegmentMs = Math.min(minSegmentMs, segmentMs);
   const segmentList = [];
   let startMs = 0;

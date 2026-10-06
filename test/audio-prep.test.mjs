@@ -8,7 +8,7 @@ import { planAsrSegmentList } from '../src/media/asr-segment-plan.mjs';
 import { encodeVoicedSegmentList } from '../src/media/segment-encoder.mjs';
 import { probeVideo } from '../src/media/probe.mjs';
 import { readWavInfo } from '../src/media/wav.mjs';
-import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
+import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
 import { createTestClip } from './helpers/media-fixtures.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
 
@@ -68,6 +68,18 @@ test('조각 VAD 는 레벨이 정확히 0.02 여도 말로 센다(>=)', () => {
   assert.equal(segmentList[0].voicedMs, 3000);
 });
 
+test('조각 길이·tick·영상 길이가 0 이하이거나 유한수가 아니면 무한 루프 대신 바로 오류', () => {
+  const baseOptionMap = { levelList: levelListFrom([[3000, 0.1]]), durationMs: 3000, segmentMs: 3000, minSegmentMs: 2500 };
+  const badOptionList = [
+    ['segmentMs', 0], ['segmentMs', -100], ['segmentMs', Number.NaN], ['segmentMs', Number.POSITIVE_INFINITY],
+    ['tickMs', 0], ['tickMs', -100], ['tickMs', Number.NaN], ['tickMs', Number.POSITIVE_INFINITY],
+    ['durationMs', -1], ['durationMs', Number.NaN], ['durationMs', Number.POSITIVE_INFINITY],
+  ];
+  for (const [name, value] of badOptionList) {
+    assert.throws(() => planAsrSegmentList({ ...baseOptionMap, [name]: value }), RangeError, `${name}=${value}`);
+  }
+});
+
 test('ffmpeg 로 레벨을 구한다: 1초 사인 뒤 무음', async () => {
   const filePath = await createTestClip({ dirPath, fileName: 'tone.mp4', colorTimeline: [['black', 3]], audioExpr: '0.5*sin(2*PI*440*t)*lt(t,1)' });
   const probe = await probeVideo({ filePath, ffprobePath });
@@ -76,6 +88,61 @@ test('ffmpeg 로 레벨을 구한다: 1초 사인 뒤 무음', async () => {
   const levelList = await decodeMeterLevelList({ filePath, probe, ffmpegPath });
   assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 500 }) - 0.354) < 0.06);
   assert.ok(readLevelAt({ levelList, timeMs: 2000 }) < 0.02, '무음 구간은 말 임계 아래');
+});
+
+const TONE_EXPR = '0.5*sin(2*PI*440*t)';
+
+// 바이트가 Buffer 풀 안의 아무 위치에 있어도 Float32Array 로 읽을 수 있게 복사한다.
+const toFloat32List = (buffer) => new Float32Array(Uint8Array.from(buffer).buffer);
+
+async function readAudioStartSec(filePath) {
+  const output = await runBinary({ binaryPath: ffprobePath, argList: ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=start_time', '-of', 'csv=p=0', filePath] });
+  return Number(output.toString('utf8').trim());
+}
+
+test('오디오 stream 이 늦게 시작해도 레벨 격자는 영상(컨테이너) 시각 0 기준이다', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'offset.mp4', colorTimeline: [['black', 3]], audioExpr: `${TONE_EXPR}*lt(t,1)`, audioStartSec: 1 });
+  assert.ok(await readAudioStartSec(filePath) > 0.9, '테스트 영상의 오디오가 약 1초 늦게 시작해야 한다');
+  const probe = await probeVideo({ filePath, ffprobePath });
+  const levelList = await decodeMeterLevelList({ filePath, probe, ffmpegPath });
+  assert.equal(levelList.length, 30, '길이는 영상 길이(3초)와 같다');
+  assert.ok(readLevelAt({ levelList, timeMs: 500 }) < 0.02, '오디오가 시작하기 전은 무음');
+  assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 1500 }) - 0.354) < 0.06, '톤은 영상 1–2초에 있다');
+  assert.ok(readLevelAt({ levelList, timeMs: 2500 }) < 0.02);
+});
+
+test('조각 인코딩도 영상 시각 기준이라 오디오가 시작하기 전 구간은 무음으로 들어간다', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'offset-encode.mp4', colorTimeline: [['black', 3]], audioExpr: `${TONE_EXPR}*lt(t,1)`, audioStartSec: 1 });
+  const segmentList = [{ startMs: 0, endMs: 3000, voicedMs: 1000, isVoiced: true }];
+  const bufferMap = await encodeVoicedSegmentList({ filePath, segmentList, ffmpegPath });
+  const pcm = await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-i', 'pipe:0', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1'], inputBuffer: bufferMap.get(0) });
+  const levelList = computeMeterLevelList({ sampleList: toFloat32List(pcm) });
+  assert.ok(Math.abs(levelList.length - 30) <= 1, `조각 길이는 3초(${levelList.length} tick)`);
+  assert.ok(readLevelAt({ levelList, timeMs: 500 }) < 0.02, '조각 앞 1초는 무음');
+  assert.ok(readLevelAt({ levelList, timeMs: 1500 }) > 0.2, '톤은 조각 1–2초에 있다');
+});
+
+test('모노 96kHz 오디오도 48kHz 미터 격자로 같은 레벨을 낸다', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'mono96k.mp4', colorTimeline: [['black', 2]], audioExpr: TONE_EXPR, audioChannelCount: 1, audioSampleRate: 96000 });
+  const probe = await probeVideo({ filePath, ffprobePath });
+  assert.deepEqual([probe.audioChannelCount, probe.audioSampleRate], [1, 96000]);
+  const levelList = await decodeMeterLevelList({ filePath, probe, ffmpegPath });
+  assert.equal(levelList.length, 20);
+  assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 1000 }) - 0.354) < 0.06);
+});
+
+test('5.1 은 Web Audio speakers 다운믹스(√½·L + C + ½·SL, LFE 제외)대로 레벨을 낸다', async () => {
+  const exprList = [`${TONE_EXPR}*lt(t,1)`, '0', `${TONE_EXPR}*between(t,1,2)`, `${TONE_EXPR}*between(t,3,4)`, `${TONE_EXPR}*between(t,2,3)`, '0'];
+  const filePath = await createTestClip({ dirPath, fileName: 'surround.mp4', colorTimeline: [['black', 4]], audioExpr: exprList, audioChannelCount: 6 });
+  const probe = await probeVideo({ filePath, ffprobePath });
+  assert.equal(probe.audioChannelCount, 6);
+  const levelList = await decodeMeterLevelList({ filePath, probe, ffmpegPath });
+  assert.equal(levelList.length, 40);
+  const toneLevel = 0.5 / Math.SQRT2;
+  assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 500 }) - toneLevel * Math.SQRT1_2) < 0.03, 'FL 은 √½');
+  assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 1500 }) - toneLevel) < 0.03, 'FC 는 1');
+  assert.ok(Math.abs(readLevelAt({ levelList, timeMs: 2500 }) - toneLevel * 0.5) < 0.03, 'SL 은 ½');
+  assert.ok(readLevelAt({ levelList, timeMs: 3500 }) < 0.02, 'LFE 는 빠진다');
 });
 
 test('ffmpeg 를 띄우지 못하면 프로세스를 죽이지 않고 거부한다', async () => {
