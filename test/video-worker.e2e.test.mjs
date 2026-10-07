@@ -79,7 +79,9 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.deepEqual([modelConfig.judgeBackend, modelConfig.judgeGpuUrl, modelConfig.judgeGpuModel], ['gpu', mock.urlEnv.SEEON_JUDGE_GPU_URL, 'qwen3.5-9b']);
   assert.equal(modelConfig.isScaleEnabled, true, '척도 해설은 제품 기본으로 켠다');
   // 캡션에는 소리가 없고 렌더러가 pipeline-tts 로 합성한다. 재생된 AD 는 모두 합성한 소리다.
-  assert.equal(serviceMap.tts.count, report.stats.tts.requestCount);
+  const { tts } = report.stats;
+  assert.equal(tts.requestCount, tts.okCount + tts.failCount + tts.pendingAtStopCount);
+  assert.ok(serviceMap.tts.count >= tts.okCount + tts.failCount && serviceMap.tts.count <= tts.requestCount, JSON.stringify({ tts, serviceTts: serviceMap.tts }));
   assert.ok(report.stats.tts.okCount >= report.adList.length);
   assert.ok(report.adList.every((ad) => ad.tts && ad.serviceCallList.some((call) => call.service === 'tts')));
   assert.ok(report.stats.triggerAnalyzerCountMap.kiwi >= 1, JSON.stringify(report.stats.triggerAnalyzerCountMap));

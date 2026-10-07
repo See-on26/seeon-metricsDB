@@ -371,6 +371,39 @@ test('세션을 멈출 때 소리 나기 전(합성 중) 해설·대기 줄 해�
   assert.deepEqual(harness.warnList, []);
 });
 
+test('세션을 멈춘 순간 합성 상태를 확정한다: 그때 끝나지 않은 합성과 정지 정리 중 시작된 합성은 나중에 응답이 와도 기록을 바꾸지 않는다', async () => {
+  const harness = setupOutput({ ttsDelayMs: 5000 });
+  // 넷 다 자리가 이미 지나 바로 재생 차례가 온다. 첫째는 재생기가 합성을 기다리는 중, 둘째·셋째는 미리 만드는 중, 넷째는 자리를 기다린다.
+  const textList = ['합성 중 해설', '미리 만드는 해설', '또 미리 만드는 해설', '자리 기다리는 해설'];
+  for (const text of textList) deliverNow(harness, { text, eventVideoTimeMs: 0, narrationClass: 'silence_based', source: 'visual_description' });
+  await harness.clock.runUntil({ isDone: () => Boolean(harness.ctx.core.narrator.currentEntry) });
+  assert.deepEqual(ttsCallList(harness).map(({ payload }) => payload.text), textList.slice(0, 3));
+  harness.outputGlue.noteSessionEnd({ isDrainTimedOut: true });
+  harness.chain.stop();
+  harness.outputGlue.settleTtsAtStop();
+  // 버린 해설이 미리 만들기 자리를 넘겨 정지 정리 중에도 넷째 합성이 시작된다(제품과 같다).
+  await harness.clock.runUntil({ isDone: () => harness.ctx.getTaskCount() === 0 });
+  assert.deepEqual(ttsCallList(harness).map(({ payload }) => payload.text), textList);
+  for (const record of harness.outputGlue.getCaptionRecordList()) {
+    assert.deepEqual([record.text, record.tts.isPendingAtStop, record.tts.isOk, record.tts.elapsedMs, record.hasAudio, record.wavBytes],
+      [record.text, true, false, null, false, null], '정지 뒤 응답은 기록에 반영하지 않는다');
+  }
+  assert.equal(harness.outputGlue.getAdPlayList().length, 0);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('세션을 멈추기 전에 끝난 합성은 확정 상태(성공·실패)를 그대로 둔다', async () => {
+  const harness = setupOutput();
+  deliverAt(harness, 15000, { text: '재생한 해설', eventVideoTimeMs: 14000 });
+  deliverAt(harness, 15000, { text: '실패한 해설', eventVideoTimeMs: 14500, hasWav: false });
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length === 1 && harness.outputGlue.getDropRecordList().length === 1 });
+  harness.outputGlue.noteSessionEnd();
+  harness.chain.stop();
+  harness.outputGlue.settleTtsAtStop();
+  assert.deepEqual(harness.outputGlue.getCaptionRecordList().map(({ text, tts }) => [text, tts.isOk, tts.isPendingAtStop]),
+    [['재생한 해설', true, false], ['실패한 해설', false, false]]);
+});
+
 test('영상 끝 직후 도착한 캡션은 delay_exceeded 로 버려지지 않고 재생되며, 끝 구간 원음이 1.5배속으로 뛰지 않는다', async () => {
   const harness = setupOutput({ mediaDurationMs: 20000 });
   const { core } = harness.ctx;

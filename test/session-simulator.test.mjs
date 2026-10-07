@@ -160,6 +160,21 @@ test('상한에 닿아도 AD 가 재생 중이면 끝날 때까지 기다리고,
   ]);
 });
 
+test('배수 상한에서 멈출 때 끝나지 않은 TTS 합성은 끝나지 않은 합성으로 확정하고, 정지 뒤 응답은 기록을 바꾸지 않는다', async () => {
+  let resolveTts = null;
+  const harness = setupSimulator({ handlerMap: { 'pipeline-tts': () => new Promise((resolve) => { resolveTts = resolve; }) } });
+  harness.deliverCaptionAt(2000, buildCaption({ text: '합성이 멈춘 해설', eventVideoTimeMs: 1000 }));
+  await harness.simulator.start();
+  const result = await harness.simulator.runToEnd();
+  assert.equal(result.isDrainTimedOut, true);
+  const [record] = result.captionRecordList;
+  assert.deepEqual([record.tts.isPendingAtStop, record.tts.isSettled, record.tts.isOk], [true, false, false]);
+  resolveTts({ isOk: true, wavData: createToneWav({ durationMs: 500 }) });
+  await harness.clock.settle();
+  assert.deepEqual([record.tts.isOk, record.hasAudio, record.wavBytes], [false, false, null], '정지 뒤 응답은 반영하지 않는다');
+  assert.deepEqual(result.dropRecordList.map(({ text, reason, factoryReason }) => [text, reason, factoryReason]), [['합성이 멈춘 해설', 'stopped', 'drain_timeout']]);
+});
+
 test('배수 상한에서 멈춰도 결과 mp3 에는 원음이 끝까지 들어가고 길이 공식(원음 + AD + 무음 − 회수)이 맞는다', { timeout: 60000 }, async () => {
   const toneClipPath = await createTestClip({ dirPath, fileName: 'tone.mp4', colorTimeline: [['gray', 6]], audioExpr: '0.3*sin(2*PI*330*t)' });
   const harness = setupSimulator({ filePath: toneClipPath });

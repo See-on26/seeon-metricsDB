@@ -122,6 +122,18 @@ export async function runPreflight({
   return { problemList, downServiceList };
 }
 
+const GIB = 1024 ** 3;
+// 워커 하나가 쓰는 메모리의 대략. 제품 Kiwi 형태소 분석기만 약 0.85GB(실측 RSS 증가)이고 나머지 파이프라인·ffmpeg 를 더해 1GB 로 잡는다.
+const WORKER_MEMORY_BYTES = GIB;
+
+// 남은 메모리가 동시에 돌 워커 수 × 1GB 보다 적으면 경고 문구를 돌려준다(없으면 null). 실패로 만들지는 않는다 —
+// macOS 의 os.freemem 은 캐시를 빼고 세어 실제 여유보다 작게 보일 수 있고, 동시 수는 사용자가 정한 값이다.
+export function buildMemoryWarning({ workerCount, freeBytes }) {
+  if (!(workerCount > 0) || freeBytes >= workerCount * WORKER_MEMORY_BYTES) return null;
+  return `[factory] ⚠ 남은 메모리 ${(freeBytes / GIB).toFixed(1)}GB 가 동시에 돌 워커 ${workerCount}개 × 1GB 보다 적다`
+    + ' — 워커마다 한국어 트리거 형태소 분석기(Kiwi)로 약 0.85GB 를 더 쓴다. 느려지거나 메모리가 모자라면 --concurrency 를 낮춘다';
+}
+
 // 제품 gpu-tunnel.js 는 ssh2 를 연결할 때에야 불러오므로, 로컬 포트를 열기 전에 ssh2 가 제품 쪽에 깔려 있는지 먼저 본다.
 function loadProductTunnelFactory() {
   const gpuTunnelPath = resolveProductPath(GPU_TUNNEL_PATH);

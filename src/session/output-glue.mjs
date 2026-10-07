@@ -24,6 +24,9 @@ const isTransitionFollower = (payload) => payload.source !== CAPTION_SOURCE_TRAN
 // main.js:1512-1514 isSpeakerCaption
 const isSpeakerCaption = (payload) => payload.narrationClass === NARRATION_CLASS_MAP.speakerIdentity;
 
+// 재생기에 넘길 소리. 제품처럼 응답 버퍼에서 그 구간만 잘라 낸 ArrayBuffer 다(main.js:116).
+const toWavArrayBuffer = (wavData) => (wavData ? wavData.buffer.slice(wavData.byteOffset, wavData.byteOffset + wavData.byteLength) : null);
+
 // main.js:1628-1633 toNarrationEntry. 공장은 기록과 잇는 captionSeq 를 더 싣는다(main 에 보내는 알림에는 넣지 않는다).
 const toNarrationEntry = (payload, record) => ({
   narrationClass: payload.narrationClass, slideLabel: payload.slideLabel ?? null, source: payload.source, text: payload.text, ts: payload.ts,
@@ -45,6 +48,9 @@ export function createOutputGlue({ ctx }) {
   let nextSeq = 1;
   let isEnded = false;
   let isDrainTimedOut = false;
+  // 세션을 멈춘 뒤에는 합성 결과를 기록에 반영하지 않는다(settleTtsAtStop). 결과 보고서는 mp3 렌더 뒤에 만들어지므로,
+  // 그 사이 늦게 온 응답이 기록을 바꾸면 집계가 렌더 시간과 TTS 지연의 경주에 따라 달라진다.
+  let isTtsSettled = false;
 
   function registerCaption(payload, requestContext) {
     const record = {
@@ -61,19 +67,23 @@ export function createOutputGlue({ ctx }) {
 
   // main.js:111-117 synthesizeEntryAudio. 합성 실패는 null 로 받아 재생기가 tts_failed 로 버린다.
   // 공장은 결과를 기록에 붙인다: mp3 에 넣을 wav(복사 없이 참조), 성공 여부, 재생 차례가 와서 만든 것인지, 걸린 시간, 외부 호출.
-  // 합성은 렌더러 작업으로 세어 배수가 그 끝을 기다린다.
+  // 합성은 렌더러 작업으로 세어 배수가 그 끝을 기다린다. 세션을 멈춘 뒤 시작된 합성(정지 정리 중 미리 만들기 자리가 넘어간 것)은
+  // 제품처럼 부르되 처음부터 끝나지 않은 합성(isPendingAtStop)으로 두고 결과를 기록하지 않는다.
   function synthesizeEntryAudio(entry) {
     const record = recordBySeq.get(entry.captionSeq) ?? null;
     const startedAtMs = clock.elapsedMs();
     const tts = {
-      isOk: false, isOnDemand: Number.isFinite(record?.ttsTurnAtMs), requestedAtMs: Math.round(startedAtMs), elapsedMs: null, message: null, callList: [],
+      isOk: false, isSettled: false, isPendingAtStop: isTtsSettled, isOnDemand: Number.isFinite(record?.ttsTurnAtMs),
+      requestedAtMs: Math.round(startedAtMs), elapsedMs: null, message: null, callList: [],
     };
     if (record) record.tts = tts;
     const promise = bridge.invokeWithContext('pipeline-tts', { ts: entry.ts, text: entry.text, source: entry.source })
       .catch((error) => ({ result: { isOk: false, message: error.message }, requestContext: null }))
       .then(({ result, requestContext }) => {
         const wavData = result?.isOk ? result.wavData : null;
+        if (tts.isPendingAtStop) return toWavArrayBuffer(wavData);
         Object.assign(tts, {
+          isSettled: true,
           isOk: Boolean(wavData), elapsedMs: Math.round(clock.elapsedMs() - startedAtMs),
           message: wavData ? null : redactUrlCredential(result?.message ?? '응답에 소리가 없다'), callList: requestContext?.callList ?? [],
         });
@@ -84,7 +94,7 @@ export function createOutputGlue({ ctx }) {
           // 이미 버린 해설의 소리는 렌더에 쓰이지 않으므로 붙잡지 않는다.
           if (!droppedSeqSet.has(record.captionSeq)) record.wavBytes = wavData;
         }
-        return wavData.buffer.slice(wavData.byteOffset, wavData.byteOffset + wavData.byteLength);
+        return toWavArrayBuffer(wavData);
       });
     ctx.trackTask(promise, 'tts');
     return promise;
@@ -315,6 +325,14 @@ export function createOutputGlue({ ctx }) {
     noteSessionEnd({ isDrainTimedOut: isTimedOut = false } = {}) {
       isEnded = true;
       isDrainTimedOut = isTimedOut;
+    },
+    // 재생 사슬을 정리한 직후 합성 상태를 확정한다. 그때 응답이 오지 않은 합성과 그 뒤 시작될 합성은 끝나지 않은 합성으로 남기고
+    // 성공·실패 집계와 TTS 장애 판정에서 뺀다(stats.tts.pendingAtStopCount).
+    settleTtsAtStop() {
+      isTtsSettled = true;
+      for (const record of captionRecordList) {
+        if (record.tts && !record.tts.isSettled) record.tts.isPendingAtStop = true;
+      }
     },
     getCaptionRecordList: () => captionRecordList,
     getDropRecordList: () => dropRecordList,

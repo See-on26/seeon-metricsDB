@@ -17,8 +17,9 @@ export const ASR_FAILURE_RATIO_LIMIT = 0.1;
 // (체류 미달·간격 억제 등)만 있는 영상은 합성 요청이 없어 이 규칙에 걸리지 않는다.
 // 비율 규칙(예: 호출 3건 이상·실패 50% 초과)은 실측 영상의 해설 수(63.7초 영상 2개, 31.7초 영상 1개)로는 문턱에 닿지 않아
 // 짧은 영상에서 TTS 가 죽은 결과를 놓친다. 일부 해설만 소리를 잃은 것(부하로 15초 상한을 넘김, 영상 도중 TTS 가 죽음)은
-// 완료로 두고 tts_timeout·tts_error 경고와 버린 사유 tts_failed 로 남긴다.
-const listTtsRequest = (captionRecordList = []) => captionRecordList.map((record) => record.tts).filter(Boolean);
+// 완료로 두고 tts_timeout·tts_error 경고와 버린 사유 tts_failed 로 남긴다. 세션을 멈출 때 끝나지 않은 합성(isPendingAtStop)은
+// 성공도 실패도 아니라 판정에서 뺀다(stats.tts.pendingAtStopCount).
+const listSettledTtsRequest = (captionRecordList = []) => captionRecordList.map((record) => record.tts).filter((tts) => tts && !tts.isPendingAtStop);
 // 단기 토큰 만료·권한 없음. 한 번 나면 그 뒤 Bedrock 호출(틈 추론·판정 대체·VLM 폴백)이 모두 실패한다.
 const BEDROCK_AUTH_STATUS_LIST = [401, 403];
 const JUDGE_BACKEND_GPU = 'gpu';
@@ -50,7 +51,7 @@ export function buildIncompleteReasonList({ sessionResult, callLog }) {
   if (asrCallList.length && failedAsrList.length / asrCallList.length > ASR_FAILURE_RATIO_LIMIT) {
     reasonList.push({ code: INCOMPLETE_REASON_MAP.asrFailure, count: failedAsrList.length, total: asrCallList.length, message: describeCallError(failedAsrList[0]) });
   }
-  const ttsRequestList = listTtsRequest(sessionResult.captionRecordList);
+  const ttsRequestList = listSettledTtsRequest(sessionResult.captionRecordList);
   if (ttsRequestList.length && ttsRequestList.every((tts) => !tts.isOk)) {
     // 문구는 서비스 호출 기록(HTTP 상태·연결 실패 원인)을 먼저 쓰고, 호출 기록이 없으면 제품 핸들러의 실패 문구를 쓴다.
     const failedTtsCall = callLog.find((record) => record.service === SERVICE_MAP.tts && isFailedCall(record));

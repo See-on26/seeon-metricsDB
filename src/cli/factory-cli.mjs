@@ -7,7 +7,7 @@ import { parseFactoryArgs } from './parse-args.mjs';
 import { listInputVideos } from '../input/video-list.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/worker-pool.mjs';
 import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../runner/manifest.mjs';
-import { runPreflight, listDownServices, startProductTunnel } from '../runner/preflight.mjs';
+import { runPreflight, listDownServices, startProductTunnel, buildMemoryWarning } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
 import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
@@ -129,10 +129,11 @@ function listenStopSignal({ signalSource, onStop, onForce, now = () => performan
 }
 
 // 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGHUP 129, SIGINT 130, SIGTERM 143).
-// workerPath·checkService·runVersion·checkTriggerAnalyzer·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 서비스·
-// Kiwi 모델·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
+// workerPath·checkService·runVersion·checkTriggerAnalyzer·readFreeMemoryBytes·startTunnel·signalSource·exitProcess 는 테스트가
+// 실제 워커·GPU 서비스·Kiwi 모델·남은 메모리·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
 export async function runFactoryCli({
-  argList, env = process.env, log = console, workerPath, checkService, runVersion, checkTriggerAnalyzer, startTunnel = startProductTunnel, signalSource = process,
+  argList, env = process.env, log = console, workerPath, checkService, runVersion, checkTriggerAnalyzer, readFreeMemoryBytes = os.freemem,
+  startTunnel = startProductTunnel, signalSource = process,
   exitProcess = (exitCode) => process.exit(exitCode),
 }) {
   const options = parseFactoryArgs(argList);
@@ -155,6 +156,9 @@ export async function runFactoryCli({
     await tunnel?.stop();
     return 1;
   }
+  // 워커마다 Kiwi 로 메모리를 더 쓴다. 남은 메모리가 적으면 경고만 한 줄 찍고 그대로 돈다.
+  const memoryWarning = buildMemoryWarning({ workerCount: Math.min(options.concurrency, jobList.length), freeBytes: readFreeMemoryBytes() });
+  if (memoryWarning) log.warn(memoryWarning);
 
   const runOptions = { ...options, input: path.resolve(options.input), out: outDir };
   // 끝난 결과를 다시 쓸지 견줄 코드 버전(제품·공장)과 결과 설정. manifest 에도 남긴다.

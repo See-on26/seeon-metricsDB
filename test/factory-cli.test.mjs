@@ -19,12 +19,14 @@ const BASE_ENV = {
   SEEON_VLM_URL: 'http://127.0.0.1:9/v1/chat/completions', SEEON_ASR_URL: 'http://127.0.0.1:9/asr',
   SEEON_TTS_URL: 'http://127.0.0.1:9/tts', SEEON_TTS_LONG_URL: 'http://127.0.0.1:9/tts-long', SEEON_EMBED_URL: 'http://127.0.0.1:9/embed',
 };
+const GIB = 1024 ** 3;
 const SERVICE_UP = { isUp: true, detail: 'HTTP 405' };
 const SERVICE_DOWN = { isUp: false, detail: '연결 거부(ECONNREFUSED)' };
 const PASSING_PREFLIGHT = {
   checkService: async () => SERVICE_UP,
   runVersion: async () => Buffer.from('ok'),
   checkTriggerAnalyzer: async () => [],
+  readFreeMemoryBytes: () => 64 * GIB,
   startTunnel: async () => assert.fail('포트가 열려 있으면 터널을 열지 않는다'),
 };
 
@@ -58,6 +60,25 @@ function writeDonePair({ outDir, outStem, videoId, filePath, language = 'auto', 
 
 const readJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
 const countStart = ({ outDir, outStem }) => (fs.readFileSync(path.join(outDir, `${outStem}.log`), 'utf8').match(/\[fake-worker\] .* 시작/g) || []).length;
+
+test('CLI: 남은 메모리가 (동시에 돌 워커 수) × 1GB 보다 적으면 Kiwi 메모리 경고를 한 줄 찍고 그대로 진행한다', async () => {
+  const inputDir = makeInputDir(['a.mp4', 'd.mov']);
+  const outDir = path.join(makeDir('memory'), 'run');
+  const runWithFreeMemory = async (freeBytes) => {
+    const { lineList, log } = createLogCollector();
+    const exitCode = await runFactoryCli({
+      argList: ['--input', inputDir, '--out', outDir, '--concurrency', '3', '--force'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
+      ...PASSING_PREFLIGHT, readFreeMemoryBytes: () => freeBytes,
+    });
+    return { exitCode, warningList: lineList.filter((line) => line.includes('남은 메모리')) };
+  };
+  const low = await runWithFreeMemory(1.5 * GIB);
+  assert.equal(low.exitCode, 0, '경고만 하고 실패로 만들지 않는다');
+  assert.deepEqual(low.warningList, [
+    '[factory] ⚠ 남은 메모리 1.5GB 가 동시에 돌 워커 2개 × 1GB 보다 적다 — 워커마다 한국어 트리거 형태소 분석기(Kiwi)로 약 0.85GB 를 더 쓴다. 느려지거나 메모리가 모자라면 --concurrency 를 낮춘다',
+  ]);
+  assert.deepEqual((await runWithFreeMemory(2 * GIB)).warningList, [], '영상 수가 동시 수보다 적으면 영상 수만큼만 본다');
+});
 
 test('CLI: 영상마다 워커를 띄워 manifest·summary 를 쓰고, 실패가 있으면 종료 코드 1, 다시 돌리면 끝난 영상만 건너뛴다', async () => {
   const inputDir = makeInputDir(['a.mp4', 'b-fail.mp4', 'c-crash.mp4', 'd.mov', 'notes.txt']);
@@ -134,6 +155,7 @@ test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이�
     checkService: async ({ url }) => (url.startsWith('http://127.0.0.1:9/') ? SERVICE_DOWN : SERVICE_UP),
     runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
+    readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => { tunnelCallCount += 1; return null; },
   });
   assert.equal(exitCode, 1);
@@ -150,6 +172,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-error'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
+    readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => { throw new Error('GPU 터널이 제때 연결되지 않았다'); },
   });
   assert.equal(exitCode, 1);
@@ -160,6 +183,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-secret'), 'run')], env: BASE_ENV, log: secret.log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
+    readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => { throw new Error('원격 주소 http://user:secretpw@gpu.local:8801 로 터널을 열지 못했다'); },
   }), 1);
   assert.ok(secret.lineList.includes('[factory] 시작 전 점검 실패: 원격 주소 http://gpu.local:8801 로 터널을 열지 못했다'), secret.lineList.join('\n'));
@@ -176,6 +200,7 @@ test('CLI: 닫힌 포트를 제품 터널로 열면 다시 점검해 돌리고, 
     argList: ['--input', inputDir, '--out', outDir], env: { ...BASE_ENV, SEEON_GPU_SSH_KEY: '/keys/app' }, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => (isTunnelOpen ? SERVICE_UP : SERVICE_DOWN), runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
+    readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async ({ env, pipelineConfig }) => {
       tunnelEnv = { key: env.SEEON_GPU_SSH_KEY, asrUrl: pipelineConfig.asrUrl };
       isTunnelOpen = true;
@@ -195,6 +220,7 @@ test('CLI: 터널이 열렸는데도 서비스가 답하지 않으면(원격 주
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-still-closed'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
     checkService: async ({ url }) => (url.includes(':9/') ? { isUp: false, detail: '연결이 끊김(ECONNRESET)' } : SERVICE_UP), runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
+    readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => ({ stop: async () => { stopCount += 1; } }),
   });
   assert.equal(exitCode, 1);
@@ -210,6 +236,7 @@ test('CLI: Bedrock 토큰이 없거나 ffmpeg 를 못 돌리면 종료 코드 1'
     env: { ...envWithoutToken, SEEON_FACTORY_FFMPEG: '/없는/ffmpeg' }, log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => SERVICE_UP, runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
     checkTriggerAnalyzer: async () => [],
+    readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: PASSING_PREFLIGHT.startTunnel,
   });
   assert.equal(exitCode, 1);

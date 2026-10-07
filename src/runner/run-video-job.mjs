@@ -72,6 +72,11 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     frameReader.close();
   }
   if (!sessionResult.pieceList.length) throw new Error('재생 타임라인이 비었다 — 지연 재생이 시작되지 않았다');
+  // 서비스 호출·판정·트리거 집계는 세션이 끝난 순간의 값으로 뜬다. 배수 상한에서 멈출 때 진행 중이던 호출은 mp3 렌더 중에
+  // 끝나므로, 렌더 뒤에 읽으면 집계·경고가 렌더 시간과 서비스 지연의 경주에 따라 달라진다(TTS 기록도 정지 때 확정한다).
+  const callLog = scopedFetch.getCallLog();
+  const judgeSourceCountMap = getJudgeSourceCountMap();
+  const triggerAnalyzerCountMap = getTriggerAnalyzerCountMap();
 
   const recordBySeq = new Map(sessionResult.captionRecordList.map((record) => [record.captionSeq, record]));
   const adPathByRef = new Map();
@@ -89,8 +94,6 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     outPath: pathMap.mp3Path, workDir: pathMap.workDir, sampleRate: probe.audioSampleRate, channelCount: probe.audioChannelCount, ffmpegPath,
   });
   const processingMs = performance.now() - realStartedAt;
-  const callLog = scopedFetch.getCallLog();
-  const judgeSourceCountMap = getJudgeSourceCountMap();
   const swallowedErrorCountMap = { task: sessionResult.swallowedErrorCountMap, ipc: bridge.getSwallowedErrorCountMap() };
   const report = buildAdReport({
     video: { videoId: job.videoId, file: job.filePath, durationMs: probe.durationMs, width: probe.width, height: probe.height, language: job.language },
@@ -99,7 +102,7 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     sessionStartWallMs: sessionResult.sessionStartWallMs, pieceList: sessionResult.pieceList,
     captionRecordList: sessionResult.captionRecordList, adPlayList: sessionResult.adPlayList, dropRecordList: sessionResult.dropRecordList,
     pipelineRecordList: readPipelineRecordList({ recordPath: sessionResult.recordPath }), callLog,
-    judgeSourceCountMap, triggerAnalyzerCountMap: getTriggerAnalyzerCountMap(),
+    judgeSourceCountMap, triggerAnalyzerCountMap,
     adFileByRef, outputFileName: path.basename(pathMap.mp3Path), renderedDurationMs, processingMs,
   });
   const incompleteReasonList = buildIncompleteReasonList({ sessionResult, callLog });

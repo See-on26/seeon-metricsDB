@@ -204,9 +204,11 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
         tts: { isOk: true, isOnDemand: true, requestedAtMs: 15000, elapsedMs: 480, message: null, callList: [{ service: 'tts', modelId: null, isVlmFallback: false, status: 200, elapsedMs: 470 }] }, ttsWaitMs: 480 },
       { captionSeq: 2, ts: sessionStartWallMs + 9000, text: '못 들은 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 8000, rationale: null, insertVideoTimeMs: 8000, audioDurationMs: 1000, gap: null, callList: [],
         tts: { isOk: true, isOnDemand: false, requestedAtMs: 16000, elapsedMs: 300, message: null, callList: [] }, ttsWaitMs: null },
+      { captionSeq: 3, ts: sessionStartWallMs + 20000, text: '정지 때 합성 중', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 19000, rationale: null, insertVideoTimeMs: 19000, audioDurationMs: null, gap: null, callList: [],
+        tts: { isOk: false, isSettled: false, isPendingAtStop: true, isOnDemand: true, requestedAtMs: 40000, elapsedMs: null, message: null, callList: [] }, ttsWaitMs: null },
     ],
     adPlayList: [{ captionSeq: 1, atElapsedMs: 15000, durationMs: 1500, playedMediaMs: 5000 }],
-    dropRecordList: [],
+    dropRecordList: [{ captionSeq: 3, ts: sessionStartWallMs + 20000, text: '정지 때 합성 중', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 19000, reason: 'stopped', factoryReason: 'drain_timeout', waitedMs: null }],
     pipelineRecordList: [{ kind: 'narration', ts: sessionStartWallMs + 12000, source: 'deixis', text: '간격 억제된 해설', slideLabel: '1', isEmitted: false, skipReason: 'rate-limited' }],
     callLog: [
       { service: 'asr', elapsedMs: 300, status: 200, errorMessage: null },
@@ -227,8 +229,10 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
   // 재생 차례가 와서 합성했고(미리 만들지 못함) 그동안 480ms 무음이었다. TTS 호출도 AD 의 서비스 호출에 든다.
   assert.deepEqual(ad.tts, { isPrefetched: false, synthMs: 480, waitMs: 480 });
   assert.deepEqual(ad.serviceCallList.map((call) => call.service), ['bedrock', 'tts']);
-  assert.deepEqual(report.droppedList.map((drop) => [drop.text, drop.reason, drop.eventMediaMs]), [['못 들은 해설', 'not_played', 8000], ['간격 억제된 해설', 'rate-limited', 12000]]);
-  assert.deepEqual(report.stats.tts, { requestCount: 2, okCount: 2, failCount: 0, onDemandCount: 1, unplayedOkCount: 1 });
+  assert.deepEqual(report.droppedList.map((drop) => [drop.text, drop.reason, drop.eventMediaMs]),
+    [['못 들은 해설', 'not_played', 8000], ['간격 억제된 해설', 'rate-limited', 12000], ['정지 때 합성 중', 'stopped', 19000]]);
+  // 세션을 멈출 때 끝나지 않은 합성은 성공·실패에 넣지 않고 따로 센다.
+  assert.deepEqual(report.stats.tts, { requestCount: 3, okCount: 2, failCount: 0, pendingAtStopCount: 1, onDemandCount: 2, unplayedOkCount: 1 });
   assert.deepEqual(report.stats.triggerAnalyzerCountMap, { kiwi: 5, english: 1 });
   assert.equal(report.output.recoveredMs, 2500);
   assert.equal(report.stats.serviceMap.asr.count, 1);
@@ -265,7 +269,7 @@ test('AD 기록: 렌더러 드롭은 그 사유로, 사건 영상 시각이 없�
     { text: '끝 뒤 해설', type: 'deixis', narrationClass: 'deixis', slideLabel: '2', eventMediaMs: 19500, reason: 'stopped', factoryReason: 'after_end' },
   ], '버린 사유는 제품 사유이고, 세션을 멈춰 버린 해설만 공장 사유를 더한다');
   assert.deepEqual(report.adList[0].tts, null, '합성 기록이 없는 해설');
-  assert.deepEqual(report.stats.tts, { requestCount: 0, okCount: 0, failCount: 0, onDemandCount: 0, unplayedOkCount: 0 });
+  assert.deepEqual(report.stats.tts, { requestCount: 0, okCount: 0, failCount: 0, pendingAtStopCount: 0, onDemandCount: 0, unplayedOkCount: 0 });
   assert.equal(report.stats.triggerAnalyzerCountMap, null);
   const [ad] = report.adList;
   assert.deepEqual(ad.trigger, { utterance: '여기 표를 보면', anchor: null, judgeReason: '지시어+표' });

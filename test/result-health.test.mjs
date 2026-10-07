@@ -59,6 +59,12 @@ test('불완전: 렌더러가 해설 소리를 요청(pipeline-tts)했는데 하
   assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [] }, callLog: [] }), [], '해설이 없는 영상');
   assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(null)] }, callLog: [] }), [],
     '합성 차례가 오기 전에 버려진 해설(체류 미달 등)만 있으면 TTS 장애가 아니다');
+  // 세션을 멈출 때 끝나지 않은 합성은 성공도 실패도 아니라 판정에서 뺀다.
+  const pendingAtStop = { isOk: false, isSettled: false, isPendingAtStop: true, message: null };
+  assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(pendingAtStop)] }, callLog: [] }), [],
+    '끝나지 않은 합성만 있으면 판정하지 않는다');
+  assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(ttsFailed()), caption(pendingAtStop)] }, callLog: [] }),
+    [{ code: 'tts_unavailable', narrationCount: 2, count: 1, total: 1, message: 'TTS HTTP 500' }], '확정된 합성만 센다');
   assert.deepEqual(buildWarningList({
     callLog: partialLog, judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: partialSession,
     swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],

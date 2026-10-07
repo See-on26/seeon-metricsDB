@@ -233,7 +233,8 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     if (appendedTailMs > 0) log.warn(`[factory] 지연 재생이 영상 끝에 닿기 전에 멈춰 남은 원음 ${appendedTailMs}ms 를 1배속으로 결과 끝에 붙인다`);
     outputGlue.noteSessionEnd({ isDrainTimedOut: isTimedOut });
     // stopExperiment 정리. 세션은 배수가 끝나야(연결 작업이 다 빠져야) 닫히고, 상한에 닿으면 실험실처럼 그 자리에서 닫힌다.
-    // 재생하지 못한 해설은 재생 사슬 정리(playbackChain.stop)가 제품처럼 stopped 로 main 에 알린다.
+    // 재생하지 못한 해설은 재생 사슬 정리(playbackChain.stop)가 제품처럼 stopped 로 main 에 알린다. 제품은 재생기 정지가 맨 앞이지만
+    // 아래는 모두 동기 구간이라 결과는 같고 버린 기록·알림의 순서만 다를 수 있다(logic-map 편차 17).
     const { core, state } = ctx;
     stopFrameCapture();
     silenceGlue.stop();
@@ -244,6 +245,8 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     core.pendingTransitions.reset();
     core.slideDwellGate.reset();
     playbackChain.stop();
+    // 정지 뒤 늦게 온 TTS 응답이 결과 기록(렌더 뒤에 만든다)을 바꾸지 않게 합성 상태를 여기서 확정한다.
+    outputGlue.settleTtsAtStop();
     ctx.state.experimentSeq += 1;
     ctx.markDebug({ stage: DEBUG_STAGE_MAP.session, verdict: DEBUG_VERDICT_MAP.info, reason: '회의 캡처 정지' });
     const endResult = await endPipelineSession();

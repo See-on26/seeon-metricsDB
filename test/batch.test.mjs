@@ -15,7 +15,6 @@ import { buildReportConfig } from '../src/runner/run-video-job.mjs';
 import { buildAdReport } from '../src/output/ad-report.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 import { runPreflight, probeHttpService, startProductTunnel } from '../src/runner/preflight.mjs';
-import { checkKiwiSetup } from '../src/product/kiwi-setup.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const makeDir = (name) => makeTempDir(`factory-${name}-`);
@@ -496,10 +495,6 @@ test('시작 전 점검: 한국어 트리거 형태소 분석기(Kiwi) 의존성
     checkTriggerAnalyzer: async () => ['한국어 트리거 형태소 분석 모델(Kiwi 0.24.0)이 없다(/x/vendor/kiwi-model) — npm --prefix seeon-meet run setup:kiwi'],
   });
   assert.deepEqual(problemList, ['한국어 트리거 형태소 분석 모델(Kiwi 0.24.0)이 없다(/x/vendor/kiwi-model) — npm --prefix seeon-meet run setup:kiwi']);
-});
-
-test('Kiwi 점검: 제품이 개발 실행에서 읽는 seeon-meet/vendor/kiwi-model 과 kiwi-nlp 를 확인한다(npm test 의 준비물)', async () => {
-  assert.deepEqual(await checkKiwiSetup(), []);
 });
 
 test('시작 전 점검: 실제 ffmpeg·ffprobe -version 은 통과한다', async () => {

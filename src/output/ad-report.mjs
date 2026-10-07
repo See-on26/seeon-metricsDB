@@ -43,12 +43,16 @@ export function readPipelineRecordList({ recordPath }) {
 }
 
 // 해설 소리 합성(pipeline-tts) 수. 렌더러는 재생 차례가 가까운 해설만 합성하므로 요청 수는 해설 수보다 적을 수 있다.
-// onDemandCount: 재생 차례가 온 뒤에야 합성한 수(그동안 지연 재생이 멈춰 무음), unplayedOkCount: 합성했지만 재생 전에 버린 수.
+// requestCount = okCount + failCount + pendingAtStopCount. pendingAtStopCount: 세션을 멈출 때 응답이 없었거나 정지 정리 중 시작된 합성
+// (성공·실패에 넣지 않는다). onDemandCount: 재생 차례가 온 뒤에야 합성한 수(그동안 지연 재생이 멈춰 무음),
+// unplayedOkCount: 합성했지만 재생 전에 버린 수.
 function summarizeTtsStat({ captionRecordList, playedSeqSet }) {
   const ttsRecordList = captionRecordList.filter((record) => record.tts);
-  const okRecordList = ttsRecordList.filter((record) => record.tts.isOk);
+  const pendingRecordList = ttsRecordList.filter((record) => record.tts.isPendingAtStop);
+  const okRecordList = ttsRecordList.filter((record) => record.tts.isOk && !record.tts.isPendingAtStop);
   return {
-    requestCount: ttsRecordList.length, okCount: okRecordList.length, failCount: ttsRecordList.length - okRecordList.length,
+    requestCount: ttsRecordList.length, okCount: okRecordList.length,
+    failCount: ttsRecordList.length - okRecordList.length - pendingRecordList.length, pendingAtStopCount: pendingRecordList.length,
     onDemandCount: ttsRecordList.filter((record) => record.tts.isOnDemand).length,
     unplayedOkCount: okRecordList.filter((record) => !playedSeqSet.has(record.captionSeq)).length,
   };
