@@ -200,8 +200,10 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
       { kind: 'source', outStartMs: 6500, outEndMs: 29000, srcStartMs: 5000, srcEndMs: 30000 },
     ],
     captionRecordList: [
-      { captionSeq: 1, ts: sessionStartWallMs + 4000, text: '막대 그래프 상승', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 3000, rationale: { utterance: '이 그래프를 보시면', summary: '근거 표현=이 그래프' }, insertVideoTimeMs: 5000, audioDurationMs: 1500, gap: { source: 'bedrock', reason: '문장 끝', gapIndex: 0, candidateCount: 2, callList: [] }, callList: [{ service: 'bedrock', modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', isVlmFallback: true, status: 200, elapsedMs: 900 }] },
-      { captionSeq: 2, ts: sessionStartWallMs + 9000, text: '못 들은 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 8000, rationale: null, insertVideoTimeMs: 8000, audioDurationMs: 1000, gap: null, callList: [] },
+      { captionSeq: 1, ts: sessionStartWallMs + 4000, text: '막대 그래프 상승', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 3000, rationale: { utterance: '이 그래프를 보시면', summary: '근거 표현=이 그래프' }, insertVideoTimeMs: 5000, audioDurationMs: 1500, gap: { source: 'bedrock', reason: '문장 끝', gapIndex: 0, candidateCount: 2, callList: [] }, callList: [{ service: 'bedrock', modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', isVlmFallback: true, status: 200, elapsedMs: 900 }],
+        tts: { isOk: true, isOnDemand: true, requestedAtMs: 15000, elapsedMs: 480, message: null, callList: [{ service: 'tts', modelId: null, isVlmFallback: false, status: 200, elapsedMs: 470 }] }, ttsWaitMs: 480 },
+      { captionSeq: 2, ts: sessionStartWallMs + 9000, text: '못 들은 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 8000, rationale: null, insertVideoTimeMs: 8000, audioDurationMs: 1000, gap: null, callList: [],
+        tts: { isOk: true, isOnDemand: false, requestedAtMs: 16000, elapsedMs: 300, message: null, callList: [] }, ttsWaitMs: null },
     ],
     adPlayList: [{ captionSeq: 1, atElapsedMs: 15000, durationMs: 1500, playedMediaMs: 5000 }],
     dropRecordList: [],
@@ -212,6 +214,7 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
       { service: 'vlm', modelId: 'qwen', elapsedMs: 1200, status: 200, errorMessage: null },
     ],
     judgeSourceCountMap: { router: { gpu: 1, bedrock: 0, error: 0 }, silence: { gpu: 0, bedrock: 0, error: 0 }, deixis: { gpu: 0, bedrock: 0, error: 0 } },
+    triggerAnalyzerCountMap: { kiwi: 5, english: 1 },
     adFileByRef: new Map([[1, 'v1/ad/ad-001.wav']]), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 29000, processingMs: 10000,
   });
   assert.equal(report.isComplete, true);
@@ -221,7 +224,12 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
   assert.equal(ad.trigger.anchor, '이 그래프');
   assert.equal(ad.isVlmFallback, true);
   assert.equal(ad.wavFile, 'v1/ad/ad-001.wav');
+  // 재생 차례가 와서 합성했고(미리 만들지 못함) 그동안 480ms 무음이었다. TTS 호출도 AD 의 서비스 호출에 든다.
+  assert.deepEqual(ad.tts, { isPrefetched: false, synthMs: 480, waitMs: 480 });
+  assert.deepEqual(ad.serviceCallList.map((call) => call.service), ['bedrock', 'tts']);
   assert.deepEqual(report.droppedList.map((drop) => [drop.text, drop.reason, drop.eventMediaMs]), [['못 들은 해설', 'not_played', 8000], ['간격 억제된 해설', 'rate-limited', 12000]]);
+  assert.deepEqual(report.stats.tts, { requestCount: 2, okCount: 2, failCount: 0, onDemandCount: 1, unplayedOkCount: 1 });
+  assert.deepEqual(report.stats.triggerAnalyzerCountMap, { kiwi: 5, english: 1 });
   assert.equal(report.output.recoveredMs, 2500);
   assert.equal(report.stats.serviceMap.asr.count, 1);
   assert.deepEqual([report.stats.serviceMap.judge.count, report.stats.serviceMap.vlm.count], [1, 1], '판정 호출은 VLM 과 따로 센다');
@@ -245,11 +253,20 @@ test('AD 기록: 렌더러 드롭은 그 사유로, 사건 영상 시각이 없�
       { captionSeq: 3, ts: sessionStartWallMs + 3500, text: '여기 표', source: 'deixis', narrationClass: 'deixis', slideLabel: '2', eventVideoTimeMs: 3000, rationale: { summary: '근거 표현=(없음)' }, insertVideoTimeMs: 4000, gap: null, callList: [] },
     ],
     adPlayList: [{ captionSeq: 3, atElapsedMs: 4000, durationMs: 1000, playedMediaMs: 4000 }],
-    dropRecordList: [{ captionSeq: 1, ts: sessionStartWallMs + 2000, text: '전환 고지', source: 'page-transition', narrationClass: 'page_transition', slideLabel: '2', eventVideoTimeMs: null, reason: 'dwell_cancelled', waitedMs: null }],
+    dropRecordList: [
+      { captionSeq: 1, ts: sessionStartWallMs + 2000, text: '전환 고지', source: 'page-transition', narrationClass: 'page_transition', slideLabel: '2', eventVideoTimeMs: null, reason: 'dwell_cancelled', factoryReason: null, waitedMs: null },
+      { captionSeq: 4, ts: sessionStartWallMs + 19000, text: '끝 뒤 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '2', eventVideoTimeMs: 19500, reason: 'stopped', factoryReason: 'after_end', waitedMs: null },
+    ],
     pipelineRecordList: [{ kind: 'deixis', ts: sessionStartWallMs + 3500, caption: '여기 표', utterance: '여기 표를 보면', judgeReason: '지시어+표' }],
     callLog: [], adFileByRef: new Map([[3, 'v2/ad/ad-001.wav']]), outputFileName: 'v2_SEEON_AD.mp3', renderedDurationMs: 21000, processingMs: 0,
   });
-  assert.deepEqual(report.droppedList, [{ text: '전환 고지', type: 'page_transition', narrationClass: 'page_transition', slideLabel: '2', eventMediaMs: 2000, reason: 'dwell_cancelled' }]);
+  assert.deepEqual(report.droppedList, [
+    { text: '전환 고지', type: 'page_transition', narrationClass: 'page_transition', slideLabel: '2', eventMediaMs: 2000, reason: 'dwell_cancelled', factoryReason: null },
+    { text: '끝 뒤 해설', type: 'deixis', narrationClass: 'deixis', slideLabel: '2', eventMediaMs: 19500, reason: 'stopped', factoryReason: 'after_end' },
+  ], '버린 사유는 제품 사유이고, 세션을 멈춰 버린 해설만 공장 사유를 더한다');
+  assert.deepEqual(report.adList[0].tts, null, '합성 기록이 없는 해설');
+  assert.deepEqual(report.stats.tts, { requestCount: 0, okCount: 0, failCount: 0, onDemandCount: 0, unplayedOkCount: 0 });
+  assert.equal(report.stats.triggerAnalyzerCountMap, null);
   const [ad] = report.adList;
   assert.deepEqual(ad.trigger, { utterance: '여기 표를 보면', anchor: null, judgeReason: '지시어+표' });
   assert.equal(ad.latencyMs, 1000);

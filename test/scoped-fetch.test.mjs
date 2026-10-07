@@ -36,7 +36,9 @@ async function captureJudgeBodyList() {
     return new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }), { status: 200 });
   };
   const judgeLlm = createJudgeLlm({ config, fetchImpl });
-  await createUnifiedRouter({ config, judgeLlm }).route({ utterance: '이 그래프를 보시면', before: '매출입니다.', after: '' });
+  await createUnifiedRouter({ config, judgeLlm }).route({
+    utterance: '이 그래프를 보시면', before: '매출입니다.', after: '', candidateList: [{ type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 }],
+  });
   await createSilenceJudge({ config, judgeLlm }).judge({ transcript: '이 화면을 보시죠', silenceMs: 6000 });
   await createDeixisJudgeClient({ config, judgeLlm }).judge({ utterance: '여기 이 부분', before: '', after: '' });
   return bodyList;
@@ -65,6 +67,18 @@ test('판정 GPU 주소가 VLM 과 같으면 몸통으로 판정과 VLM 을 가�
   assert.equal(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: undefined, pipelineConfig: sharedJudgeConfig }).service, 'vlm');
   assert.equal(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: routerBody, pipelineConfig }).service, 'vlm', '판정 설정이 없는 제품');
   assert.equal(classifyServiceRequest({ url: pipelineConfig.asrUrl, body: routerBody, pipelineConfig: sharedJudgeConfig }).service, 'asr');
+});
+
+test('제품 기본 설정은 판정 LLM(8805)을 VLM(8801)과 따로 두므로 주소만으로 가르고, VLM 주소로 간 글 요청은 VLM 이다', async () => {
+  const { readPipelineConfig } = require(resolveProductPath('src/main/caption-pipeline/config.js'));
+  const defaultConfig = readPipelineConfig({});
+  assert.deepEqual([defaultConfig.vlmUrl, defaultConfig.judgeGpuUrl, defaultConfig.judgeGpuModel],
+    ['http://127.0.0.1:8801/v1/chat/completions', 'http://127.0.0.1:8805/v1/chat/completions', 'qwen3.5-9b']);
+  const [routerBody] = await captureJudgeBodyList();
+  assert.deepEqual(classifyServiceRequest({ url: defaultConfig.judgeGpuUrl, body: routerBody, pipelineConfig: defaultConfig }),
+    { service: 'judge', modelId: 'qwen3.5-9b', isVlmFallback: false });
+  assert.deepEqual(classifyServiceRequest({ url: defaultConfig.vlmUrl, body: routerBody, pipelineConfig: defaultConfig }),
+    { service: 'vlm', modelId: defaultConfig.vlmModel, isVlmFallback: false }, '판정 주소가 따로면 VLM 주소의 몸통은 보지 않는다');
 });
 
 test('판정 GPU 주소가 따로 있으면 주소만으로 판정으로 센다', () => {

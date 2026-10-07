@@ -43,6 +43,8 @@ function setupSimulator({
       'pipeline-session-start': async () => ({ isOk: true, sessionId: 'session-test', recordPath: null }),
       'pipeline-session-end': async () => ({ isOk: true, sessionId: 'session-test', asrCount: 0, slideMarkCount: 0 }),
       'embed-frame': async () => ({ isOk: true, embedding: [1, 0, 0] }),
+      // 캡션에는 소리가 없고 렌더러가 재생 차례가 가까운 해설만 합성한다. 대역은 문장마다 정한 길이의 wav 를 준다.
+      'pipeline-tts': async ({ text }) => ({ isOk: true, wavData: createToneWav({ durationMs: ttsDurationByText.get(text) ?? 1000 }) }),
       ...handlerMap,
     },
   });
@@ -66,11 +68,12 @@ function setupSimulator({
 }
 
 let nextTs = 1;
+const ttsDurationByText = new Map();
 function buildCaption({ text, eventVideoTimeMs, durationMs = 1000 }) {
   nextTs += 1;
+  ttsDurationByText.set(text, durationMs);
   return {
-    type: 'caption', ts: 1_800_000_000_000 + nextTs, text, source: 'deixis', slideLabel: null, narrationClass: 'deixis',
-    eventVideoTimeMs, wavData: createToneWav({ durationMs }), rationale: null,
+    type: 'caption', ts: 1_800_000_000_000 + nextTs, text, source: 'deixis', slideLabel: null, narrationClass: 'deixis', eventVideoTimeMs, rationale: null,
   };
 }
 
@@ -125,7 +128,7 @@ test('배수 상한은 실험실 규칙(영상 끝 + 지연 10초 + 대기 줄 T
   assert.equal(result.appendedTailMs, 0, '원음은 이미 끝까지 틀었다');
 });
 
-test('상한에 닿아도 AD 가 재생 중이면 끝날 때까지 기다리고, 그때 남은 영상 안 예약은 drain_timeout·영상 끝 뒤 예약은 after_end 로 남긴다', async () => {
+test('상한에 닿아도 AD 가 재생 중이면 끝날 때까지 기다리고, 그때 남은 예약은 stopped 로 알리며 공장 사유는 영상 안 drain_timeout·영상 끝 뒤 after_end 다', async () => {
   const harness = setupSimulator();
   harness.deliverCaptionAt(2000, buildCaption({ text: '긴 해설', eventVideoTimeMs: 1000, durationMs: 40000 }));
   harness.deliverCaptionAt(2500, buildCaption({ text: '영상 안 해설', eventVideoTimeMs: 4000 }));
@@ -137,9 +140,11 @@ test('상한에 닿아도 AD 가 재생 중이면 끝날 때까지 기다리고,
   const [adPlay] = result.adPlayList;
   assert.ok(adPlay.atElapsedMs + 40000 > 6000 + DRAIN_LIMIT_AFTER_END_MS, '긴 해설이 상한을 넘겨 재생된다');
   assert.equal(invokeOf(harness, 'pipeline-session-end').atElapsedMs, adPlay.atElapsedMs + 40000 + 1000);
-  assert.deepEqual(result.dropRecordList.map(({ text, reason }) => [text, reason]), [
-    ['영상 안 해설', 'drain_timeout'], ['영상 끝 뒤 해설', 'after_end'],
+  assert.deepEqual(result.dropRecordList.map(({ text, reason, factoryReason }) => [text, reason, factoryReason]), [
+    ['영상 안 해설', 'stopped', 'drain_timeout'], ['영상 끝 뒤 해설', 'stopped', 'after_end'],
   ]);
+  const droppedReportList = harness.bridge.sendList.filter(({ channel }) => channel === 'pipeline-narration-dropped').map(({ payload }) => payload.reason);
+  assert.deepEqual(droppedReportList, ['stopped', 'stopped'], '제품 stopExperiment 처럼 재생하지 못한 해설을 main 에 알린다');
   // AD 판단·드롭은 실험실처럼 상한에서 멈추지만, 남은 원음은 1배속으로 조각표 끝에 붙여 끝까지 담는다.
   assert.equal(Math.round(summarizeTimeline(result.pieceList).sourceMediaMs), 6000);
   const tailPiece = result.pieceList.at(-1);

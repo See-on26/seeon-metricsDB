@@ -24,6 +24,7 @@ const SERVICE_DOWN = { isUp: false, detail: '연결 거부(ECONNREFUSED)' };
 const PASSING_PREFLIGHT = {
   checkService: async () => SERVICE_UP,
   runVersion: async () => Buffer.from('ok'),
+  checkTriggerAnalyzer: async () => [],
   startTunnel: async () => assert.fail('포트가 열려 있으면 터널을 열지 않는다'),
 };
 
@@ -132,6 +133,7 @@ test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이�
     argList: ['--input', inputDir, '--out', outDir], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
     checkService: async ({ url }) => (url.startsWith('http://127.0.0.1:9/') ? SERVICE_DOWN : SERVICE_UP),
     runVersion: async () => Buffer.from('ok'),
+    checkTriggerAnalyzer: async () => [],
     startTunnel: async () => { tunnelCallCount += 1; return null; },
   });
   assert.equal(exitCode, 1);
@@ -147,6 +149,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-error'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
+    checkTriggerAnalyzer: async () => [],
     startTunnel: async () => { throw new Error('GPU 터널이 제때 연결되지 않았다'); },
   });
   assert.equal(exitCode, 1);
@@ -156,6 +159,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
   assert.equal(await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-secret'), 'run')], env: BASE_ENV, log: secret.log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
+    checkTriggerAnalyzer: async () => [],
     startTunnel: async () => { throw new Error('원격 주소 http://user:secretpw@gpu.local:8801 로 터널을 열지 못했다'); },
   }), 1);
   assert.ok(secret.lineList.includes('[factory] 시작 전 점검 실패: 원격 주소 http://gpu.local:8801 로 터널을 열지 못했다'), secret.lineList.join('\n'));
@@ -171,6 +175,7 @@ test('CLI: 닫힌 포트를 제품 터널로 열면 다시 점검해 돌리고, 
   const exitCode = await runFactoryCli({
     argList: ['--input', inputDir, '--out', outDir], env: { ...BASE_ENV, SEEON_GPU_SSH_KEY: '/keys/app' }, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => (isTunnelOpen ? SERVICE_UP : SERVICE_DOWN), runVersion: async () => Buffer.from('ok'),
+    checkTriggerAnalyzer: async () => [],
     startTunnel: async ({ env, pipelineConfig }) => {
       tunnelEnv = { key: env.SEEON_GPU_SSH_KEY, asrUrl: pipelineConfig.asrUrl };
       isTunnelOpen = true;
@@ -189,6 +194,7 @@ test('CLI: 터널이 열렸는데도 서비스가 답하지 않으면(원격 주
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-still-closed'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
     checkService: async ({ url }) => (url.includes(':9/') ? { isUp: false, detail: '연결이 끊김(ECONNRESET)' } : SERVICE_UP), runVersion: async () => Buffer.from('ok'),
+    checkTriggerAnalyzer: async () => [],
     startTunnel: async () => ({ stop: async () => { stopCount += 1; } }),
   });
   assert.equal(exitCode, 1);
@@ -203,6 +209,7 @@ test('CLI: Bedrock 토큰이 없거나 ffmpeg 를 못 돌리면 종료 코드 1'
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('no-token'), 'run')],
     env: { ...envWithoutToken, SEEON_FACTORY_FFMPEG: '/없는/ffmpeg' }, log, workerPath: FAKE_WORKER_PATH,
     checkService: async () => SERVICE_UP, runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
+    checkTriggerAnalyzer: async () => [],
     startTunnel: PASSING_PREFLIGHT.startTunnel,
   });
   assert.equal(exitCode, 1);
@@ -411,9 +418,9 @@ test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모
   assert.deepEqual(countStartPair(), [2, 1]);
 
   const modelEnv = { ...BASE_ENV, SEEON_VLM_MODEL: 'other-vlm' };
-  // 판정 GPU 모델은 따로 주지 않으면 VLM 모델을 따른다(제품 설정).
+  // 판정 LLM 은 VLM 과 따로 띄운 모델(제품 기본 qwen3.5-9b)이라 VLM 모델만 다르다.
   assert.deepEqual(await runOnce(modelEnv), ['a', 'b'].map((videoId) => `[factory] ↻ ${videoId} 이전 완료 결과와 달라 다시 만든다 — `
-    + '결과 설정 vlmModel qwen3.5-35b-a3b → other-vlm · 결과 설정 judgeGpuModel qwen3.5-35b-a3b → other-vlm'));
+    + '결과 설정 vlmModel qwen3.5-35b-a3b → other-vlm'));
   assert.deepEqual(countStartPair(), [3, 2]);
   assert.deepEqual(await runOnce({ ...modelEnv, SEEON_ASR_URL: 'http://127.0.0.1:10/asr' }), [], '서비스 주소(터널·직접 연결)는 결과 설정이 아니다');
   assert.deepEqual(countStartPair(), [3, 2]);

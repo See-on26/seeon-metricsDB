@@ -27,7 +27,8 @@ test('runToEnd 가 돌아오면 제품 기록 파일에 세션 끝 기록까지 
   const workDir = path.join(dirPath, 'work');
   fs.mkdirSync(workDir);
   const clock = createVirtualClock({ startWallMs: Date.now() });
-  const { bridge } = bootProductPipeline({ outDir: workDir, clock, log: console });
+  const { bridge, waitTriggerReady } = bootProductPipeline({ outDir: workDir, clock, log: console });
+  await waitTriggerReady();
   const frameReader = openSampleFrameReader({ filePath, ffmpegPath });
   const simulator = createSessionSimulator({
     clock, bridge, video: { videoId: 'gray', filePath, language: 'ko', probe },

@@ -15,6 +15,7 @@ import { buildReportConfig } from '../src/runner/run-video-job.mjs';
 import { buildAdReport } from '../src/output/ad-report.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
 import { runPreflight, probeHttpService, startProductTunnel } from '../src/runner/preflight.mjs';
+import { checkKiwiSetup } from '../src/product/kiwi-setup.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const makeDir = (name) => makeTempDir(`factory-${name}-`);
@@ -450,7 +451,7 @@ test('시작 전 점검: Bedrock 토큰 없음 사유는 탐지 판정 백엔드
   const bedrockProblem = await readKeyProblem('bedrock');
   assert.match(bedrockProblem, /^AWS_BEARER_TOKEN_BEDROCK 이 없다 — /);
   assert.match(bedrockProblem, /SEEON_JUDGE_BACKEND=bedrock/);
-  assert.match(bedrockProblem, /라우터·무발화·지시 판정/);
+  assert.match(bedrockProblem, /판단 LLM\(라우터·무발화 판정\)을 쓸 수 없어 발화 기반·무발화 해설이 나오지 않/);
 });
 
 test('시작 전 점검: 판정 GPU 주소가 VLM 과 다른 호스트·포트일 때만 그 주소를 JUDGE 로 따로 본다', async () => {
@@ -473,6 +474,32 @@ test('시작 전 점검: 판정 GPU 주소가 VLM 과 다른 호스트·포트�
   assert.deepEqual(dedicated.downServiceList, ['JUDGE 127.0.0.1:18806 연결 거부(ECONNREFUSED)']);
   const bedrockJudge = await runWithConfig({ judgeBackend: 'bedrock', judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' });
   assert.equal(bedrockJudge.checkedList.includes('18806'), false, 'Bedrock 판정이면 GPU 판정 주소를 쓰지 않는다');
+});
+
+test('시작 전 점검: 제품 기본 설정이면 판정 LLM 주소(127.0.0.1:8805)를 VLM 과 따로 JUDGE 로 본다', async () => {
+  const pipelineConfig = loadPipelineConfig().readPipelineConfig({ AWS_BEARER_TOKEN_BEDROCK: 'token' });
+  assert.equal(pipelineConfig.judgeBackend, 'gpu');
+  assert.equal(pipelineConfig.judgeGpuUrl, 'http://127.0.0.1:8805/v1/chat/completions');
+  const checkedList = [];
+  const { downServiceList } = await runPreflight({
+    pipelineConfig, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', runVersion: async () => Buffer.from('ok'), checkTriggerAnalyzer: async () => [],
+    checkService: async ({ url }) => { checkedList.push(url); return url.includes(':8805/') ? SERVICE_DOWN : SERVICE_UP; },
+  });
+  assert.deepEqual(checkedList.map((url) => new URL(url).port), ['8801', '8802', '8803', '8803', '8804', '8805']);
+  assert.deepEqual(downServiceList, ['JUDGE 127.0.0.1:8805 연결 거부(ECONNREFUSED)']);
+});
+
+test('시작 전 점검: 한국어 트리거 형태소 분석기(Kiwi) 의존성·모델이 없으면 설치 방법과 함께 막는다', async () => {
+  const { problemList } = await runPreflight({
+    pipelineConfig: { vlmUrl: 'http://127.0.0.1:18801/v', bedrockApiKey: 'token' }, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe',
+    checkService: async () => SERVICE_UP, runVersion: async () => Buffer.from('ok'),
+    checkTriggerAnalyzer: async () => ['한국어 트리거 형태소 분석 모델(Kiwi 0.24.0)이 없다(/x/vendor/kiwi-model) — npm --prefix seeon-meet run setup:kiwi'],
+  });
+  assert.deepEqual(problemList, ['한국어 트리거 형태소 분석 모델(Kiwi 0.24.0)이 없다(/x/vendor/kiwi-model) — npm --prefix seeon-meet run setup:kiwi']);
+});
+
+test('Kiwi 점검: 제품이 개발 실행에서 읽는 seeon-meet/vendor/kiwi-model 과 kiwi-nlp 를 확인한다(npm test 의 준비물)', async () => {
+  assert.deepEqual(await checkKiwiSetup(), []);
 });
 
 test('시작 전 점검: 실제 ffmpeg·ffprobe -version 은 통과한다', async () => {
@@ -678,8 +705,14 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
     outDir, ...job, identity: { versionMap: IDENTITY.versionMap, resultConfig: buildResultConfig({ pipelineConfig: readPipelineConfig(env) }) },
   });
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] });
+  // 판정 LLM 은 VLM 과 따로 띄운 모델이라(제품 기본 qwen3.5-9b) VLM 모델을 바꿔도 판정 모델은 그대로다.
   const recordedVlmModel = recordedConfig.modelConfig.vlmModel;
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_MODEL: 'vlm-next' }), {
-    status: 'mismatch', mismatchList: [`결과 설정 vlmModel ${recordedVlmModel} → vlm-next`, `결과 설정 judgeGpuModel ${recordedVlmModel} → vlm-next`],
+    status: 'mismatch', mismatchList: [`결과 설정 vlmModel ${recordedVlmModel} → vlm-next`],
   });
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_JUDGE_GPU_MODEL: 'judge-next' }), {
+    status: 'mismatch', mismatchList: [`결과 설정 judgeGpuModel ${recordedConfig.modelConfig.judgeGpuModel} → judge-next`],
+  });
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_JUDGE_GPU_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] },
+    '판정 주소만 바뀐 것은 같은 결과다');
 });

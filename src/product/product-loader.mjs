@@ -126,6 +126,48 @@ export function getJudgeSourceCountMap() {
   return structuredClone(judgeSourceCountMap);
 }
 
+// 제품 index.js 가 만드는 Kiwi 형태소 분석기(trigger/kiwi-tokenizer.js)를 붙잡아 워커가 세션 전에 준비를 기다리게 한다.
+// 제품 앱은 앱이 뜰 때 한 번 읽어 회의를 시작하기 전에 준비가 끝나 있다. 공장은 영상 0ms 부터 세션을 돌리므로 기다리지 않으면
+// 첫 전사들이 대체 규칙(rule)으로 트리거를 뽑아 제품과 달라진다.
+const kiwiTokenizerList = [];
+
+function installKiwiTokenizerShim() {
+  const kiwiTokenizerFile = require.resolve(resolveProductPath('src/main/caption-pipeline/trigger/kiwi-tokenizer.js'));
+  const realKiwiTokenizer = require(kiwiTokenizerFile);
+  const createTrackedKiwiTokenizer = (option) => {
+    const tokenizer = realKiwiTokenizer.createKiwiTokenizer(option);
+    kiwiTokenizerList.push(tokenizer);
+    return tokenizer;
+  };
+  require.cache[kiwiTokenizerFile].exports = { ...realKiwiTokenizer, createKiwiTokenizer: createTrackedKiwiTokenizer };
+}
+
+export function getKiwiTokenizer() {
+  return kiwiTokenizerList.at(-1) ?? null;
+}
+
+// 트리거가 전사마다 쓴 분석기(kiwi·rule·english) 수. 한국어 전사에 rule 이 있으면 Kiwi 없이 대체 규칙으로 뽑은 것이라 제품과 다르다.
+const triggerAnalyzerCountMap = {};
+
+function installSpeechTriggerCounterShim() {
+  const speechTriggerFile = require.resolve(resolveProductPath('src/main/caption-pipeline/trigger/speech-trigger.js'));
+  const realSpeechTrigger = require(speechTriggerFile);
+  const createCountedSpeechTrigger = (option) => {
+    const speechTrigger = realSpeechTrigger.createSpeechTrigger(option);
+    function detect(input) {
+      const result = speechTrigger.detect(input);
+      if (result.analyzer) triggerAnalyzerCountMap[result.analyzer] = (triggerAnalyzerCountMap[result.analyzer] || 0) + 1;
+      return result;
+    }
+    return { ...speechTrigger, detect };
+  };
+  require.cache[speechTriggerFile].exports = { ...realSpeechTrigger, createSpeechTrigger: createCountedSpeechTrigger };
+}
+
+export function getTriggerAnalyzerCountMap() {
+  return { ...triggerAnalyzerCountMap };
+}
+
 export function installProductLoader({ outDir }) {
   if (isInstalled) throw new Error('installProductLoader 는 프로세스마다 한 번만 부른다');
   isInstalled = true;
@@ -144,6 +186,8 @@ export function installProductLoader({ outDir }) {
   };
   installPathsShim({ outDir });
   installJudgeCounterShim();
+  installKiwiTokenizerShim();
+  installSpeechTriggerCounterShim();
 }
 
 export function loadRegisterPipeline() {

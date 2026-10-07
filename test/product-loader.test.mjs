@@ -117,7 +117,8 @@ test('탐지 판정 LLM 호출을 판정기·답한 곳(gpu·bedrock)·실패로
     }
   }
   const answerFetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"caption":true,"reason":"visual_referent"}' } }] }));
-  assert.equal((await runWithFetch(answerFetch, () => createUnifiedRouter({ config }).route({ utterance: '이 그래프' }))).source, 'gpu');
+  const candidateList = [{ type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 }];
+  assert.equal((await runWithFetch(answerFetch, () => createUnifiedRouter({ config }).route({ utterance: '이 그래프', candidateList }))).source, 'gpu');
   assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '여기 이 부분' }))).source, 'gpu');
   assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '이 표' }))).source, 'gpu');
   // GPU 가 실패하고 Bedrock 키가 없어 넘기지 못한다. 무발화 판정기는 실패를 error 로 돌려준다(로그를 찍지 않는다).

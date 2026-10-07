@@ -15,8 +15,11 @@ function setupDetection(options = {}) {
 }
 
 // 전사는 조각 녹음이 끝난 뒤(endMs ≤ atMs)에 도착한다. 제품의 endTs 도 늘 도착 시각보다 앞선다.
-const deliverAt = ({ clock, asrGlue, ctx }, atMs, { text, startMs, endMs, segmentList }) => clock.setTimeout(
-  () => asrGlue.handleAsrTranscript({ text, ts: ctx.toWallTs(startMs), endTs: ctx.toWallTs(endMs), segmentList }), atMs);
+// 트리거 후보는 main 이 asr 이벤트에 실어 보내는 모양({ type, phrase, start, end }) 그대로 준다.
+const deliverAt = ({ clock, asrGlue, ctx }, atMs, { text, startMs, endMs, segmentList, triggerCandidateList }) => clock.setTimeout(
+  () => asrGlue.handleAsrTranscript({ text, ts: ctx.toWallTs(startMs), endTs: ctx.toWallTs(endMs), segmentList, triggerCandidateList }), atMs);
+const GRAPH_CANDIDATE = { type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 };
+const RISE_CANDIDATE = { type: 'change', phrase: '늘었습니다', start: 0, end: 5 };
 
 test('평가 프리셋은 페이지 전환·화자·요약을 끄고, 페이지 전환 포함이면 페이지 전환만 켠다', () => {
   assert.deepEqual(EVAL_PRESET_MAP, { page_transition: false, speaker_identity: false, meeting_summary: false });
@@ -47,14 +50,15 @@ test('음성 조각만, 녹음이 끝난 영상 시각에 벽시계 시작·끝�
   assert.ok(bridge.invokeList.every(({ atElapsedMs, payload }) => payload.endTs <= ctx.toWallTs(atElapsedMs)), 'endTs 는 보내는 순간보다 미래가 아니다');
   assert.equal(Buffer.from(bridge.invokeList[1].payload.buffer).toString(), 'second');
   assert.equal(bridge.invokeList[0].payload.speakerHint, null);
+  assert.equal(bridge.invokeList[0].payload.isSpeakerTracked, false, '평가 프리셋은 화자 식별을 꺼 회의 스크립트에 화자를 적지 않는다');
   assert.equal(harness.clock.pendingTimerCount, 0, '마지막 조각 뒤에는 타이머를 남기지 않는다');
   assert.deepEqual(harness.warnList, []);
 });
 
-test('지시어 조각이 오면 lookahead 2.5초 뒤 판정, 그때 프레임을 뜨고 균형 보류 2.5초 뒤 pipeline-deixis 를 보낸다', async () => {
+test('트리거 후보가 실린 조각이 오면 lookahead 2.5초 뒤 판정, 그때 프레임을 뜨고 균형 보류 2.5초 뒤 후보와 함께 pipeline-deixis 를 보낸다', async () => {
   const harness = setupDetection();
   const text = '이 그래프를 보시면 매출이 늘었습니다.';
-  deliverAt(harness, 6800, { text, startMs: 3000, endMs: 6000, segmentList: [{ startSec: 0, endSec: 2.4, text }] });
+  deliverAt(harness, 6800, { text, startMs: 3000, endMs: 6000, segmentList: [{ startSec: 0, endSec: 2.4, text }], triggerCandidateList: [GRAPH_CANDIDATE] });
   await harness.clock.runUntil({ isDone: () => harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis') });
   const call = harness.bridge.invokeList.find((item) => item.channel === 'pipeline-deixis');
   assert.equal(call.atElapsedMs, 6800 + 2500 + 2500);
@@ -66,19 +70,47 @@ test('지시어 조각이 오면 lookahead 2.5초 뒤 판정, 그때 프레임�
   assert.deepEqual(Object.keys(call.payload.wordBudgetMap).sort(), ['deixis', 'interpretation', 'visual_description']);
   assert.equal(call.payload.wordBudgetMap.deixis.isDroppable, false);
   assert.equal(call.payload.ts, harness.ctx.toWallTs(6800 + 5000));
+  assert.deepEqual(call.payload.triggerCandidateList, [GRAPH_CANDIDATE]);
+  assert.ok(harness.bridge.sendList.some(({ payload }) => payload.reason === '발화 지시가 트리거' && payload.detail === '근거="이 그래프"'),
+    '화면 의존성 근거는 후보 구에서 읽는다');
   assert.deepEqual(harness.warnList, []);
 });
 
 test('앞의 끝나지 않은 조각은 lead 로, lookahead 중 온 조각은 follow 로 붙고 뒤 맥락(7초 창)에도 들어간다', async () => {
   const harness = setupDetection();
   deliverAt(harness, 4000, { text: '그래서 다음 자료로', startMs: 0, endMs: 3000, segmentList: [] });
-  deliverAt(harness, 6800, { text: '이 그래프를 보시면', startMs: 3000, endMs: 6000, segmentList: [] });
-  deliverAt(harness, 9200, { text: '매출이 늘었습니다.', startMs: 6000, endMs: 9000, segmentList: [] });
+  deliverAt(harness, 6800, { text: '이 그래프를 보시면', startMs: 3000, endMs: 6000, segmentList: [], triggerCandidateList: [GRAPH_CANDIDATE] });
+  deliverAt(harness, 9200, { text: '매출이 늘었습니다.', startMs: 6000, endMs: 9000, segmentList: [], triggerCandidateList: [RISE_CANDIDATE] });
   await harness.clock.runUntil({ isDone: () => harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis') });
   const { payload } = harness.bridge.invokeList.find((item) => item.channel === 'pipeline-deixis');
   assert.equal(payload.utterance, '그래서 다음 자료로 이 그래프를 보시면 매출이 늘었습니다.');
   assert.equal(payload.afterTranscript, '매출이 늘었습니다.');
   assert.equal(payload.beforeTranscript, '그래서 다음 자료로 이 그래프를 보시면');
+  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE], '뒤 조각은 앞 후보의 문장으로만 붙고, 그 조각의 후보는 새 판단에 넣지 않는다(판정이 났거나 4초 쿨다운 안)');
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('트리거 후보가 없는 조각은 지시 후보가 되지 않는다(지시 판단은 main 트리거가 정한다)', async () => {
+  const harness = setupDetection();
+  deliverAt(harness, 6800, { text: '이 그래프를 보시면 매출이 늘었습니다.', startMs: 3000, endMs: 6000, segmentList: [] });
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 20000 });
+  assert.equal(harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis'), false);
+  assert.equal(harness.ctx.core.candidateScheduler.pending, null);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('lookahead 동안 들어온 다른 조각의 트리거 후보는 같은 판단에 합쳐 보내고, 같은 유형·구는 한 번만 넣는다', async () => {
+  const harness = setupDetection();
+  const tableCandidate = { type: 'demonstrative', phrase: '이 표', start: 0, end: 3 };
+  harness.clock.setTimeout(() => harness.ctx.hooks.onDeixis({
+    text: '이 그래프를 보시면', trigger: '이 그래프', candidateList: [GRAPH_CANDIDATE], captureTs: harness.ctx.toWallTs(6000), eventWallTs: null,
+  }), 6800);
+  harness.clock.setTimeout(() => harness.ctx.hooks.onDeixis({
+    text: '이 표와 이 그래프', trigger: '이 표, 이 그래프', candidateList: [tableCandidate, GRAPH_CANDIDATE], captureTs: harness.ctx.toWallTs(8000), eventWallTs: null,
+  }), 8200);
+  await harness.clock.runUntil({ isDone: () => harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis') });
+  const { payload } = harness.bridge.invokeList.find((item) => item.channel === 'pipeline-deixis');
+  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE, tableCandidate]);
   assert.deepEqual(harness.warnList, []);
 });
 

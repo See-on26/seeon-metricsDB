@@ -67,6 +67,41 @@ test('체류 3초 전에 다른 슬라이드로 넘어가면 앞 슬라이드 �
   assert.ok(frameCallList[0].payload.eventVideoTimeMs >= 2000 && frameCallList[0].payload.eventVideoTimeMs <= 2800);
   assert.ok(harness.bridge.sendList.some(({ payload }) => payload.reason?.startsWith('체류 미달')));
   assert.ok(harness.clock.nowPerf() - harness.ctx.state.lastScreenTransitionAt < 4000, '전환 기준 시각이 새 슬라이드로 옮겨짐');
+  // 체류를 못 채운 화면은 main 의 회의 스크립트에서 그 전환을 빼도록 알린다(고지 요청 전이라 requestTs 는 없다).
+  const cancelList = sendsOf(harness.bridge, 'pipeline-transition-cancelled');
+  assert.deepEqual(cancelList.map(({ payload }) => payload), [{ slideLabel: '1', requestTs: null, transitionTs: harness.ctx.toWallTs(400) }]);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('전환을 확정하면 고지가 정해질 때까지 진행 중으로 두고, 체류 미달·고지 미발행이면 풀어 준다(가상 시계 타이머만 쓴다)', async () => {
+  const harness = createTestContext({
+    handlerMap: {
+      'embed-frame': async () => ({ isOk: true, embedding: harness.ctx.videoTimeMs() < 2000 ? [1, 0, 0] : [0, 1, 0] }),
+      'pipeline-frame': async () => ({ isOk: true, isEmitted: false }),
+    },
+  });
+  const slideGlue = createSlideGlue({
+    ctx: harness.ctx, readFrameAt: async (timeMs) => (timeMs < 2000 ? RED : BLUE), slideFrameDir: makeTempDir('factory-slides-pending-'),
+  });
+  const { pendingTransitions } = harness.ctx.core;
+  const settledList = [];
+  const originalSettle = pendingTransitions.settle.bind(pendingTransitions);
+  pendingTransitions.settle = (option) => {
+    const isSettled = originalSettle(option);
+    if (isSettled) settledList.push([option.slideLabel, option.status, harness.clock.elapsedMs()]);
+    return isSettled;
+  };
+  slideGlue.start();
+  await harness.clock.runUntil({ isDone: () => pendingTransitions.hasPending, deadlineElapsedMs: 1000 });
+  assert.equal(pendingTransitions.hasPending, true, '슬라이드 1 확정 = 진행 중인 전환');
+  await harness.clock.runUntil({ isDone: () => callsOf(harness.bridge, 'pipeline-frame').length === 1 && !pendingTransitions.hasPending });
+  // 슬라이드 1 은 체류 미달로 취소, 슬라이드 2 는 고지를 내보내지 못해(기능 꺼짐 등) 풀린다.
+  assert.deepEqual(settledList.map(([label, status]) => [label, status]), [['1', 'cancelled'], ['2', 'unscheduled']]);
+  assert.equal(settledList[1][2], callsOf(harness.bridge, 'pipeline-frame')[0].atElapsedMs);
+  const frameCall = callsOf(harness.bridge, 'pipeline-frame')[0];
+  assert.equal(harness.ctx.state.slideTransitionRequestTsMap.get('2'), frameCall.payload.ts, '고지 요청 시각을 기억한다');
+  slideGlue.stop();
+  assert.equal(harness.clock.pendingTimerCount, 0, '풀린 전환은 10초 상한 타이머를 남기지 않는다');
   assert.deepEqual(harness.warnList, []);
 });
 

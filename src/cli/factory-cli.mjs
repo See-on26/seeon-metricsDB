@@ -129,9 +129,10 @@ function listenStopSignal({ signalSource, onStop, onForce, now = () => performan
 }
 
 // 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGHUP 129, SIGINT 130, SIGTERM 143).
-// workerPath·checkService·runVersion·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 서비스·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
+// workerPath·checkService·runVersion·checkTriggerAnalyzer·startTunnel·signalSource·exitProcess 는 테스트가 실제 워커·GPU 서비스·
+// Kiwi 모델·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
 export async function runFactoryCli({
-  argList, env = process.env, log = console, workerPath, checkService, runVersion, startTunnel = startProductTunnel, signalSource = process,
+  argList, env = process.env, log = console, workerPath, checkService, runVersion, checkTriggerAnalyzer, startTunnel = startProductTunnel, signalSource = process,
   exitProcess = (exitCode) => process.exit(exitCode),
 }) {
   const options = parseFactoryArgs(argList);
@@ -146,7 +147,7 @@ export async function runFactoryCli({
   // 이전 manifest 가 깨져 있으면 영상을 다 돌린 뒤가 아니라 지금 멈춘다. 이어 쓸 내용은 잠금을 잡은 뒤 다시 읽는다.
   readManifest({ outDir });
 
-  const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkService, runVersion });
+  const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkService, runVersion, checkTriggerAnalyzer });
   const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkService, startTunnel, log });
   if (preflight.problemList.length) {
     // 터널 모듈 오류 등 바깥 문구에는 주소가 실릴 수 있어 사용자 정보를 지운다.

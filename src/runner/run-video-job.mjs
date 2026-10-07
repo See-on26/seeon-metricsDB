@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 import { bootProductPipeline } from '../product/boot-pipeline.mjs';
-import { getJudgeSourceCountMap } from '../product/product-loader.mjs';
+import { getJudgeSourceCountMap, getTriggerAnalyzerCountMap } from '../product/product-loader.mjs';
 import { readVersionMap, buildResultConfig } from './result-identity.mjs';
 import { createVirtualClock } from '../clock/virtual-clock.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
@@ -30,7 +30,7 @@ export function buildReportConfig({ job, pipelineConfig, runConcurrency = null }
   };
 }
 
-// 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
+// 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 제품 부팅(Kiwi 준비까지) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
 // 기반 문제(화면 입력 실패·서비스 장애·세션 종료 실패)로 불완전한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다.
 // 다시 돌리면 그 영상을 다시 처리한다. 부하로 생기는 품질 저하(시간 초과·판정 대체 등)는 완료로 두고 warningList 에 남긴다.
 // runConcurrency 는 이번 실행의 동시 수로, 결과 JSON 에 남긴다.
@@ -61,6 +61,7 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   try {
     const pipeline = bootProductPipeline({ outDir: pathMap.workDir, clock, log });
     ({ scopedFetch, pipelineConfig, bridge } = pipeline);
+    await pipeline.waitTriggerReady();
     const simulator = createSessionSimulator({
       clock, bridge: pipeline.bridge, video: { ...job, probe }, prep: { levelList, segmentList, segmentBufferMap, frameReader },
       options: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded), ffmpegPath }, workDir: pathMap.workDir, log, onProgress,
@@ -98,7 +99,7 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     sessionStartWallMs: sessionResult.sessionStartWallMs, pieceList: sessionResult.pieceList,
     captionRecordList: sessionResult.captionRecordList, adPlayList: sessionResult.adPlayList, dropRecordList: sessionResult.dropRecordList,
     pipelineRecordList: readPipelineRecordList({ recordPath: sessionResult.recordPath }), callLog,
-    judgeSourceCountMap,
+    judgeSourceCountMap, triggerAnalyzerCountMap: getTriggerAnalyzerCountMap(),
     adFileByRef, outputFileName: path.basename(pathMap.mp3Path), renderedDurationMs, processingMs,
   });
   const incompleteReasonList = buildIncompleteReasonList({ sessionResult, callLog });

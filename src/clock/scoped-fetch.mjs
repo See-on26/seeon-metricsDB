@@ -28,7 +28,8 @@ const MODEL_KEY_BY_SERVICE_MAP = { [SERVICE_MAP.vlm]: 'vlmModel', [SERVICE_MAP.j
 export function classifyServiceUrl({ url, pipelineConfig }) {
   const target = new URL(String(url));
   const originPath = `${target.origin}${target.pathname}`;
-  // 판정 GPU 주소가 VLM 과 같으면(제품 기본값) VLM 이 먼저 맞는다. 그 경우는 classifyServiceRequest 가 몸통으로 다시 가른다.
+  // 제품 기본 판정 주소는 VLM(8801)과 따로 띄운 판정 LLM(8805)이라 주소만으로 갈린다. SEEON_JUDGE_GPU_URL 을 VLM 과 같게 두면
+  // VLM 이 먼저 맞고, 그 경우는 classifyServiceRequest 가 몸통으로 다시 가른다.
   const serviceUrlList = [
     [pipelineConfig.vlmUrl, SERVICE_MAP.vlm], [pipelineConfig.judgeGpuUrl, SERVICE_MAP.judge], [pipelineConfig.asrUrl, SERVICE_MAP.asr],
     [pipelineConfig.ttsUrl, SERVICE_MAP.tts], [pipelineConfig.ttsLongUrl, SERVICE_MAP.tts],
@@ -64,7 +65,7 @@ export function isJudgeRequestBody(body) {
   return Array.isArray(messageList) && messageList.length > 0 && messageList.every((message) => typeof message?.content === 'string');
 }
 
-// URL 로 가른 뒤, 판정 GPU 주소가 VLM 주소와 같은 호출만 몸통을 보고 판정을 VLM 통계에서 떼어 낸다.
+// URL 로 가른 뒤, 판정 GPU 주소가 VLM 주소와 같게 설정된 호출만 몸통을 보고 판정을 VLM 통계에서 떼어 낸다.
 export function classifyServiceRequest({ url, body, pipelineConfig }) {
   const classified = classifyServiceUrl({ url, pipelineConfig });
   const isSharedJudgeUrl = classified.service === SERVICE_MAP.vlm && Boolean(pipelineConfig.judgeGpuUrl)

@@ -39,25 +39,26 @@ test('불완전: ASR 실패가 10% 를 넘으면, Bedrock 401·403 이 하나라
   assert.deepEqual(frameReasonList.map(describeIncompleteReason), ['프레임 읽기 실패(2000ms): 디코드 실패', 'JPEG 캡처 실패 3건']);
 });
 
-test('불완전: 해설이 하나라도 나왔는데 모두 TTS 소리가 없으면(TTS 장애) 불완전이고, 일부만 소리가 없으면 경고로만 남긴다', () => {
-  const caption = (hasAudio) => ({ captionSeq: 1, hasAudio });
-  const ttsDownSession = { ...OK_SESSION, captionRecordList: [caption(false), caption(false)] };
+test('불완전: 렌더러가 해설 소리를 요청(pipeline-tts)했는데 하나도 만들지 못하면(TTS 장애) 불완전이고, 일부만 실패하면 경고로만 남긴다', () => {
+  // 캡션에는 소리가 없고 렌더러가 재생 차례가 가까운 해설만 합성한다. tts 는 그 합성 결과, null 은 합성 차례가 오기 전에 버려진 해설이다.
+  const caption = (tts) => ({ captionSeq: 1, hasAudio: Boolean(tts?.isOk), tts });
+  const ttsOk = { isOk: true, message: null };
+  const ttsFailed = (message = 'TTS HTTP 500') => ({ isOk: false, message });
+  const ttsDownSession = { ...OK_SESSION, captionRecordList: [caption(ttsFailed()), caption(ttsFailed()), caption(null)] };
   const ttsDownLog = [call('tts', { status: 500 }), refusedCall('tts')];
   const reasonList = buildIncompleteReasonList({ sessionResult: ttsDownSession, callLog: ttsDownLog });
-  assert.deepEqual(reasonList, [{ code: 'tts_unavailable', narrationCount: 2, count: 2, total: 2, message: 'HTTP 500' }]);
-  assert.equal(describeIncompleteReason(reasonList[0]), 'TTS 장애 — 해설 2개 모두 소리 없음(TTS 실패 2/2건) — HTTP 500');
-  // 해설이 하나뿐이어도 그 해설이 소리를 잃으면 결과 mp3 에 AD 가 없다.
-  assert.deepEqual(
-    buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(false)] }, callLog: [timeoutCall('tts')] }).map((reason) => reason.code),
-    ['tts_unavailable'],
-  );
-  const emptyAudioReason = buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(false)] }, callLog: [call('tts')] })[0];
-  assert.equal(describeIncompleteReason(emptyAudioReason), 'TTS 장애 — 해설 1개 모두 소리 없음(TTS 실패 0/1건) — 응답에 소리가 없다');
+  assert.deepEqual(reasonList, [{ code: 'tts_unavailable', narrationCount: 3, count: 2, total: 2, message: 'HTTP 500' }]);
+  assert.equal(describeIncompleteReason(reasonList[0]), 'TTS 장애 — 해설 3개 중 소리를 만든 해설 없음(TTS 실패 2/2건) — HTTP 500');
+  // 합성 요청이 하나뿐이어도 그 해설이 소리를 잃으면 결과 mp3 에 AD 가 없다. 호출 기록이 없으면 제품 핸들러의 실패 문구를 쓴다.
+  const singleReason = buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(ttsFailed('TTS 응답 없음'))] }, callLog: [] })[0];
+  assert.deepEqual(singleReason, { code: 'tts_unavailable', narrationCount: 1, count: 1, total: 1, message: 'TTS 응답 없음' });
 
-  const partialSession = { ...OK_SESSION, captionRecordList: [caption(true), caption(false), caption(false)] };
+  const partialSession = { ...OK_SESSION, captionRecordList: [caption(ttsOk), caption(ttsFailed()), caption(ttsFailed())] };
   const partialLog = [call('tts'), call('tts', { status: 500 }), call('tts', { status: 500 })];
-  assert.deepEqual(buildIncompleteReasonList({ sessionResult: partialSession, callLog: partialLog }), [], '소리 있는 해설이 하나라도 있으면 완료');
+  assert.deepEqual(buildIncompleteReasonList({ sessionResult: partialSession, callLog: partialLog }), [], '소리를 만든 해설이 하나라도 있으면 완료');
   assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [] }, callLog: [] }), [], '해설이 없는 영상');
+  assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(null)] }, callLog: [] }), [],
+    '합성 차례가 오기 전에 버려진 해설(체류 미달 등)만 있으면 TTS 장애가 아니다');
   assert.deepEqual(buildWarningList({
     callLog: partialLog, judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: partialSession,
     swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],
@@ -91,7 +92,7 @@ test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedroc
     { code: 'tts_error', count: 1, message: 'TTS 호출 실패 1/3건 — HTTP 500' },
     { code: 'bedrock_error', count: 1, message: 'Bedrock 호출 실패 1/6건 — HTTP 429' },
     { code: 'judge_fallback', count: 1, message: '탐지 판정을 GPU 대신 Bedrock 이 판정 1건(router 1)' },
-    { code: 'judge_error', count: 1, message: '탐지 판정 실패(LLM 없이 통과·차단) 1건(silence 1)' },
+    { code: 'judge_error', count: 1, message: '탐지 판정 실패(GPU·Bedrock 모두) 1건(silence 1) — 라우터·무발화 판정은 해설을 내지 않는다' },
     { code: 'vlm_fallback', count: 2, message: 'VLM 대신 Bedrock 폴백 2건' },
     { code: 'drain_timeout', count: 1, message: '배수 상한(영상 끝 + 33초)에 닿아 멈춤 — 남은 작업 2 · 진행 중 호출 1' },
     { code: 'swallowed_error', count: 3, message: '연결 코드가 삼킨 오류 3건(caption 1 · ipc:pipeline-event 2)' },

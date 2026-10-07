@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, PAGE_TRANSITION_KIND_MAP, computeGridEmbedding,
+  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, PAGE_TRANSITION_KIND_MAP, LEADER_STATUS_MAP, computeGridEmbedding,
 } from '../product/core-modules.mjs';
 import {
   POINTING_SAMPLE_MS, POINTING_MOTION_DEBOUNCE_MS, LOCAL_EMBED_MATCH_THRESHOLD, ANNOTATION_SNAPSHOT_MIN_INTERVAL_MS,
@@ -9,10 +9,11 @@ import {
 
 const LOCAL_EMBEDDING_WARNING = '[slide] GPU 임베딩 서버 미연결 — 로컬 그리드 임베딩으로 폴백(정확도 낮음, 고지는 유지)';
 
-// main.js 의 slideDwellGate 콜백(528-549)·samplePointingFrame(625-643)·detectSlideTransition(645-661)·
-// confirmSlideCandidate(663-708)·requestPageTransitionNarration(710-745)·attachPointingMotion(886-899)·
-// saveSlideFrameWithMark(902-909)·saveAnnotationSnapshot(911-923).
-// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:538, 707).
+// main.js 의 slideDwellGate 콜백(553-581)·samplePointingFrame(657-675)·detectSlideTransition(677-693)·
+// confirmSlideCandidate(695-741)·releasePendingTransition(744-746)·requestPageTransitionNarration(748-785)·
+// attachPointingMotion(943-956)·saveSlideFrameWithMark(959-966)·saveAnnotationSnapshot(968-980).
+// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:563, 740).
+// 전환을 확정한 순간부터 고지의 삽입 시각이 정해질 때까지는 진행 중인 전환(pendingTransitions)이다. 화자 안내가 그 고지 뒤로 미뤄진다.
 export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   const { clock, bridge, state, core } = ctx;
   const { dwellMs } = core.slideDwellGate;
@@ -43,10 +44,19 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     bridge.send('pipeline-slide-mark', { ts, slideLabel, frameKind, filePath, transitionTs });
   }
 
+  // 고지를 내지 않고 끝난 전환은 기다리는 화자 안내를 바로 풀어 준다.
+  function releasePendingTransition({ slideLabel }) {
+    core.pendingTransitions.settle({ slideLabel, status: LEADER_STATUS_MAP.unscheduled });
+  }
+
   async function requestPageTransitionNarration({ label, isRevisit }) {
     const buffer = await ctx.captureFrameJpeg({});
-    if (!buffer) return;
+    if (!buffer) {
+      releasePendingTransition({ slideLabel: label });
+      return;
+    }
     const ts = clock.nowWall();
+    state.slideTransitionRequestTsMap.set(label, ts);
     ctx.trackTask(saveSlideFrameWithMark({
       slideLabel: label, frameKind: 'base', buffer, transitionTs: state.slideTransitionWallTsMap.get(label) ?? null,
     }), 'slide-frame');
@@ -56,13 +66,16 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
         stage: DEBUG_STAGE_MAP.budget, verdict: DEBUG_VERDICT_MAP.skip, narrationType: NARRATION_TYPE_MAP.pageTransition,
         reason: '어절 예산이 유형 하한 미달 → 드롭', detail: `슬라이드 ${label} 모드=${ctx.mode} 하한=${wordBudget.minWordCount}어절`,
       });
+      releasePendingTransition({ slideLabel: label });
       return;
     }
-    // 평가 프리셋에서도 생성은 한다(제품과 같은 GPU 부하). 출력은 main 의 기능 게이트가 막는다.
-    await bridge.invoke('pipeline-frame', {
+    // 평가 프리셋에서도 생성은 한다(제품과 같은 GPU 부하). 출력은 main 의 기능 게이트가 막는다(isEmitted=false).
+    const result = await bridge.invoke('pipeline-frame', {
       ts, buffer: new Uint8Array(buffer), slideLabel: label, wordBudget, isRevisit: Boolean(isRevisit),
       eventVideoTimeMs: state.slideEventVideoTimeMap.get(label) ?? ctx.videoTimeMs(),
     }).catch(() => null);
+    // 고지를 내보냈으면 캡션 도착(applyCaption)이 삽입 시각을 정하며 풀어 준다.
+    if (!result?.isEmitted) releasePendingTransition({ slideLabel: label });
   }
 
   async function confirmSlideCandidate({ isFirst, imageData }) {
@@ -93,6 +106,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     }
     // 사건 영상 시각은 임베딩 응답을 받은 뒤의 시각이다(제품과 같음).
     state.lastScreenTransitionAt = clock.nowPerf();
+    core.pendingTransitions.open({ slideLabel: decision.label });
     state.slideEventVideoTimeMap.set(decision.label, ctx.videoTimeMs());
     state.slideTransitionWallTsMap.set(decision.label, clock.nowWall());
     ctx.markDebug({
@@ -103,7 +117,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     core.slideDwellGate.enter({ label: decision.label, isRevisit });
   }
 
-  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:609-623, 654)는 없다.
+  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:641-655, 686)는 없다.
   function detectSlideTransition({ imageData, ts }) {
     const verdict = core.histogramGate.sample({ imageData, ts });
     if (!verdict.isTransition && !verdict.isFirst) return;
@@ -153,7 +167,15 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     });
     ctx.trackTask(requestPageTransitionNarration({ label, isRevisit }), 'page-transition');
   };
+  // 체류 3초를 못 채운 화면: 기다리던 화자 안내를 풀고, main 의 회의 스크립트에서 그 전환 AD 줄과 방문을 빼게 알린다.
   ctx.hooks.onDwellCancelled = ({ label, isRevisit }) => {
+    core.pendingTransitions.settle({ slideLabel: label, status: LEADER_STATUS_MAP.cancelled });
+    bridge.send('pipeline-transition-cancelled', {
+      slideLabel: label,
+      requestTs: state.slideTransitionRequestTsMap.get(label) ?? null,
+      transitionTs: state.slideTransitionWallTsMap.get(label) ?? null,
+    });
+    state.slideTransitionRequestTsMap.delete(label);
     ctx.markDebug({
       stage: DEBUG_STAGE_MAP.slide, verdict: DEBUG_VERDICT_MAP.skip, narrationType: NARRATION_TYPE_MAP.pageTransition,
       reason: `체류 미달 (${dwellMs}ms 못 채움)`,
@@ -185,7 +207,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   }
 
   return {
-    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1759).
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1842).
     start() {
       isStopped = false;
       samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);

@@ -4,6 +4,7 @@ import https from 'node:https';
 import { createRequire } from 'node:module';
 import { runBinary } from '../media/ffmpeg.mjs';
 import { resolveProductPath } from '../product/product-paths.mjs';
+import { checkKiwiSetup } from '../product/kiwi-setup.mjs';
 
 const require = createRequire(import.meta.url);
 const TUNNEL_POLL_MS = 200;
@@ -53,7 +54,8 @@ export function probeHttpService({ url, timeoutMs = PROBE_TIMEOUT_MS }) {
   });
 }
 
-// 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함).
+// 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함). 탐지 판정 GPU 주소(judgeGpuUrl)는
+// 판정 백엔드가 gpu 일 때만 쓰므로 따로 둔다(listServiceUrlKeyList).
 const GPU_SERVICE_URL_KEY_LIST = [['VLM', 'vlmUrl'], ['ASR', 'asrUrl'], ['TTS', 'ttsUrl'], ['TTS_LONG', 'ttsLongUrl'], ['EMBED', 'embedUrl']];
 const JUDGE_URL_KEY = ['JUDGE', 'judgeGpuUrl'];
 // 제품 judge-llm.js JUDGE_BACKEND_MAP 과 같은 값.
@@ -61,7 +63,7 @@ const JUDGE_BACKEND_MAP = { gpu: 'gpu', bedrock: 'bedrock' };
 // Bedrock 토큰이 없을 때 제품과 달라지는 곳. gpu 판정은 토큰 없이도 돌지만 GPU 가 실패하면 Bedrock 으로 넘기지 못한다.
 const MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP = {
   [JUDGE_BACKEND_MAP.gpu]: '틈 추론이 규칙 폴백으로 떨어지고 GPU 판정이 실패해도 Bedrock 으로 넘기지 못해',
-  [JUDGE_BACKEND_MAP.bedrock]: 'SEEON_JUDGE_BACKEND=bedrock 이라 라우터·무발화·지시 판정이 LLM 없이 통과·차단되고 틈 추론이 규칙 폴백으로 떨어져',
+  [JUDGE_BACKEND_MAP.bedrock]: 'SEEON_JUDGE_BACKEND=bedrock 이라 판단 LLM(라우터·무발화 판정)을 쓸 수 없어 발화 기반·무발화 해설이 나오지 않고 틈 추론이 규칙 폴백으로 떨어져',
 };
 
 function readHostPort(url) {
@@ -69,8 +71,8 @@ function readHostPort(url) {
   return { hostname, portNumber: Number(port) || DEFAULT_PORT_BY_PROTOCOL_MAP[protocol] };
 }
 
-// 판정 GPU 주소가 VLM 과 같은 호스트·포트면(제품 기본값) VLM 점검이 판정도 덮는다. 따로 두면 그 주소도 본다.
-// 제품 터널은 판정 주소를 넘기지 않으므로 답하지 않으면 터널을 연 뒤에도 그대로라 점검이 실패한다.
+// 제품 기본 판정 GPU 주소는 VLM(8801)과 따로 띄운 판정 LLM(Qwen3.5-9B, 127.0.0.1:8805)이라 판정 백엔드가 gpu 면 그 주소(JUDGE)도 본다.
+// SEEON_JUDGE_GPU_URL 로 VLM 과 같은 호스트·포트를 주면 VLM 점검이 판정도 덮는다. 제품 터널은 판정 주소도 넘긴다(tunnel-config.js).
 function listServiceUrlKeyList({ pipelineConfig }) {
   const { judgeBackend, judgeGpuUrl, vlmUrl } = pipelineConfig;
   if (judgeBackend !== JUDGE_BACKEND_MAP.gpu || !judgeGpuUrl) return GPU_SERVICE_URL_KEY_LIST;
@@ -96,9 +98,10 @@ export async function listDownServices({ pipelineConfig, checkService = probeHtt
 }
 
 // Bedrock 은 호출마다 돈이 들어 점검하지 않는다(토큰이 있는지만 본다). 토큰 만료는 영상 결과의 불완전 사유(bedrock_auth_failed)로 잡힌다.
+// 한국어 트리거 형태소 분석기(Kiwi)의 의존성·모델이 seeon-meet 에 있는지도 본다(checkTriggerAnalyzer, 테스트는 대역).
 export async function runPreflight({
   pipelineConfig, ffmpegPath, ffprobePath, checkService = probeHttpService,
-  runVersion = (binaryPath) => runBinary({ binaryPath, argList: ['-version'] }),
+  runVersion = (binaryPath) => runBinary({ binaryPath, argList: ['-version'] }), checkTriggerAnalyzer = checkKiwiSetup,
 }) {
   const problemList = [];
   for (const [label, binaryPath] of [['ffmpeg', ffmpegPath], ['ffprobe', ffprobePath]]) {
@@ -108,6 +111,7 @@ export async function runPreflight({
       problemList.push(`${label} 를 실행하지 못했다(${binaryPath}) — 설치하거나 SEEON_FACTORY_FFMPEG·SEEON_FACTORY_FFPROBE 로 경로를 준다`);
     }
   }
+  problemList.push(...await checkTriggerAnalyzer());
   const downServiceList = await listDownServices({ pipelineConfig, checkService });
   if (!pipelineConfig.bedrockApiKey) {
     // 백엔드가 없는 설정은 제품 judge-llm.js 처럼 Bedrock 판정으로 본다.

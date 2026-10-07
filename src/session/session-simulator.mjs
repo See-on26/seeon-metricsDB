@@ -27,7 +27,7 @@ const SESSION_END_LIMIT_MS = 30000;
 // 이보다 짧은 원음 꼬리는 표본 하나도 안 되어 붙이지 않는다.
 const MIN_SOURCE_TAIL_MS = 1;
 
-// main.js:929-937 describeBeforeWindow
+// main.js:986-994 describeBeforeWindow
 function describeBeforeWindow({ policy, anchorTs, nowPerf }) {
   const { beforeMs } = policy || {};
   if (Number.isFinite(anchorTs)) {
@@ -48,7 +48,7 @@ function appendSourceTail({ pieceList, fromMediaMs, toMediaMs }) {
   return { pieceList: [...pieceList, tailPiece], appendedTailMs: tailMs };
 }
 
-// main.js 의 attemptStartExperiment(1683-1788)·stopExperiment(1794-1848)·finalizeSession(1850-1866) 을 영상 하나의 세션으로 옮긴다.
+// main.js 의 attemptStartExperiment(1764-1871)·stopExperiment(1877-1935)·finalizeSession(1937-1953) 을 영상 하나의 세션으로 옮긴다.
 // 회의 캡처 시작 = 영상 0ms, 영상 끝(D) 에서 캡처 쪽 감지를 멈추고, 지연 재생·생성 중인 해설이 빠질 때까지(배수) 돌린 뒤 정지한다.
 export function createSessionSimulator({ clock, bridge, video, prep, options, workDir, log = console, onProgress = () => {} }) {
   const mediaDurationMs = video.probe.durationMs;
@@ -76,7 +76,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
   let startElapsedMs = null;
   let playingUntilElapsedMs = -Infinity;
 
-  // main.js:1521-1526 onPipelineEvent
+  // main.js:1590-1595 onPipelineEvent. asr 이벤트에는 main 트리거가 뽑은 후보 구(triggerCandidateList)가 실려 온다.
   bridge.onRendererEvent('pipeline-event', ({ payload, requestContext }) => {
     if (payload.type === 'asr') { asrGlue.handleAsrTranscript(payload); return; }
     if (payload.type === 'caption') outputGlue.handleCaptionEvent({ payload, requestContext });
@@ -137,7 +137,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
 
   async function start() {
     const { state, policy } = ctx;
-    // 꺼 둔 분류를 main 에 먼저 알린다(main.js:1176-1181, 1237).
+    // 꺼 둔 분류를 main 에 먼저 알린다(main.js:1233-1238, 1294).
     await invokeUnderClock({
       channel: 'pipeline-feature-toggles', payload: { disabledClassList: listDisabledNarrationClass({ store: featureToggleStore }) },
       limitMs: SESSION_START_LIMIT_MS,
@@ -163,7 +163,9 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     startElapsedMs = clock.elapsedMs();
     state.isCaptureActive = true;
     state.isSessionActive = true;
-    playbackChain = startPlaybackChain({ ctx, recorder, onAdStart: handleAdStart, onNarrationDrop: outputGlue.handleNarrationDrop });
+    playbackChain = startPlaybackChain({
+      ctx, recorder, onAdStart: handleAdStart, onNarrationDrop: outputGlue.handleNarrationDrop, prepareAudio: outputGlue.prepareNarrationAudio,
+    });
     silenceGlue.start();
     slideGlue.start();
     asrGlue.start();
@@ -190,7 +192,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     playbackChain?.stop();
   }
 
-  // main.js:1850-1866 finalizeSession. 제품처럼 정지 뒤 ASR 드레인을 main 이 가상 setTimeout 으로 기다리므로 시계를 돌리며 기다린다.
+  // main.js:1937-1953 finalizeSession. 제품처럼 정지 뒤 ASR 드레인을 main 이 가상 setTimeout 으로 기다리므로 시계를 돌리며 기다린다.
   async function endPipelineSession() {
     ctx.state.currentSessionId = null;
     let endResult = null;
@@ -229,13 +231,18 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     const tail = appendSourceTail({ pieceList: recorder.getPieceList(), fromMediaMs: stopMediaMs, toMediaMs: mediaDurationMs });
     const appendedTailMs = Math.round(tail.appendedTailMs);
     if (appendedTailMs > 0) log.warn(`[factory] 지연 재생이 영상 끝에 닿기 전에 멈춰 남은 원음 ${appendedTailMs}ms 를 1배속으로 결과 끝에 붙인다`);
-    outputGlue.dropPendingAfterEnd({ isDrainTimedOut: isTimedOut });
+    outputGlue.noteSessionEnd({ isDrainTimedOut: isTimedOut });
     // stopExperiment 정리. 세션은 배수가 끝나야(연결 작업이 다 빠져야) 닫히고, 상한에 닿으면 실험실처럼 그 자리에서 닫힌다.
+    // 재생하지 못한 해설은 재생 사슬 정리(playbackChain.stop)가 제품처럼 stopped 로 main 에 알린다.
+    const { core, state } = ctx;
     stopFrameCapture();
     silenceGlue.stop();
-    ctx.state.isSessionActive = false;
-    ctx.core.candidateScheduler.reset();
-    ctx.core.slideDwellGate.reset();
+    state.isSessionActive = false;
+    core.candidateScheduler.reset();
+    core.transitionOrderGate.reset();
+    state.slideTransitionRequestTsMap.clear();
+    core.pendingTransitions.reset();
+    core.slideDwellGate.reset();
     playbackChain.stop();
     ctx.state.experimentSeq += 1;
     ctx.markDebug({ stage: DEBUG_STAGE_MAP.session, verdict: DEBUG_VERDICT_MAP.info, reason: '회의 캡처 정지' });

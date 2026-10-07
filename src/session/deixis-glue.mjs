@@ -5,23 +5,24 @@ import {
 import { narrowToPointingRegion } from '../media/frame-source.mjs';
 import { DEIXIS_FALLBACK_BEFORE_MS, DEIXIS_FALLBACK_AFTER_MS } from './renderer-constants.mjs';
 
-// main.js:939-942
+// main.js:996-999
 const SCREEN_DEPENDENCY_LABEL_MAP = {
   [SCREEN_DEPENDENCY_REASON_MAP.speechTrigger]: '발화 지시가 트리거',
   [SCREEN_DEPENDENCY_REASON_MAP.unsupportedSource]: '발화가 아닌 출처 — 트리거로 쓰지 않는다',
 };
 
-// main.js 의 deixisDetector onDeixis(870-883)·runDeixisDecision(944-1035).
+// main.js 의 deixisDetector onDeixis(927-941)·runDeixisDecision(1001-1092).
+// 지시 후보는 main 트리거가 뽑은 후보 구(candidateList)를 실어 오고, 공백(O/X)은 main 의 판단 LLM 이 후보마다 가린다.
 export function createDeixisGlue({ ctx }) {
   const { clock, bridge, state, core } = ctx;
 
-  function handleDeixis({ text, trigger, captureTs, eventWallTs }) {
+  function handleDeixis({ text, trigger, candidateList, captureTs, eventWallTs }) {
     const { region, pointingOrderHint } = ctx.getPointingSequence();
     ctx.log.log(`[deixis] 발화 지시 "${trigger}" → look-ahead 대기`);
     const nowVideoTimeMs = ctx.videoTimeMs();
     const nowTs = clock.nowPerf();
     core.candidateScheduler.submit({
-      source: CANDIDATE_SOURCE_MAP.speech, utterance: text, trigger, region, pointingOrderHint,
+      source: CANDIDATE_SOURCE_MAP.speech, utterance: text, trigger, candidateList, region, pointingOrderHint,
       captureTs: nowTs, videoTimeMs: nowVideoTimeMs,
       // wallToVideoTimeMs 의 기본 nowWallTs 는 실제 Date.now() 라 가상 벽시계를 넘긴다.
       eventVideoTimeMs: wallToVideoTimeMs({ wallTs: eventWallTs, nowWallTs: clock.nowWall(), nowVideoTimeMs }) ?? nowVideoTimeMs,
@@ -30,7 +31,7 @@ export function createDeixisGlue({ ctx }) {
     });
   }
 
-  async function runDeixisDecision({ source, utterance, triggerList, region, pointingOrderHint, captureTs,
+  async function runDeixisDecision({ source, utterance, triggerList, candidateList = [], region, pointingOrderHint, captureTs,
     eventVideoTimeMs = null, triggerUtterance = utterance, leadText = '', followText = '', isSentenceWaited = false }) {
     state.lastDeixisDecidedAt = clock.nowPerf();
     const label = triggerList.join(', ') || '-';
@@ -41,7 +42,7 @@ export function createDeixisGlue({ ctx }) {
       });
     }
     const { beforeMs, afterMs } = ctx.policy;
-    // 판정 시점 화면을 뜬다. 포인팅 영역이 있으면 여백을 둔 그 부분만(main.js:960, 588-592).
+    // 판정 시점 화면을 뜬다. 포인팅 영역이 있으면 여백을 둔 그 부분만(main.js:1016, 612-624).
     const buffer = await ctx.captureFrameJpeg({ normRect: region ? narrowToPointingRegion({ sub: region }) : null });
     if (!buffer) return;
     const holdMs = computeContextHoldMs({ mode: ctx.mode });
@@ -57,7 +58,7 @@ export function createDeixisGlue({ ctx }) {
     if (droppedCount > 0) {
       ctx.markDebug({ stage: DEBUG_STAGE_MAP.budget, verdict: DEBUG_VERDICT_MAP.info, reason: '앞 맥락이 토큰 예산으로 절삭됨', detail: `버린 발화 ${droppedCount}건 · 남은 맥락 ${tokenCount}토큰` });
     }
-    const screenVerdict = judgeScreenDependency({ source, utterance: triggerUtterance });
+    const screenVerdict = judgeScreenDependency({ source, candidateList });
     if (!screenVerdict.isScreenDependent) {
       ctx.markDebug({ stage: DEBUG_STAGE_MAP.screenDependency, verdict: DEBUG_VERDICT_MAP.skip, narrationType: NARRATION_TYPE_MAP.deixis, reason: SCREEN_DEPENDENCY_LABEL_MAP[screenVerdict.reason] || screenVerdict.reason, detail: `트리거="${label}"` });
       return;
@@ -74,8 +75,9 @@ export function createDeixisGlue({ ctx }) {
     await bridge.invoke('pipeline-deixis', {
       ts, buffer: new Uint8Array(buffer), utterance, recentTranscript, beforeTranscript: before, afterTranscript: after,
       hasPointingRegion: Boolean(region), pointingOrderHint, slideLabel: core.slideRegistry.currentLabel(), wordBudgetMap, eventVideoTimeMs,
+      triggerCandidateList: candidateList,
     }).catch(() => null);
-    // saveDeixisFrame(main.js:1026-1030)은 화면 확인용 저장이라 공장은 하지 않는다.
+    // saveDeixisFrame(main.js:1083-1087)은 화면 확인용 저장이라 공장은 하지 않는다.
   }
 
   ctx.hooks.onDeixis = handleDeixis;

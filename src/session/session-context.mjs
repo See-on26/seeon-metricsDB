@@ -1,15 +1,15 @@
 import {
   NARRATION_TYPE_MAP, getModePolicy, computeWordBudget, computeLookaheadMs, computeSentenceWaitMs,
   TranscriptWindow, GapCandidateStore, UtteranceBoundaryDetector, SilenceTrigger, PointingLocator, SlideHistogramGate,
-  SlideEmbeddingRegistry, TransitionOrderGate, DeixisCandidateScheduler, DeixisDetector, SlideDwellGate,
+  SlideEmbeddingRegistry, TransitionOrderGate, PendingTransitionTracker, DeixisCandidateScheduler, DeixisDetector, SlideDwellGate,
   resolveLastSpeechWallTs, describeDirection,
 } from '../product/core-modules.mjs';
 import { POINTING_LOCATOR_OPTION_MAP } from './renderer-constants.mjs';
 
-// main.js:231 ROUTABLE_TYPE_LIST
+// main.js:248-250 ROUTABLE_TYPE_LIST
 const ROUTABLE_TYPE_LIST = [NARRATION_TYPE_MAP.deixis, NARRATION_TYPE_MAP.interpretation, NARRATION_TYPE_MAP.visualDescription];
 
-// main.js 의 모듈 상태(70-121·502-555·835-881)를 영상 하나 동안 쓰는 한 객체로 모은다.
+// main.js 의 모듈 상태(69-138·523-591·904-926)를 영상 하나 동안 쓰는 한 객체로 모은다.
 export function createSessionContext({ clock, bridge, mode, featureToggleStore, mediaDurationMs, levelList, captureFrameJpeg, log = console }) {
   const policy = getModePolicy({ mode });
   // 코어 클래스는 반드시 가상 시계를 주입받는다. 기본값(전역 setTimeout·performance.now)이 남으면 판단이 실제 시계로 돈다.
@@ -22,13 +22,14 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     lastAudioActiveAt: 0, lastSpeechBlindAt: 0, narrationEchoUntil: 0, lastDeixisDecidedAt: -Infinity,
     lastScreenTransitionAt: null, isConfirmingSlide: false, hasWarnedLocalEmbedding: false,
     lastPointingMotionAt: -Infinity, lastAnnotationSnapshotAt: -Infinity, lastScreenNarration: '',
-    slideEventVideoTimeMap: new Map(), slideTransitionWallTsMap: new Map(), currentSessionId: null, recordPath: null,
+    slideEventVideoTimeMap: new Map(), slideTransitionWallTsMap: new Map(), slideTransitionRequestTsMap: new Map(),
+    currentSessionId: null, recordPath: null,
   };
   let taskCount = 0;
   // 제품처럼 삼키는 오류도 연결 코드 버그일 수 있어 이름별로 세어 결과 기록(stats)에 남긴다.
   const swallowedErrorCountMap = {};
 
-  // main.js:859-864 getLastSpeechWallTs
+  // main.js:916-921 getLastSpeechWallTs
   function getLastSpeechWallTs() {
     return resolveLastSpeechWallTs({
       lastActiveAt: state.lastAudioActiveAt, lastBlindAt: state.lastSpeechBlindAt, nowPerf: clock.nowPerf(), nowWall: clock.nowWall(),
@@ -44,6 +45,8 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     histogramGate: new SlideHistogramGate({}),
     slideRegistry: new SlideEmbeddingRegistry({}),
     transitionOrderGate: new TransitionOrderGate(),
+    // main.js:551 pendingTransitions. 제품은 기본값(실제 setTimeout)으로 만들지만 공장은 10초 상한 타이머를 가상 시계에 건다.
+    pendingTransitions: new PendingTransitionTracker({ ...timeoutDeps }),
     candidateScheduler: new DeixisCandidateScheduler({
       onDecide: (decision) => hooks.onDeixisDecision(decision), getLastSpeechWallTs, ...timeoutDeps,
     }),
@@ -51,9 +54,9 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     slideDwellGate: new SlideDwellGate({
       onSatisfied: (event) => hooks.onDwellSatisfied(event), onCancelled: (event) => hooks.onDwellCancelled(event), ...timeoutDeps,
     }),
-    delaySource: null, delayBuffer: null, narrationScheduler: null, narrator: null, narrationGate: null,
+    delaySource: null, delayBuffer: null, narrationScheduler: null, narrator: null, narrationGate: null, narrationAudio: null,
   };
-  // attemptStartExperiment(main.js:1704-1708) 의 모드별 lookahead·문장 대기.
+  // attemptStartExperiment(main.js:1785-1789) 의 모드별 lookahead·문장 대기.
   core.candidateScheduler.setLookaheadMs({ lookaheadMs: computeLookaheadMs({ mode }) });
   core.candidateScheduler.setSentenceWaitMs({ sentenceWaitMs: computeSentenceWaitMs({ mode }) });
 
@@ -67,7 +70,7 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     },
     videoTimeMs: () => (state.sessionStartPerf === null ? 0 : clock.nowPerf() - state.sessionStartPerf),
     toWallTs: (videoMs) => state.sessionStartWall + videoMs,
-    // main.js:123-125 markDebug. 같은 문구로 pipeline.jsonl 에 남겨 실험실 기록과 견줄 수 있게 한다.
+    // main.js:140-142 markDebug. 같은 문구로 pipeline.jsonl 에 남겨 실험실 기록과 견줄 수 있게 한다.
     markDebug({ stage, verdict, reason, detail = '', narrationType = null }) {
       bridge.send('pipeline-debug', { stage, verdict, reason, detail, narrationType, ts: clock.nowWall() });
     },
@@ -83,7 +86,7 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     },
     getTaskCount: () => taskCount,
     getSwallowedErrorCountMap: () => ({ ...swallowedErrorCountMap }),
-    // main.js:227-241 buildWordBudget·buildWordBudgetMap. 제품처럼 currentDelayMs 는 0 으로 둔다.
+    // main.js:244-258 buildWordBudget·buildWordBudgetMap. 제품처럼 currentDelayMs 는 0 으로 둔다.
     buildWordBudget: ({ narrationType, subKind = null }) => computeWordBudget({ mode, narrationType, subKind, currentDelayMs: 0 }),
     buildWordBudgetMap() {
       const budgetMap = {};
@@ -91,7 +94,7 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
       return budgetMap;
     },
     getLastSpeechWallTs,
-    // main.js:561-567 getPointingSequence
+    // main.js:593-599 getPointingSequence
     getPointingSequence() {
       const sequence = core.pointingLocator.locateSequence({ nowTs: clock.nowPerf() });
       const pointingOrderHint = sequence.events.length >= 2
@@ -99,7 +102,7 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
         : '';
       return { region: sequence.hasRegion ? sequence.unionRect : null, pointingOrderHint };
     },
-    // main.js:925-927 waitFor
+    // main.js:982-984 waitFor
     waitVirtual: (ms) => new Promise((resolve) => { clock.setTimeout(resolve, ms); }),
   };
   return ctx;

@@ -21,7 +21,7 @@ after(() => mock.close());
 const WORKER_ENV = { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv };
 const RUN_CONCURRENCY = 2;
 
-// Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock VLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
+// Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock 판정 LLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
 function runWorker({ job, outDir }) {
   return new Promise((resolve, reject) => {
     const child = fork(WORKER_PATH, [], {
@@ -57,7 +57,8 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.equal(result.status, 'done', result.logText.slice(-2000));
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
   assert.equal(report.isComplete, true);
-  assert.ok(report.adList.some((ad) => ad.type === 'deixis'), JSON.stringify(report.droppedList));
+  // 발화 트리거(Kiwi 후보 → 판단 LLM O)에서 나온 해설이 들린다. 후보 유형에 따라 지시 또는 해석 해설이다.
+  assert.ok(report.adList.some((ad) => ['deixis', 'interpretation'].includes(ad.type)), JSON.stringify({ adList: report.adList.map((ad) => ad.type), droppedList: report.droppedList }));
   for (const ad of report.adList) assert.ok(fs.existsSync(path.join(outDir, ad.wavFile)));
   const mp3Ms = readMp3Ms(path.join(outDir, 'deck_SEEON_AD.mp3'));
   assert.ok(Math.abs(mp3Ms - report.output.timelineDurationMs) < 150, `mp3 ${mp3Ms} / 타임라인 ${report.output.timelineDurationMs}`);
@@ -65,7 +66,7 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(Math.abs(mp3Ms - expectedMs) <= 1000);
   assert.ok(Math.abs(report.output.sourceMediaMs - 24000) < 100, '원음을 끝까지 다 틀었다');
   assert.ok(report.stats.serviceMap.asr.count >= 3);
-  // 판정 요청은 VLM 주소로 가지만 VLM 통계를 부풀리지 않는다. mock 이 받은 수(따로 가른 것)와 기록이 같아야 한다.
+  // 판정 요청은 VLM 과 따로 띄운 판정 LLM 주소로 간다. mock 이 받은 수와 기록이 같아야 한다.
   const { serviceMap, judgeSourceCountMap } = report.stats;
   assert.ok(serviceMap.judge.count >= 1, JSON.stringify(serviceMap));
   assert.equal(serviceMap.judge.count, countAfter.judge - countBefore.judge);
@@ -75,7 +76,14 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(judgeSourceCountMap.router.gpu >= 1, '지시 해설은 통합 라우터 GPU 판정을 거친다');
   assert.ok(Object.values(judgeSourceCountMap).every((countMap) => countMap.bedrock === 0 && countMap.error === 0));
   const { modelConfig } = report.config;
-  assert.deepEqual([modelConfig.judgeBackend, modelConfig.judgeGpuUrl, modelConfig.judgeGpuModel], ['gpu', modelConfig.vlmUrl, modelConfig.vlmModel]);
+  assert.deepEqual([modelConfig.judgeBackend, modelConfig.judgeGpuUrl, modelConfig.judgeGpuModel], ['gpu', mock.urlEnv.SEEON_JUDGE_GPU_URL, 'qwen3.5-9b']);
+  assert.equal(modelConfig.isScaleEnabled, true, '척도 해설은 제품 기본으로 켠다');
+  // 캡션에는 소리가 없고 렌더러가 pipeline-tts 로 합성한다. 재생된 AD 는 모두 합성한 소리다.
+  assert.equal(serviceMap.tts.count, report.stats.tts.requestCount);
+  assert.ok(report.stats.tts.okCount >= report.adList.length);
+  assert.ok(report.adList.every((ad) => ad.tts && ad.serviceCallList.some((call) => call.service === 'tts')));
+  assert.ok(report.stats.triggerAnalyzerCountMap.kiwi >= 1, JSON.stringify(report.stats.triggerAnalyzerCountMap));
+  assert.equal(report.stats.triggerAnalyzerCountMap.rule, undefined, '세션 전에 Kiwi 준비를 기다려 대체 규칙을 쓰지 않는다');
   assert.ok(modelConfig.judgeModelId, 'GPU 가 실패하면 넘어갈 Bedrock 판정 모델');
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
@@ -181,11 +189,11 @@ test('TTS 가 죽어 해설이 모두 소리를 잃으면 AD 없는 결과를 �
   t.after(() => mock.setTtsStatus(200));
   const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir });
   assert.equal(result.status, 'failed', result.logText.slice(-2000));
-  assert.match(result.message, /^결과가 불완전하다 — TTS 장애 — 해설 (\d+)개 모두 소리 없음\(TTS 실패 \1\/\1건\) — HTTP 500/);
+  assert.match(result.message, /^결과가 불완전하다 — TTS 장애 — 해설 \d+개 중 소리를 만든 해설 없음\(TTS 실패 (\d+)\/\1건\) — HTTP 500/);
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
   assert.equal(report.isComplete, false);
   assert.equal(report.adList.length, 0);
-  assert.ok(report.droppedList.some((drop) => drop.reason === 'no_audio'), JSON.stringify(report.droppedList));
+  assert.ok(report.droppedList.some((drop) => drop.reason === 'tts_failed'), JSON.stringify(report.droppedList));
   assert.deepEqual(report.incompleteReasonList.map((reason) => reason.code), ['tts_unavailable']);
   assert.equal(report.warningList.some((warning) => warning.code.startsWith('tts_')), false, '불완전 사유로 센 TTS 실패는 경고로 다시 세지 않는다');
   assert.equal(inspectVideoResult({ outDir, outStem: 'deck' }).status, 'incomplete', '다시 돌리면 다시 처리한다');
@@ -239,7 +247,7 @@ test('TTS 주소에 비밀번호가 들어 있으면 결과 JSON·실패 문구�
   assert.match(result.message, /TTS 장애/);
   const reportText = fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8');
   assert.match(JSON.parse(reportText).incompleteReasonList[0].message, /credentials: http:\/\/127\.0\.0\.1:\d+\/tts/);
-  assert.match(result.logText, /TTS 실패\(텍스트만 전송\)/, '제품 콘솔 줄도 워커 로그로 간다');
+  assert.match(result.logText, /TTS 실패\(소리 없이 넘어감\)/, '제품 콘솔 줄도 워커 로그로 간다');
   for (const [name, text] of [['JSON', reportText], ['실패 문구', result.message], ['워커 로그', result.logText]]) {
     assert.equal(text.includes('secretpw'), false, `${name} 에 비밀번호가 남았다`);
   }

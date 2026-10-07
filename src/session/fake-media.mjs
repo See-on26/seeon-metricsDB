@@ -174,7 +174,7 @@ class FakeBufferSource {
 
   disconnect() {}
 
-  // 제품은 currentTime + 20ms 에 시작을 예약한다(caption-narrator.js:136-137). 그 시각에 시작·길이만큼 뒤에 끝을 알린다.
+  // 제품은 currentTime + 20ms 에 시작을 예약한다(caption-narrator.js:154-155). 그 시각에 시작·길이만큼 뒤에 끝을 알린다.
   start(whenSec = 0) {
     const { clock } = this.context;
     const startDelayMs = Math.max(0, (whenSec - this.context.currentTime) * 1000);
@@ -235,7 +235,7 @@ export class FakeAudioContext {
   }
 }
 
-// 캡처 스트림 대역. 오디오 트랙이 없으니 CaptionNarrator 는 파형 탭을 만들지 않는다(caption-narrator.js:58-65).
+// 캡처 스트림 대역. 오디오 트랙이 없으니 CaptionNarrator 는 파형 탭을 만들지 않는다(caption-narrator.js:59-66).
 export function createFakeCaptureStream() {
   return { getAudioTracks: () => [], getVideoTracks: () => [] };
 }
