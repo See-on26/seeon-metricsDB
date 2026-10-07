@@ -9,7 +9,7 @@ export {
   computeContextHoldMs, resolveBeforeAnchorTs, getCatchupRateRange,
 } from '../../seeon-meet/src/renderer/core/mode/mode-policy.js';
 export {
-  createFeatureToggleStore, listDisabledNarrationClass, FEATURE_KEY_MAP,
+  createFeatureToggleStore, listDisabledNarrationClass, FEATURE_KEY_MAP, FEATURE_TOGGLE_STORAGE_KEY,
 } from '../../seeon-meet/src/renderer/core/mode/feature-toggle-store.js';
 export { DelayBuffer, isCaptionDroppable, EXCESS_DROP_MS } from '../../seeon-meet/src/renderer/core/audio-renderer/delay-buffer.js';
 export { NarrationScheduler } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-scheduler.js';
@@ -17,10 +17,15 @@ export { GapCandidateStore, resolveGapSearchFromMs } from '../../seeon-meet/src/
 export {
   isImmediateCaption, isAnchoredCaption, NarrationHoldGate,
 } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-entry.js';
-export { QUEUE_DROP_LABEL_MAP, NARRATION_QUEUE_TTL_MS } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-queue.js';
+export {
+  QUEUE_DROP_LABEL_MAP, QUEUE_DROP_REASON_MAP, NARRATION_QUEUE_TTL_MS,
+} from '../../seeon-meet/src/renderer/core/audio-renderer/narration-queue.js';
+export {
+  NarrationAudioPrefetcher, narrationEntryKey, PREFETCH_AHEAD_COUNT,
+} from '../../seeon-meet/src/renderer/core/audio-renderer/narration-audio-prefetcher.js';
 export { CaptionNarrator } from '../../seeon-meet/src/renderer/core/audio-renderer/caption-narrator.js';
 export {
-  TransitionOrderGate, LEADER_STATUS_MAP, resolveFollowerInsertMs,
+  TransitionOrderGate, LEADER_STATUS_MAP, resolveFollowerInsertMs, PendingTransitionTracker, resolveAfterTransitionInsertMs,
 } from '../../seeon-meet/src/renderer/core/audio-renderer/transition-order-gate.js';
 export { isSegmentVoiced, isSegmentCutReady } from '../../seeon-meet/src/renderer/core/trigger/asr-segmenter.js';
 export {

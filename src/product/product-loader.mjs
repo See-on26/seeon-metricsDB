@@ -87,6 +87,87 @@ function installPathsShim({ outDir }) {
   };
 }
 
+// 제품 judge-llm.js 의 label → 기록 키. 판정기는 결과에 source 를 담지만 제품 기록에는 라우터 것만 디버그 문구로 남는다.
+const JUDGE_KEY_BY_LABEL_MAP = { '통합 라우터': 'router', '무발화 판정': 'silence', '지시 판정': 'deixis' };
+const JUDGE_SOURCE_LIST = ['gpu', 'bedrock', 'error'];
+const JUDGE_ERROR_SOURCE = 'error';
+const judgeSourceCountMap = Object.fromEntries(Object.values(JUDGE_KEY_BY_LABEL_MAP)
+  .map((judgeKey) => [judgeKey, Object.fromEntries(JUDGE_SOURCE_LIST.map((source) => [source, 0]))]));
+
+function countJudgeSource({ label, source }) {
+  const judgeKey = JUDGE_KEY_BY_LABEL_MAP[label] || label;
+  judgeSourceCountMap[judgeKey] ??= {};
+  judgeSourceCountMap[judgeKey][source] = (judgeSourceCountMap[judgeKey][source] || 0) + 1;
+}
+
+// 판정기(router/*.js)는 읽힐 때 createJudgeLlm 을 꺼내 두므로 그보다 먼저 감싼 것으로 바꿔, 판정마다 답한 곳(gpu·bedrock)과
+// GPU·Bedrock 이 모두 실패한 경우(error)를 센다. 판정 결과는 그대로 돌려준다.
+function installJudgeCounterShim() {
+  const judgeLlmFile = require.resolve(resolveProductPath('src/main/caption-pipeline/agents/shared/judge-llm.js'));
+  const realJudgeLlm = require(judgeLlmFile);
+  const createCountedJudgeLlm = (option) => {
+    const judgeLlm = realJudgeLlm.createJudgeLlm(option);
+    async function requestText(request) {
+      try {
+        const result = await judgeLlm.requestText(request);
+        countJudgeSource({ label: request.label, source: result.source });
+        return result;
+      } catch (error) {
+        countJudgeSource({ label: request.label, source: JUDGE_ERROR_SOURCE });
+        throw error;
+      }
+    }
+    return { ...judgeLlm, requestText };
+  };
+  require.cache[judgeLlmFile].exports = { ...realJudgeLlm, createJudgeLlm: createCountedJudgeLlm };
+}
+
+export function getJudgeSourceCountMap() {
+  return structuredClone(judgeSourceCountMap);
+}
+
+// 제품 index.js 가 만드는 Kiwi 형태소 분석기(trigger/kiwi-tokenizer.js)를 붙잡아 워커가 세션 전에 준비를 기다리게 한다.
+// 제품 앱은 앱이 뜰 때 한 번 읽어 회의를 시작하기 전에 준비가 끝나 있다. 공장은 영상 0ms 부터 세션을 돌리므로 기다리지 않으면
+// 첫 전사들이 대체 규칙(rule)으로 트리거를 뽑아 제품과 달라진다.
+const kiwiTokenizerList = [];
+
+function installKiwiTokenizerShim() {
+  const kiwiTokenizerFile = require.resolve(resolveProductPath('src/main/caption-pipeline/trigger/kiwi-tokenizer.js'));
+  const realKiwiTokenizer = require(kiwiTokenizerFile);
+  const createTrackedKiwiTokenizer = (option) => {
+    const tokenizer = realKiwiTokenizer.createKiwiTokenizer(option);
+    kiwiTokenizerList.push(tokenizer);
+    return tokenizer;
+  };
+  require.cache[kiwiTokenizerFile].exports = { ...realKiwiTokenizer, createKiwiTokenizer: createTrackedKiwiTokenizer };
+}
+
+export function getKiwiTokenizer() {
+  return kiwiTokenizerList.at(-1) ?? null;
+}
+
+// 트리거가 전사마다 쓴 분석기(kiwi·rule·english) 수. 한국어 전사에 rule 이 있으면 Kiwi 없이 대체 규칙으로 뽑은 것이라 제품과 다르다.
+const triggerAnalyzerCountMap = {};
+
+function installSpeechTriggerCounterShim() {
+  const speechTriggerFile = require.resolve(resolveProductPath('src/main/caption-pipeline/trigger/speech-trigger.js'));
+  const realSpeechTrigger = require(speechTriggerFile);
+  const createCountedSpeechTrigger = (option) => {
+    const speechTrigger = realSpeechTrigger.createSpeechTrigger(option);
+    function detect(input) {
+      const result = speechTrigger.detect(input);
+      if (result.analyzer) triggerAnalyzerCountMap[result.analyzer] = (triggerAnalyzerCountMap[result.analyzer] || 0) + 1;
+      return result;
+    }
+    return { ...speechTrigger, detect };
+  };
+  require.cache[speechTriggerFile].exports = { ...realSpeechTrigger, createSpeechTrigger: createCountedSpeechTrigger };
+}
+
+export function getTriggerAnalyzerCountMap() {
+  return { ...triggerAnalyzerCountMap };
+}
+
 export function installProductLoader({ outDir }) {
   if (isInstalled) throw new Error('installProductLoader 는 프로세스마다 한 번만 부른다');
   isInstalled = true;
@@ -104,6 +185,9 @@ export function installProductLoader({ outDir }) {
     return originalCompile.call(this, scopedContent, filename, ...restList);
   };
   installPathsShim({ outDir });
+  installJudgeCounterShim();
+  installKiwiTokenizerShim();
+  installSpeechTriggerCounterShim();
 }
 
 export function loadRegisterPipeline() {

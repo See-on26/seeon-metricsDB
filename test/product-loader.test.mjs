@@ -1,23 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as sleepReal } from 'node:timers/promises';
+import { createRequire } from 'node:module';
 import {
-  installProductLoader, setProductScope, loadRegisterPipeline, getIpcRegistry, buildScopePrelude, PRODUCT_SCOPE_KEY,
+  installProductLoader, setProductScope, createProductScope, loadRegisterPipeline, getIpcRegistry, buildScopePrelude,
+  PRODUCT_SCOPE_KEY, getJudgeSourceCountMap,
 } from '../src/product/product-loader.mjs';
+import { resolveProductPath } from '../src/product/product-paths.mjs';
+import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
+import { makeTempDir } from './helpers/temp-dir.mjs';
 
 // 제품은 프로세스마다 한 번만 로드한다. node --test 는 파일마다 프로세스를 따로 띄운다.
-const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-loader-'));
+const outDir = makeTempDir('factory-loader-');
 const FIXED_WALL_MS = 1_800_000_000_000;
 const callCountMap = { nowWall: 0, fetch: 0 };
-installProductLoader({ outDir });
-setProductScope({
+const fixedScope = {
   nowWall: () => { callCountMap.nowWall += 1; return FIXED_WALL_MS; },
   nowPerf: () => 10_000,
   setTimeout, clearTimeout, setInterval, clearInterval,
   fetch: async () => { callCountMap.fetch += 1; throw new Error('이 테스트는 네트워크를 쓰지 않는다'); },
-});
+};
+installProductLoader({ outDir });
+setProductScope(fixedScope);
 
 test('prelude 는 한 줄이라 제품 오류 행 번호가 원본과 같다', () => {
   assert.equal(buildScopePrelude().includes('\n'), false);
@@ -63,4 +68,63 @@ test('코어 재사용 목록이 모두 실제로 export 된다', async () => {
   const coreModuleMap = await import('../src/product/core-modules.mjs');
   for (const [name, value] of Object.entries(coreModuleMap)) assert.notEqual(value, undefined, name);
   assert.equal(typeof coreModuleMap.CaptionNarrator, 'function');
+});
+
+test('제품 범위로 넘긴 메서드는 this 없이 불려도 같은 시계를 쓴다', async () => {
+  const clock = createVirtualClock({ startWallMs: 2_000_000 });
+  const scope = createProductScope({ clock, fetch: null });
+  const { setTimeout: setTimer, clearTimeout: clearTimer, setInterval: setRepeat, clearInterval: clearRepeat } = scope;
+  const owner = { setTimer, firedList: [] };
+  owner.setTimer(() => owner.firedList.push(scope.nowWall()), 300);
+  clearTimer(setTimer(() => owner.firedList.push('cleared'), 100));
+  const repeatTimer = setRepeat(() => { owner.firedList.push('repeat'); clearRepeat(repeatTimer); }, 200);
+  await clock.runUntil({ isDone: () => clock.pendingTimerCount === 0 });
+  assert.deepEqual(owner.firedList, ['repeat', 2_000_300]);
+  assert.equal(scope.nowPerf(), 10_000 + 300);
+});
+
+test('가상 시계가 실제 시간으로 흐른 뒤에도 범위 Date.now 는 정수이고 new Date() 와 같다', async () => {
+  const clock = createVirtualClock({ startWallMs: FIXED_WALL_MS });
+  setProductScope(createProductScope({ clock, fetch: fixedScope.fetch }));
+  try {
+    clock.beginExternal();
+    await sleepReal(7);
+    clock.endExternal();
+    const ScopedDate = globalThis[PRODUCT_SCOPE_KEY].Date;
+    assert.ok(Number.isInteger(ScopedDate.now()), `Date.now ${ScopedDate.now()}`);
+    assert.equal(ScopedDate.now(), new ScopedDate().getTime());
+  } finally {
+    setProductScope(fixedScope);
+  }
+});
+
+test('탐지 판정 LLM 호출을 판정기·답한 곳(gpu·bedrock)·실패로 센다', async () => {
+  const productRequire = createRequire(import.meta.url);
+  const { createUnifiedRouter } = productRequire(resolveProductPath('src/main/caption-pipeline/router/unified-router.js'));
+  const { createSilenceJudge } = productRequire(resolveProductPath('src/main/caption-pipeline/router/silence-judge.js'));
+  const { createDeixisJudgeClient } = productRequire(resolveProductPath('src/main/caption-pipeline/router/deixis-judge.js'));
+  const config = {
+    judgeBackend: 'gpu', judgeGpuUrl: 'http://127.0.0.1:9/v1/chat/completions', judgeGpuModel: 'qwen', judgeModelId: 'judge', bedrockApiKey: '',
+  };
+  const zeroCountMap = { gpu: 0, bedrock: 0, error: 0 };
+  assert.deepEqual(getJudgeSourceCountMap(), { router: zeroCountMap, silence: zeroCountMap, deixis: zeroCountMap });
+  async function runWithFetch(fetch, run) {
+    setProductScope({ ...fixedScope, fetch });
+    try {
+      return await run();
+    } finally {
+      setProductScope(fixedScope);
+    }
+  }
+  const answerFetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"caption":true,"reason":"visual_referent"}' } }] }));
+  const candidateList = [{ type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 }];
+  assert.equal((await runWithFetch(answerFetch, () => createUnifiedRouter({ config }).route({ utterance: '이 그래프', candidateList }))).source, 'gpu');
+  assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '여기 이 부분' }))).source, 'gpu');
+  assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '이 표' }))).source, 'gpu');
+  // GPU 가 실패하고 Bedrock 키가 없어 넘기지 못한다. 무발화 판정기는 실패를 error 로 돌려준다(로그를 찍지 않는다).
+  const failFetch = async () => { throw new Error('GPU 꺼짐'); };
+  assert.equal((await runWithFetch(failFetch, () => createSilenceJudge({ config }).judge({ transcript: '이 화면을 보시죠', silenceMs: 6000 }))).source, 'error');
+  assert.deepEqual(getJudgeSourceCountMap(), {
+    router: { ...zeroCountMap, gpu: 1 }, silence: { ...zeroCountMap, error: 1 }, deixis: { ...zeroCountMap, gpu: 2 },
+  });
 });

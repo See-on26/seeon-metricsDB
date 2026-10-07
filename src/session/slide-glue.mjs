@@ -1,0 +1,218 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, PAGE_TRANSITION_KIND_MAP, LEADER_STATUS_MAP, computeGridEmbedding,
+} from '../product/core-modules.mjs';
+import {
+  POINTING_SAMPLE_MS, POINTING_MOTION_DEBOUNCE_MS, LOCAL_EMBED_MATCH_THRESHOLD, ANNOTATION_SNAPSHOT_MIN_INTERVAL_MS,
+} from './renderer-constants.mjs';
+
+const LOCAL_EMBEDDING_WARNING = '[slide] GPU 임베딩 서버 미연결 — 로컬 그리드 임베딩으로 폴백(정확도 낮음, 고지는 유지)';
+
+// main.js 의 slideDwellGate 콜백(553-581)·samplePointingFrame(657-675)·detectSlideTransition(677-693)·
+// confirmSlideCandidate(695-741)·releasePendingTransition(744-746)·requestPageTransitionNarration(748-785)·
+// attachPointingMotion(943-956)·saveSlideFrameWithMark(959-966)·saveAnnotationSnapshot(968-980).
+// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:563, 740).
+// 전환을 확정한 순간부터 고지의 삽입 시각이 정해질 때까지는 진행 중인 전환(pendingTransitions)이다. 화자 안내가 그 고지 뒤로 미뤄진다.
+export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
+  const { clock, bridge, state, core } = ctx;
+  const { dwellMs } = core.slideDwellGate;
+  let samplerTimer = null;
+  let isSampling = false;
+  let isStopped = false;
+  // 프레임 읽기가 실패하면 그 뒤 슬라이드·포인팅 감지가 꺼진다. 뒤 단계가 결과 완전성에 반영하도록 남긴다.
+  state.frameSourceError = null;
+
+  // src/main/ipc.js:80-89(save-slide-frame) 와 같은 폴더 규칙이다. base 프레임은 슬라이드마다 한 번만 쓴다.
+  async function saveSlideFrame({ slideLabel, frameKind, buffer }) {
+    const slideDirName = `slide-${String(slideLabel).split('-')[0]}`;
+    const dirPath = state.currentSessionId
+      ? path.join(slideFrameDir, state.currentSessionId, slideDirName)
+      : path.join(slideFrameDir, slideDirName);
+    await fs.promises.mkdir(dirPath, { recursive: true });
+    const isBase = frameKind === 'base';
+    const filePath = path.join(dirPath, isBase ? 'base.jpg' : 'annotation.jpg');
+    if (isBase && fs.existsSync(filePath)) return filePath;
+    await fs.promises.writeFile(filePath, buffer);
+    return filePath;
+  }
+
+  // transitionTs 는 슬라이드가 실제로 바뀐 시각이다. 체류 확정 뒤에 저장하므로 ts 보다 이르다.
+  async function saveSlideFrameWithMark({ slideLabel, frameKind, buffer, transitionTs = null }) {
+    const ts = clock.nowWall();
+    const filePath = await saveSlideFrame({ slideLabel, frameKind, buffer });
+    bridge.send('pipeline-slide-mark', { ts, slideLabel, frameKind, filePath, transitionTs });
+  }
+
+  // 고지를 내지 않고 끝난 전환은 기다리는 화자 안내를 바로 풀어 준다.
+  function releasePendingTransition({ slideLabel }) {
+    core.pendingTransitions.settle({ slideLabel, status: LEADER_STATUS_MAP.unscheduled });
+  }
+
+  async function requestPageTransitionNarration({ label, isRevisit }) {
+    const buffer = await ctx.captureFrameJpeg({});
+    if (!buffer) {
+      releasePendingTransition({ slideLabel: label });
+      return;
+    }
+    const ts = clock.nowWall();
+    state.slideTransitionRequestTsMap.set(label, ts);
+    ctx.trackTask(saveSlideFrameWithMark({
+      slideLabel: label, frameKind: 'base', buffer, transitionTs: state.slideTransitionWallTsMap.get(label) ?? null,
+    }), 'slide-frame');
+    const wordBudget = ctx.buildWordBudget({ narrationType: NARRATION_TYPE_MAP.pageTransition, subKind: PAGE_TRANSITION_KIND_MAP.slide });
+    if (wordBudget.isDroppable) {
+      ctx.markDebug({
+        stage: DEBUG_STAGE_MAP.budget, verdict: DEBUG_VERDICT_MAP.skip, narrationType: NARRATION_TYPE_MAP.pageTransition,
+        reason: '어절 예산이 유형 하한 미달 → 드롭', detail: `슬라이드 ${label} 모드=${ctx.mode} 하한=${wordBudget.minWordCount}어절`,
+      });
+      releasePendingTransition({ slideLabel: label });
+      return;
+    }
+    // 평가 프리셋에서도 생성은 한다(제품과 같은 GPU 부하). 출력은 main 의 기능 게이트가 막는다(isEmitted=false).
+    const result = await bridge.invoke('pipeline-frame', {
+      ts, buffer: new Uint8Array(buffer), slideLabel: label, wordBudget, isRevisit: Boolean(isRevisit),
+      eventVideoTimeMs: state.slideEventVideoTimeMap.get(label) ?? ctx.videoTimeMs(),
+    }).catch(() => null);
+    // 고지를 내보냈으면 캡션 도착(applyCaption)이 삽입 시각을 정하며 풀어 준다.
+    if (!result?.isEmitted) releasePendingTransition({ slideLabel: label });
+  }
+
+  async function confirmSlideCandidate({ isFirst, imageData }) {
+    const buffer = await ctx.captureFrameJpeg({});
+    const remote = buffer ? await bridge.invoke('embed-frame', { buffer: new Uint8Array(buffer) }).catch(() => null) : null;
+    const isRemoteEmbedding = Boolean(remote?.isOk && Array.isArray(remote.embedding));
+    const embedding = isRemoteEmbedding ? remote.embedding : computeGridEmbedding(imageData);
+    if (!isRemoteEmbedding && !state.hasWarnedLocalEmbedding) {
+      state.hasWarnedLocalEmbedding = true;
+      ctx.log.warn(LOCAL_EMBEDDING_WARNING);
+    }
+    const decision = core.slideRegistry.handleCandidate(isRemoteEmbedding
+      ? { embedding }
+      : { embedding, matchThreshold: LOCAL_EMBED_MATCH_THRESHOLD });
+    const distance = decision.distance.toFixed(3);
+    const source = isRemoteEmbedding ? 'gpu' : 'local';
+    if (decision.isSameSlide) {
+      ctx.markDebug({
+        stage: DEBUG_STAGE_MAP.slide, verdict: DEBUG_VERDICT_MAP.skip, narrationType: NARRATION_TYPE_MAP.pageTransition,
+        reason: '동일 슬라이드 — 전환 아님', detail: `슬라이드 ${decision.label} 거리=${distance} 임베딩=${source}`,
+      });
+      return;
+    }
+    if (!decision.isNew && !decision.isRevisit) return;
+    const isRevisit = Boolean(decision.isRevisit);
+    if (decision.isNew && buffer) {
+      ctx.trackTask(bridge.invoke('pipeline-slide-text', { slideLabel: decision.label, buffer: new Uint8Array(buffer) }), 'slide-text');
+    }
+    // 사건 영상 시각은 임베딩 응답을 받은 뒤의 시각이다(제품과 같음).
+    state.lastScreenTransitionAt = clock.nowPerf();
+    core.pendingTransitions.open({ slideLabel: decision.label });
+    state.slideEventVideoTimeMap.set(decision.label, ctx.videoTimeMs());
+    state.slideTransitionWallTsMap.set(decision.label, clock.nowWall());
+    ctx.markDebug({
+      stage: DEBUG_STAGE_MAP.slide, verdict: DEBUG_VERDICT_MAP.info, narrationType: NARRATION_TYPE_MAP.pageTransition,
+      reason: `${isRevisit ? '재방문' : (isFirst ? '첫' : '새')} 슬라이드 확정`,
+      detail: `슬라이드 ${decision.label} 거리=${distance} 임베딩=${source} → 체류 ${dwellMs}ms 후판정(확정 후 생성)`,
+    });
+    core.slideDwellGate.enter({ label: decision.label, isRevisit });
+  }
+
+  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:641-655, 686)는 없다.
+  function detectSlideTransition({ imageData, ts }) {
+    const verdict = core.histogramGate.sample({ imageData, ts });
+    if (!verdict.isTransition && !verdict.isFirst) return;
+    if (state.isConfirmingSlide) return;
+    state.isConfirmingSlide = true;
+    ctx.trackTask(confirmSlideCandidate({ isFirst: verdict.isFirst, imageData }).finally(() => { state.isConfirmingSlide = false; }), 'slide-confirm');
+  }
+
+  // saveAnnotationSnapshot 의 동기 부분(레지스트리 필기 번호·간격 기준 시각)만 따른다. 필기 이미지는 AD 에 영향이 없어 저장하지 않는다.
+  function noteAnnotation() {
+    const annotation = core.slideRegistry.handleAnnotation();
+    if (!annotation) return;
+    const now = clock.nowPerf();
+    if (now - state.lastAnnotationSnapshotAt < ANNOTATION_SNAPSHOT_MIN_INTERVAL_MS) return;
+    state.lastAnnotationSnapshotAt = now;
+  }
+
+  function attachPointingMotion() {
+    const now = clock.nowPerf();
+    const motion = core.pointingLocator.locate({ nowTs: now });
+    if (!motion.hasRegion) return;
+    if (now - state.lastPointingMotionAt < POINTING_MOTION_DEBOUNCE_MS) return;
+    state.lastPointingMotionAt = now;
+    const { region, pointingOrderHint } = ctx.getPointingSequence();
+    noteAnnotation();
+    const isAttached = core.candidateScheduler.attachPointing({ region: region || motion.rect, pointingOrderHint });
+    ctx.log.log(`[deixis] ✍ 포인팅 모션 changedRatio=${(motion.changedRatio ?? 0).toFixed(3)}`
+      + ` → ${isAttached ? '대기 중인 발화 후보에 영역 첨부' : '대기 후보 없음 (포인터는 트리거가 아니다)'}`);
+  }
+
+  // 제품은 그 순간 화면에 보이는 프레임을 동기로 읽는다. 공장은 같은 순간의 시각·영상 시각을 잡아 두고 그 시각 프레임을 읽는다.
+  async function sampleFrame() {
+    if (isStopped || !state.isCaptureActive) return;
+    const ts = clock.nowPerf();
+    const imageData = await readFrameAt(ctx.videoTimeMs());
+    // 읽는 사이 샘플러가 멈췄거나 캡처가 끝났으면 그 프레임은 버린다.
+    if (!imageData || isStopped || !state.isCaptureActive) return;
+    core.pointingLocator.sample({ imageData, ts });
+    detectSlideTransition({ imageData, ts });
+    attachPointingMotion();
+  }
+
+  ctx.hooks.onDwellSatisfied = ({ label, isRevisit }) => {
+    ctx.markDebug({
+      stage: DEBUG_STAGE_MAP.slide, verdict: DEBUG_VERDICT_MAP.pass, narrationType: NARRATION_TYPE_MAP.pageTransition,
+      reason: `체류 확정 (${dwellMs}ms)`, detail: `슬라이드 ${label}${isRevisit ? ' 재방문' : ''} · 지금 고지 생성`,
+    });
+    ctx.trackTask(requestPageTransitionNarration({ label, isRevisit }), 'page-transition');
+  };
+  // 체류 3초를 못 채운 화면: 기다리던 화자 안내를 풀고, main 의 회의 스크립트에서 그 전환 AD 줄과 방문을 빼게 알린다.
+  ctx.hooks.onDwellCancelled = ({ label, isRevisit }) => {
+    core.pendingTransitions.settle({ slideLabel: label, status: LEADER_STATUS_MAP.cancelled });
+    bridge.send('pipeline-transition-cancelled', {
+      slideLabel: label,
+      requestTs: state.slideTransitionRequestTsMap.get(label) ?? null,
+      transitionTs: state.slideTransitionWallTsMap.get(label) ?? null,
+    });
+    state.slideTransitionRequestTsMap.delete(label);
+    ctx.markDebug({
+      stage: DEBUG_STAGE_MAP.slide, verdict: DEBUG_VERDICT_MAP.skip, narrationType: NARRATION_TYPE_MAP.pageTransition,
+      reason: `체류 미달 (${dwellMs}ms 못 채움)`,
+      detail: `슬라이드 ${label}${isRevisit ? ' 재방문' : ''} — 스쳐 지나간 화면은 고지하지 않는다(§5.4)`,
+    });
+  };
+
+  function stop() {
+    isStopped = true;
+    if (samplerTimer !== null) clock.clearInterval(samplerTimer);
+    samplerTimer = null;
+  }
+
+  // frame-source 는 디코드 실패 뒤 같은 오류를 매번 던진다. 400ms 마다 경고만 쌓이지 않게 첫 오류에서 멈춘다.
+  function handleSampleError(error) {
+    if (state.frameSourceError) return;
+    stop();
+    state.frameSourceError = { message: error.message, videoTimeMs: ctx.videoTimeMs() };
+    ctx.log.warn(`[slide] 프레임 읽기 실패 — 슬라이드·포인팅 샘플을 멈춘다: ${error.message}`);
+  }
+
+  // 제품 samplePointingFrame 은 동기라 겹치지 않는다. 외부 호출 중에는 가상 시간이 실제처럼 흘러 프레임 읽기가 400ms 를
+  // 넘길 수 있는데, 그 사이 온 tick 을 쌓으면 밀린 샘플이 거의 같은 영상 시각으로 연달아 돌아 히스토그램 게이트와
+  // 포인팅 창에 같은 프레임이 겹친다. 그래서 읽는 중에 온 tick 은 버린다. 프레임 리더가 받는 차례 읽기도 이것으로 지켜진다.
+  function tickSampler() {
+    if (isSampling || isStopped) return;
+    isSampling = true;
+    ctx.trackTask(sampleFrame().catch(handleSampleError).finally(() => { isSampling = false; }), 'frame-sample');
+  }
+
+  return {
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1842).
+    start() {
+      isStopped = false;
+      samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);
+    },
+    stop,
+    sampleFrame, detectSlideTransition, confirmSlideCandidate, requestPageTransitionNarration, attachPointingMotion,
+  };
+}
