@@ -5,9 +5,9 @@ import { loadPipelineConfig } from '../product/product-loader.mjs';
 
 export const VIDEO_EXTENSION_LIST = ['.mp4', '.mov', '.mkv', '.webm'];
 
-// 실행 기록(manifest.json·summary.txt, 그 임시 파일) 이름과 겹치지 않게 앞에 video- 를 붙일 이름.
+// 실행 기록(manifest.json·summary.txt·repeat-summary.json, 그 임시 파일) 이름과 겹치지 않게 앞에 video- 를 붙일 이름.
 // 점으로 시작하는 이름도 붙인다. 숨김 파일이 되고 실행 잠금(.factory.lock, 그 임시 파일)과 겹칠 수 있다.
-const RESERVED_STEM_LIST = ['manifest', 'summary'];
+const RESERVED_STEM_LIST = ['manifest', 'summary', 'repeat-summary'];
 // 영상마다 <이름>.log·<이름>_SEEON_AD.mp3·<이름>_SEEON_AD.json 파일과 <이름>/ 작업 폴더가 생긴다.
 // 이 끝말로 끝나는 이름을 그대로 쓰면 그 작업 폴더가 다른 영상의 출력 파일과 같은 경로가 되므로 끝말의 점을 _ 로 바꾼다.
 const OUTPUT_SUFFIX_PATTERN = /(\.log|_SEEON_AD\.mp3|_SEEON_AD\.json)$/i;
@@ -30,6 +30,17 @@ function assignUniqueStem(jobList) {
     usedSet.add(outStem.toLowerCase());
     return outStem === job.outStem ? job : { ...job, outStem };
   });
+}
+
+// --repeat N(N > 1)이면 영상마다 회차 k = 1..N 작업을 영상 순서대로 펼치고 출력 이름 끝에 -r<k> 를 붙인다.
+// 붙이기 전 이름(videoOutStem)은 위 규칙으로 서로 다르고 실행 기록·잠금·다른 출력 이름과 겹치지 않는다. -r<k> 는 숫자로 끝나
+// 예약 이름·출력 끝말이 되지 않고, 끝의 -r<숫자> 를 떼면 붙이기 전 이름과 k 가 하나로 정해지므로 붙인 뒤의 이름도(대소문자 무시) 겹치지 않는다.
+// N = 1 이면 작업 목록을 그대로 둔다(출력 이름·실행 기록이 이전과 같다).
+function expandRepeatJobList({ jobList, repeatCount }) {
+  if (repeatCount === 1) return jobList;
+  return jobList.flatMap((job) => Array.from({ length: repeatCount }, (_, offset) => ({
+    ...job, outStem: `${job.outStem}-r${offset + 1}`, videoOutStem: job.outStem, repeatIndex: offset + 1, repeatCount,
+  })));
 }
 
 function readListEntryList(listPath) {
@@ -56,7 +67,8 @@ function isVideoEntry(entry) {
 }
 
 // 입력은 영상 폴더(바로 아래 파일만) 또는 목록 JSON — 실험 레포 3.2 문항 셋의 videoList[]({ videoId, file, language })를 그대로 받고 spec 표기 path 도 받는다.
-export async function listInputVideos({ input, language = 'auto', limit = null }) {
+// limit 은 영상 수다. repeatCount 가 1 보다 크면 영상마다 작업을 그 수만큼 펼친다(expandRepeatJobList).
+export async function listInputVideos({ input, language = 'auto', limit = null, repeatCount = 1 }) {
   const inputPath = path.resolve(input);
   const stat = await fs.promises.stat(inputPath).catch((error) => {
     throw new Error(error.code === 'ENOENT' ? `입력 폴더·목록을 찾지 못했다: ${inputPath}` : error.message);
@@ -85,5 +97,5 @@ export async function listInputVideos({ input, language = 'auto', limit = null }
     });
   }
   const limited = Number.isInteger(limit) && limit > 0 ? jobList.slice(0, limit) : jobList;
-  return assignUniqueStem(limited);
+  return expandRepeatJobList({ jobList: assignUniqueStem(limited), repeatCount });
 }

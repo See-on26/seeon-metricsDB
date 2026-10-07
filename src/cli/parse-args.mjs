@@ -15,6 +15,7 @@ function readPositiveNumber({ value, name }) {
   return number;
 }
 
+// --repeat N 은 영상마다 N번 돌린다. 주지 않으면 repeatCount 를 두지 않는다(1번과 같다) — 인자 모양과 실행 기록이 이전과 같게.
 export function parseFactoryArgs(argList) {
   const options = { input: null, out: null, concurrency: DEFAULT_CONCURRENCY, language: 'auto', isPageTransitionIncluded: false, isForced: false, limit: null, timeoutMin: null };
   for (let index = 0; index < argList.length; index += 1) {
@@ -29,6 +30,7 @@ export function parseFactoryArgs(argList) {
     else if (arg === '--out') options.out = readValue();
     else if (arg === '--concurrency') options.concurrency = readPositiveInteger({ value: readValue(), name: '--concurrency' });
     else if (arg === '--limit') options.limit = readPositiveInteger({ value: readValue(), name: '--limit' });
+    else if (arg === '--repeat') options.repeatCount = readPositiveInteger({ value: readValue(), name: '--repeat' });
     else if (arg === '--language') options.language = readValue();
     else if (arg === '--timeout-min') options.timeoutMin = readPositiveNumber({ value: readValue(), name: '--timeout-min' });
     else if (arg === '--include-page-transition') options.isPageTransitionIncluded = true;
