@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { parseFactoryArgs } from './parse-args.mjs';
 import { listInputVideos } from '../input/video-list.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/worker-pool.mjs';
-import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../runner/manifest.mjs';
+import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord, formatJobLabel } from '../runner/manifest.mjs';
 import { runPreflight, listDownServices, startProductTunnel, buildMemoryWarning } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
@@ -59,11 +59,12 @@ function clearPreviousOutput({ outDir, pathMap }) {
   removeWorkDir({ workDir: pathMap.workDir });
 }
 
-// 지금과 같은 영상·코드 버전·결과 설정으로 끝난 영상만 건너뛴다. 끝났는데 달라서 다시 만드는 영상은 이유를 한 줄씩 찍는다.
+// 지금과 같은 영상·반복 회차·코드 버전·결과 설정으로 끝난 작업만 건너뛴다. 끝났는데 달라서 다시 만드는 작업은 이유를 한 줄씩 찍는다.
+// 회차가 없는 작업(--repeat 1)은 1회차로 견준다.
 function selectSkippedJobList({ jobList, outDir, identity, log }) {
   return jobList.filter((job) => {
-    const { status, mismatchList } = inspectVideoResult({ outDir, ...job, identity });
-    if (status === 'mismatch') log.log(`[factory] ↻ ${job.videoId} 이전 완료 결과와 달라 다시 만든다 — ${mismatchList.join(' · ')}`);
+    const { status, mismatchList } = inspectVideoResult({ outDir, ...job, repeatIndex: job.repeatIndex ?? 1, identity });
+    if (status === 'mismatch') log.log(`[factory] ↻ ${formatJobLabel(job)} 이전 완료 결과와 달라 다시 만든다 — ${mismatchList.join(' · ')}`);
     return status === 'done';
   });
 }
@@ -83,19 +84,19 @@ function runPendingJobList({ pendingJobList, outDir, concurrency, env, workerPat
           const now = Date.now();
           if (now - (lastLogAtMap.get(job.outStem) || 0) < PROGRESS_LOG_MS) return;
           lastLogAtMap.set(job.outStem, now);
-          log.log(`[factory] ${job.videoId} 영상 ${Math.round(videoTimeMs / 1000)}/${Math.round(durationMs / 1000)}초 · AD ${adCount}`);
+          log.log(`[factory] ${formatJobLabel(job)} 영상 ${Math.round(videoTimeMs / 1000)}/${Math.round(durationMs / 1000)}초 · AD ${adCount}`);
         },
       });
     },
     onEvent: ({ type, job, result }) => {
-      if (type === 'start') log.log(`[factory] ▶ ${job.videoId}`);
+      if (type === 'start') log.log(`[factory] ▶ ${formatJobLabel(job)}`);
       if (type !== 'end') return;
       doneCount += 1;
       onResult(result);
       const warningText = formatWarningBrief(result.warningList);
       log.log(result.status === 'done'
-        ? `[factory] ✔ [${doneCount}/${pendingJobList.length}] ${job.videoId} AD ${result.adCount}개 · ${Math.round(result.processingMs / 1000)}초${warningText ? ` ${warningText}` : ''}`
-        : `[factory] ✖ [${doneCount}/${pendingJobList.length}] ${job.videoId} ${result.errorMessage}`);
+        ? `[factory] ✔ [${doneCount}/${pendingJobList.length}] ${formatJobLabel(job)} AD ${result.adCount}개 · ${Math.round(result.processingMs / 1000)}초${warningText ? ` ${warningText}` : ''}`
+        : `[factory] ✖ [${doneCount}/${pendingJobList.length}] ${formatJobLabel(job)} ${result.errorMessage}`);
     },
   });
 }
@@ -141,7 +142,9 @@ export async function runFactoryCli({
   const { readPipelineConfig } = loadPipelineConfig();
   const pipelineConfig = readPipelineConfig(env);
   const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env });
-  const jobList = (await listInputVideos({ input: options.input, language: options.language, limit: options.limit }))
+  // --repeat N 이면 영상마다 작업 N개(-r1..-rN)가 같은 워커 풀에 들어간다. --concurrency 는 전체 작업에 걸린다.
+  const repeatCount = options.repeatCount ?? 1;
+  const jobList = (await listInputVideos({ input: options.input, language: options.language, limit: options.limit, repeatCount }))
     .map((job) => ({ ...job, isPageTransitionIncluded: options.isPageTransitionIncluded }));
   if (!jobList.length) { log.error('[factory] 처리할 영상이 없다'); return 1; }
   const outDir = path.resolve(options.out ?? path.join(FACTORY_ROOT, 'out', formatRunStamp(new Date())));
@@ -160,7 +163,9 @@ export async function runFactoryCli({
   const memoryWarning = buildMemoryWarning({ workerCount: Math.min(options.concurrency, jobList.length), freeBytes: readFreeMemoryBytes() });
   if (memoryWarning) log.warn(memoryWarning);
 
-  const runOptions = { ...options, input: path.resolve(options.input), out: outDir };
+  // 반복 수는 1 보다 클 때만 남긴다. --repeat 1 의 manifest 가 이전과 같게.
+  const { repeatCount: _repeatCount, ...singleRunOptions } = options;
+  const runOptions = { ...singleRunOptions, ...(repeatCount > 1 ? { repeatCount } : {}), input: path.resolve(options.input), out: outDir };
   // 끝난 결과를 다시 쓸지 견줄 코드 버전(제품·공장)과 결과 설정. manifest 에도 남긴다.
   const identity = readResultIdentity({ pipelineConfig });
   const { seeonMeet, factory } = identity.versionMap;
@@ -219,7 +224,8 @@ export async function runFactoryCli({
       }
     };
     writeRunRecord({ outDir, manifest: buildCurrentManifest(null) });
-    log.log(`[factory] 영상 ${jobList.length}개(건너뜀 ${skippedJobList.length}) · 동시 ${options.concurrency} · 출력 ${outDir}`);
+    const jobCountText = repeatCount > 1 ? `영상 ${jobList.length / repeatCount}개 × 반복 ${repeatCount} = 작업 ${jobList.length}개` : `영상 ${jobList.length}개`;
+    log.log(`[factory] ${jobCountText}(건너뜀 ${skippedJobList.length}) · 동시 ${options.concurrency} · 출력 ${outDir}`);
     await runPendingJobList({
       pendingJobList, outDir, concurrency: options.concurrency, env, workerPath, log,
       videoTimeout: buildVideoTimeout({ timeoutMin: options.timeoutMin }), signal: stopController.signal, forceSignal: forceController.signal,

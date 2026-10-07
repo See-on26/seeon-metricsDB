@@ -30,6 +30,12 @@ export function buildReportConfig({ job, pipelineConfig, runConcurrency = null }
   };
 }
 
+// 결과 JSON 의 repeat: 이 결과가 같은 영상의 몇 번째 회차(index)인지와 그 실행의 반복 수(count). --repeat 1 의 작업은 회차 필드가 없어 { 1, 1 }.
+// 재실행 건너뛰기는 index 만 견준다(count 를 늘려도 끝난 회차는 그대로 쓴다).
+export function buildRepeatRecord({ job }) {
+  return { index: job.repeatIndex ?? 1, count: job.repeatCount ?? 1 };
+}
+
 // 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 제품 부팅(Kiwi 준비까지) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
 // 기반 문제(화면 입력 실패·서비스 장애·세션 종료 실패)로 불완전한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다.
 // 다시 돌리면 그 영상을 다시 처리한다. 부하로 생기는 품질 저하(시간 초과·판정 대체 등)는 완료로 두고 warningList 에 남긴다.
@@ -109,9 +115,10 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   const warningList = buildWarningList({
     callLog, judgeSourceCountMap, judgeBackend: pipelineConfig.judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList,
   });
-  // 공장 버전은 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
+  // 공장 버전·반복 회차는 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
   const finalReport = {
     schemaVersion: report.schemaVersion, isComplete: report.isComplete, video: report.video, seeonMeet: report.seeonMeet, factory: versionMap.factory,
+    repeat: buildRepeatRecord({ job }),
     ...report,
     isComplete: incompleteReasonList.length === 0,
     // swallowedErrorCountMap: 연결 코드가 제품처럼 삼킨 오류 수(task: 비동기 작업 이름별, ipc: IPC 채널별). 0 이 아니면 연결 코드 버그를 의심한다.

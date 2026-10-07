@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { listInputVideos } from '../src/input/video-list.mjs';
+import { inspectVideoResult, buildManifest, formatSummary, formatJobLabel } from '../src/runner/manifest.mjs';
+import { buildRepeatRecord } from '../src/runner/run-video-job.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const makeDir = (name) => makeTempDir(`factory-repeat-${name}-`);
@@ -71,4 +73,51 @@ test('작업 펼치기: 같은 이름 -2·예약 이름 video-·끝말 바꾸기
 test('예약 이름: 반복 요약(repeat-summary.json)과 겹치는 이름은 --repeat 1 에서도 앞에 video- 를 붙인다', async () => {
   const jobList = await listInputVideos({ input: writeList([{ videoId: 'repeat-summary.json', file: 'a.mp4' }, { videoId: 'repeat-summaryX', file: 'b.mp4' }]) });
   assert.deepEqual(jobList.map((job) => job.outStem), ['video-repeat-summary.json', 'repeat-summaryX']);
+});
+
+test('재실행 정체: 회차(repeatIndex)는 견주고 반복 수(count)는 견주지 않으며, 회차 기록이 없는 이전 결과는 1회차로 본다', () => {
+  const outDir = makeDir('identity');
+  const job = { videoId: 'a', filePath: '/v/a.mp4', outStem: 'a-r2', language: 'ko', isPageTransitionIncluded: false };
+  const writeReport = (extra) => {
+    fs.writeFileSync(path.join(outDir, `${job.outStem}_SEEON_AD.mp3`), 'x');
+    fs.writeFileSync(path.join(outDir, `${job.outStem}_SEEON_AD.json`), JSON.stringify({
+      isComplete: true, video: { videoId: 'a', file: '/v/a.mp4', language: 'ko' }, config: { isPageTransitionIncluded: false }, ...extra,
+    }));
+  };
+  writeReport({ repeat: { index: 2, count: 3 } });
+  assert.deepEqual(inspectVideoResult({ outDir, ...job, repeatIndex: 2 }), { status: 'done', mismatchList: [] });
+  assert.deepEqual(inspectVideoResult({ outDir, ...job, repeatIndex: 3 }), { status: 'mismatch', mismatchList: ['반복 회차 2 → 3'] });
+  assert.deepEqual(inspectVideoResult({ outDir, ...job }), { status: 'done', mismatchList: [] }, '회차를 주지 않으면 견주지 않는다');
+  writeReport({});
+  assert.deepEqual(inspectVideoResult({ outDir, ...job, repeatIndex: 1 }), { status: 'done', mismatchList: [] });
+  assert.deepEqual(inspectVideoResult({ outDir, ...job, repeatIndex: 2 }), { status: 'mismatch', mismatchList: ['반복 회차 1 → 2'] });
+});
+
+test('결과 JSON 의 repeat: 작업의 회차·반복 수, 회차가 없는 작업(--repeat 1)은 { index: 1, count: 1 }', () => {
+  assert.deepEqual(buildRepeatRecord({ job: { videoId: 'a', outStem: 'a' } }), { index: 1, count: 1 });
+  assert.deepEqual(buildRepeatRecord({ job: { videoId: 'a', outStem: 'a-r2', repeatIndex: 2, repeatCount: 3 } }), { index: 2, count: 3 });
+});
+
+test('summary: --repeat N 이면 머리줄에 작업 수(영상 × 반복)를, 작업 줄에 videoId 와 회차를 적고, 1 이면 이전과 같다', () => {
+  const jobList = ['a', 'b'].flatMap((videoId) => [1, 2].map((repeatIndex) => ({
+    videoId, outStem: `${videoId}-r${repeatIndex}`, videoOutStem: videoId, repeatIndex, repeatCount: 2,
+  })));
+  const manifest = buildManifest({
+    previousManifest: null, runOptions: { repeatCount: 2 }, seeonMeet: { commit: 'abc', isDirty: false }, jobList,
+    resultList: [
+      { videoId: 'a', outStem: 'a-r1', status: 'done', adCount: 2 }, { videoId: 'a', outStem: 'a-r2', status: 'failed', errorMessage: '시간 초과' },
+      { videoId: 'b', outStem: 'b-r1', status: 'done', adCount: 1, warningList: [{ code: 'vlm_timeout', count: 1, message: 'x' }] },
+    ],
+    skippedJobList: [], startedAt: 's', endedAt: null,
+  });
+  assert.deepEqual(manifest.videoList.map((video) => [video.videoId, video.repeatIndex, video.status]), [
+    ['a', 1, 'done'], ['a', 2, 'failed'], ['b', 1, 'done'], ['b', 2, 'not_run'],
+  ]);
+  const summary = formatSummary(manifest);
+  assert.match(summary, /^작업 4\(영상 2 × 반복 2\) · 완료 2\(경고 1\) · 실패 1 · 건너뜀 0 · 남음 1$/m);
+  assert.match(summary, /^ {2}✔ a r1\/2: AD 2개$/m);
+  assert.match(summary, /^ {2}✖ a r2\/2: 시간 초과$/m);
+  assert.match(summary, /^ {2}✔ b r1\/2: AD 1개 ⚠ vlm_timeout 1$/m);
+  assert.equal(formatJobLabel({ videoId: 'a', outStem: 'a' }), 'a');
+  assert.equal(formatJobLabel({ videoId: 'a', outStem: 'a-r2', repeatIndex: 2, repeatCount: 3 }), 'a r2/3');
 });
