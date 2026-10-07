@@ -1,7 +1,9 @@
 // src/cli/parse-args.mjs
 import { loadPipelineConfig } from '../product/product-loader.mjs';
 
-const DEFAULT_CONCURRENCY = 3;
+// 동시 처리는 공용 GPU 를 포화시켜 VLM 시간 초과·Bedrock 폴백·ASR 지연이 늘고 AD 결과가 동시 1 과 달라진다(README "동시 처리 수").
+// 결과를 제품과 같게 두는 1 이 기본이고, 빨리 돌려야 할 때만 --concurrency 로 올린다.
+const DEFAULT_CONCURRENCY = 1;
 
 function readPositiveInteger({ value, name }) {
   const number = Number(value);

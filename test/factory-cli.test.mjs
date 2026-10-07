@@ -433,10 +433,10 @@ test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모
   assert.match(manifest.factory.commit, /^[0-9a-f]{40}$/);
   assert.equal(typeof manifest.factory.isDirty, 'boolean');
   assert.equal(manifest.resultConfig.vlmModel, 'qwen3.5-35b-a3b');
-  assert.equal(manifest.runOptions.concurrency, 3);
+  assert.equal(manifest.runOptions.concurrency, 1);
   assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), new RegExp(`공장 ${manifest.factory.commit.slice(0, 7)}`));
   const aReport = readJson(path.join(outDir, 'a_SEEON_AD.json'));
-  assert.deepEqual([aReport.factory, aReport.config.runConcurrency], [manifest.factory, 3], '결과 JSON 에 공장 버전·동시 수를 남긴다');
+  assert.deepEqual([aReport.factory, aReport.config.runConcurrency], [manifest.factory, 1], '결과 JSON 에 공장 버전·동시 수를 남긴다');
   assert.deepEqual(await runOnce(), [], '같은 코드·설정이면 건너뛴다');
   assert.deepEqual(countStartPair(), [1, 1]);
 
