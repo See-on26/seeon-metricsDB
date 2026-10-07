@@ -4,6 +4,7 @@ import path from 'node:path';
 import { buildOutputPathMap } from './output-paths.mjs';
 import { listIdentityMismatch } from './result-identity.mjs';
 import { formatWarningBrief } from './result-health.mjs';
+import { REPEAT_SUMMARY_FILE_NAME, formatRepeatSummary } from './repeat-summary.mjs';
 
 const MANIFEST_FILE_NAME = 'manifest.json';
 const SUMMARY_FILE_NAME = 'summary.txt';
@@ -54,9 +55,11 @@ function writeFileAtomic({ filePath, text }) {
 }
 
 // 실행 기록(manifest.json·summary.txt)을 쓴다. 영상 하나가 끝날 때마다 불러 중간에 죽어도 기록이 남는다.
-export function writeRunRecord({ outDir, manifest }) {
+// 반복 요약(--repeat N 실행이 끝날 때)을 주면 repeat-summary.json 도 쓰고 summary.txt 끝에 영상별 반복 줄을 더한다.
+export function writeRunRecord({ outDir, manifest, repeatSummary = null }) {
   writeFileAtomic({ filePath: path.join(outDir, MANIFEST_FILE_NAME), text: JSON.stringify(manifest, null, 2) });
-  writeFileAtomic({ filePath: path.join(outDir, SUMMARY_FILE_NAME), text: formatSummary(manifest) });
+  if (repeatSummary) writeFileAtomic({ filePath: path.join(outDir, REPEAT_SUMMARY_FILE_NAME), text: JSON.stringify(repeatSummary, null, 2) });
+  writeFileAtomic({ filePath: path.join(outDir, SUMMARY_FILE_NAME), text: formatSummary(manifest, repeatSummary) });
 }
 
 export function readManifest({ outDir }) {
@@ -104,8 +107,8 @@ export function formatJobLabel(job) {
 }
 
 // 완료 영상 중 경고(부하로 생긴 시간 초과·판정 대체 등)가 있는 것은 수와 ⚠ 로 드러낸다. 자세한 내용은 영상 JSON 의 warningList 에 있다.
-// --repeat N(N > 1)이면 수는 작업(영상 × 회차) 단위라 머리줄에 작업 수와 영상 수 × 반복 수를 적는다.
-export function formatSummary(manifest) {
+// --repeat N(N > 1)이면 수는 작업(영상 × 회차) 단위라 머리줄에 작업 수와 영상 수 × 반복 수를 적고, 반복 요약을 주면 끝에 영상별 반복 줄을 붙인다.
+export function formatSummary(manifest, repeatSummary = null) {
   const remainingCount = manifest.counts.total - manifest.counts.done - manifest.counts.failed;
   const warnedCount = manifest.videoList.filter((video) => video.status === 'done' && video.warningList?.length).length;
   const repeatCount = manifest.runOptions?.repeatCount ?? 1;
@@ -126,5 +129,5 @@ export function formatSummary(manifest) {
       lineList.push(`  ✔ ${formatJobLabel(video)}: AD ${video.adCount ?? '-'}개${video.isSkipped ? ' (이전 실행)' : ''}${warningText ? ` ${warningText}` : ''}`);
     }
   }
-  return `${lineList.join('\n')}\n`;
+  return `${lineList.join('\n')}\n${repeatSummary ? formatRepeatSummary(repeatSummary) : ''}`;
 }

@@ -12,6 +12,7 @@ import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
 import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
 import { formatWarningBrief } from '../runner/result-health.mjs';
+import { buildRepeatSummary } from '../runner/repeat-summary.mjs';
 import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 import { readResultIdentity } from '../runner/result-identity.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
@@ -197,6 +198,7 @@ export async function runFactoryCli({
     },
   });
   let manifest;
+  let repeatSummary = null;
   try {
     await fs.promises.mkdir(outDir, { recursive: true });
     try {
@@ -216,9 +218,14 @@ export async function runFactoryCli({
       previousManifest, runOptions, seeonMeet, factory, resultConfig: identity.resultConfig,
       jobList, resultList: [...resultByStem.values()], skippedJobList, startedAt, endedAt, interruptedBy,
     });
+    // --repeat N 이면 실행이 끝날 때(중단 포함) 끝난 회차까지로 반복 요약을 함께 쓴다. 중간 기록에는 쓰지 않는다.
+    const buildFinalRecord = () => {
+      const finalManifest = buildCurrentManifest(new Date().toISOString());
+      return { manifest: finalManifest, repeatSummary: repeatCount > 1 ? buildRepeatSummary({ outDir, manifest: finalManifest }) : null };
+    };
     writeFinalRecord = () => {
       try {
-        writeRunRecord({ outDir, manifest: buildCurrentManifest(new Date().toISOString()) });
+        writeRunRecord({ outDir, ...buildFinalRecord() });
       } catch (error) {
         log.warn(`[factory] 실행 기록 쓰기 실패: ${error.message}`);
       }
@@ -239,15 +246,15 @@ export async function runFactoryCli({
         }
       },
     });
-    manifest = buildCurrentManifest(new Date().toISOString());
-    writeRunRecord({ outDir, manifest });
+    ({ manifest, repeatSummary } = buildFinalRecord());
+    writeRunRecord({ outDir, manifest, repeatSummary });
   } finally {
     lock?.release();
     await tunnel?.stop();
     clearTimeout(forceExitTimer);
     stopListening();
   }
-  log.log(formatSummary(manifest));
+  log.log(formatSummary(manifest, repeatSummary));
   if (interruptedBy) return toSignalExitCode(interruptedBy);
   return manifest.counts.failed > 0 ? 1 : 0;
 }
