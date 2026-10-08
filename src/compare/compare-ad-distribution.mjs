@@ -21,7 +21,8 @@ function readJsonFile({ filePath, label }) {
   }
 }
 
-// 공장 결과 하나. 영상은 결과 JSON 의 video(videoId·영상 파일·ffprobe 길이)로 안다.
+// 공장 결과 하나. 영상은 결과 JSON 의 video(videoId·영상 파일·ffprobe 길이)로 안다. 완료는 isComplete 가 true 인 것만이다
+// (공장은 늘 boolean 을 쓰고, 반복 요약과 같은 기준). buildMap 은 결과를 만든 코드 버전·결과 설정이다(공장끼리 견줌).
 function readFactoryInput(filePath) {
   const report = readJsonFile({ filePath, label: '공장 결과를' });
   const video = report?.video?.videoId ? {
@@ -29,13 +30,15 @@ function readFactoryInput(filePath) {
     fileStem: report.video.file ? toFileStem(report.video.file) : null, durationMs: readFiniteOrNull(report.video.durationMs),
   } : null;
   return {
-    filePath, video, isComplete: report?.isComplete !== false, adList: report?.adList || [], droppedList: report?.droppedList || [],
+    filePath, video, isComplete: report?.isComplete === true, adList: report?.adList || [], droppedList: report?.droppedList || [],
+    buildMap: { seeonMeet: report?.seeonMeet, factory: report?.factory, resultConfig: report?.config?.resultConfig },
     warningList: video ? [] : [`공장 결과에 영상 정보(video.videoId)가 없어 같은 영상인지 보지 못했다: ${filePath}`],
   };
 }
 
 // 실험실 결과 하나. ad-timeline.json 에는 영상 정보가 없어 같은 폴더의 run.json(videoName·videoDurationMs·isComplete)으로 안다.
-// run.json 이 없으면(파일만 옮긴 경우 등) 영상 확인 없이 쓰고 경고한다.
+// run.json 이 없으면 영상 확인 없이 쓰고 경고한다. 실험실은 run.json 을 맨 마지막에 쓰므로 없다는 것은 파일만 옮긴 경우일 수도,
+// 정리 중 멈춘 실행일 수도 있어 완료 여부도 모른다.
 function readLabInput(filePath) {
   const timeline = readJsonFile({ filePath, label: '실험실 결과를' });
   const runInfoPath = path.join(path.dirname(filePath), LAB_RUN_INFO_FILE_NAME);
@@ -47,7 +50,7 @@ function readLabInput(filePath) {
     filePath, video, isComplete: runInfo?.isComplete !== false, adList: timeline?.adList || [], droppedList: timeline?.droppedList || [],
     warningList: video ? [] : [runInfo
       ? `실험실 ${LAB_RUN_INFO_FILE_NAME} 에 영상 이름(videoName)이 없어 같은 영상인지 보지 못했다: ${filePath}`
-      : `실험실 ${LAB_RUN_INFO_FILE_NAME} 이 없어 같은 영상인지 보지 못했다: ${filePath}`],
+      : `실험실 ${LAB_RUN_INFO_FILE_NAME} 이 없어 같은 영상인지·완료된 실행인지 보지 못했다(파일만 옮겼거나 정리 중 멈춘 실행): ${filePath}`],
   };
 }
 
@@ -74,6 +77,33 @@ function assertSameVideo({ factoryInputList, labInputList }) {
   }
 }
 
+// 공장 결과끼리 견줄 코드 버전·결과 설정. 버전은 커밋과 수정 지문(dirtyHash), 결과 설정은 양쪽 키를 모두 본다
+// (재실행 건너뛰기의 결과 정체와 같은 항목). 이름은 경고 문구에 쓴다.
+const BUILD_LABEL_MAP = { seeonMeet: 'seeon-meet', factory: '공장', resultConfig: '결과 설정' };
+const isSameVersion = (left, right) => (left?.commit ?? null) === (right?.commit ?? null) && (left?.dirtyHash ?? null) === (right?.dirtyHash ?? null);
+function isSameResultConfig(left, right) {
+  if (!left || !right) return !left && !right;
+  return [...new Set([...Object.keys(left), ...Object.keys(right)])].every((key) => left[key] === right[key]);
+}
+const IS_SAME_BUILD_FIELD_MAP = { seeonMeet: isSameVersion, factory: isSameVersion, resultConfig: isSameResultConfig };
+
+// 분포에 넣는 공장 결과가 서로 다른 코드 버전·결과 설정으로 만든 것이면 경고 한 줄을 돌려준다(없으면 null). 같은 --out 에서 N 을 줄였거나
+// 코드가 바뀐 뒤 이어 돌리면 -r<k> 마다 버전이 다를 수 있어, glob 으로 모으면 조용히 섞인다. 첫 결과와 견줘 다른 곳과 처음 다른 결과를 적는다.
+function buildMixedBuildWarning(inputList) {
+  const [base, ...restList] = inputList;
+  const differentKeySet = new Set();
+  let firstOther = null;
+  for (const other of restList) {
+    const keyList = Object.keys(BUILD_LABEL_MAP).filter((key) => !IS_SAME_BUILD_FIELD_MAP[key](base.buildMap[key], other.buildMap[key]));
+    if (!keyList.length) continue;
+    keyList.forEach((key) => differentKeySet.add(key));
+    firstOther ??= other;
+  }
+  if (!firstOther) return null;
+  const labelText = Object.keys(BUILD_LABEL_MAP).filter((key) => differentKeySet.has(key)).map((key) => BUILD_LABEL_MAP[key]).join(' · ');
+  return `공장 결과끼리 코드 버전·결과 설정이 다르다(다른 곳: ${labelText}) — 다른 버전의 결과가 한 분포에 섞인다: ${base.filePath} ↔ ${firstOther.filePath}`;
+}
+
 function toRunList({ inputList, sideLabel }) {
   const runList = inputList.filter((input) => input.isComplete)
     .map((input, index) => ({ runIndex: index + 1, filePath: input.filePath, adList: input.adList, droppedList: input.droppedList }));
@@ -82,15 +112,17 @@ function toRunList({ inputList, sideLabel }) {
 }
 
 // 분포 비교 입력: 공장 결과 JSON 들과 실험실 ad-timeline.json 들을 읽어 쪽마다 실행 목록(runIndex 는 불완전한 결과를 뺀 뒤 받은 순서로 1..)으로 만든다.
-// 서로 다른 영상의 결과를 섞으면 오류로 멈춘다. 불완전한 결과(공장 isComplete=false, 실험실 run.json isComplete=false)는
-// 반복 요약처럼 분포에서 빼고, 뺀 것과 영상을 확인하지 못한 것은 warningList 에 남긴다.
+// 서로 다른 영상의 결과를 섞으면 오류로 멈춘다. 불완전한 결과(공장 isComplete 가 true 가 아님, 실험실 run.json isComplete=false)는
+// 반복 요약처럼 분포에서 빼고, 뺀 것·영상을 확인하지 못한 것·분포에 넣는 공장 결과끼리 코드 버전·결과 설정이 다른 것은 warningList 에 남긴다.
 export function readDistributionInput({ factoryPathList, labPathList }) {
   const factoryInputList = factoryPathList.map(readFactoryInput);
   const labInputList = labPathList.map(readLabInput);
   assertSameVideo({ factoryInputList, labInputList });
   const warningList = [...factoryInputList, ...labInputList].flatMap((input) => [
-    ...input.warningList, ...(input.isComplete ? [] : [`불완전한 결과(isComplete=false)라 뺀다: ${input.filePath}`]),
+    ...input.warningList, ...(input.isComplete ? [] : [`불완전한 결과라 뺀다(isComplete 가 true 가 아님): ${input.filePath}`]),
   ]);
+  const mixedBuildWarning = buildMixedBuildWarning(factoryInputList.filter((input) => input.isComplete));
+  if (mixedBuildWarning) warningList.push(mixedBuildWarning);
   return {
     factoryRunList: toRunList({ inputList: factoryInputList, sideLabel: '공장' }),
     labRunList: toRunList({ inputList: labInputList, sideLabel: '실험실' }),

@@ -89,10 +89,18 @@ function writeJson(filePath, value) {
   return filePath;
 }
 
-// 공장 결과 JSON 하나(같은 자리 video·isComplete 만 채운다).
-function writeFactoryReport({ dirPath, name, videoId = 'sample-5slides', file = '/v/sample-5slides.mp4', durationMs = 63700, isComplete = true, adList = [] }) {
+const SAME_SEEON_MEET = { commit: 'aaaaaaa1', isDirty: false, dirtyHash: null };
+const SAME_FACTORY = { commit: 'fffffff1', isDirty: false, dirtyHash: null };
+const SAME_RESULT_CONFIG = { mode: 'delayed', delayMs: 10000, vlmModel: 'qwen' };
+
+// 공장 결과 JSON 하나(같은 자리 video·seeonMeet·factory·config.resultConfig·isComplete 만 채운다).
+function writeFactoryReport({
+  dirPath, name, videoId = 'sample-5slides', file = '/v/sample-5slides.mp4', durationMs = 63700, isComplete = true, adList = [],
+  seeonMeet = SAME_SEEON_MEET, factory = SAME_FACTORY, resultConfig = SAME_RESULT_CONFIG,
+}) {
   return writeJson(path.join(dirPath, `${name}_SEEON_AD.json`), {
-    schemaVersion: 1, isComplete, video: { videoId, file, durationMs, language: 'ko' }, adList, droppedList: [],
+    schemaVersion: 1, isComplete, video: { videoId, file, durationMs, language: 'ko' }, seeonMeet, factory,
+    config: { resultConfig }, adList, droppedList: [],
   });
 }
 
@@ -144,21 +152,47 @@ test('분포 비교 입력: 불완전한 결과는 빼고 경고하며, run.json
   const factoryPathList = [
     writeFactoryReport({ dirPath, name: 'sample-5slides-r1' }),
     writeFactoryReport({ dirPath, name: 'sample-5slides-r2', isComplete: false }),
+    writeFactoryReport({ dirPath, name: 'sample-5slides-r3', isComplete: null }),
   ];
   const labPathList = [writeLabRun({ dirPath, name: 'lab-ok' }), writeLabRun({ dirPath, name: 'lab-broken', runInfo: { isComplete: false } }), labFixturePath];
   const { factoryRunList, labRunList, warningList } = readDistributionInput({ factoryPathList, labPathList });
   assert.deepEqual(factoryRunList.map((run) => [run.runIndex, run.filePath]), [[1, factoryPathList[0]]]);
   assert.deepEqual(labRunList.map((run) => [run.runIndex, run.filePath]), [[1, labPathList[0]], [2, labFixturePath]]);
   assert.deepEqual(warningList, [
-    `불완전한 결과(isComplete=false)라 뺀다: ${factoryPathList[1]}`,
-    `불완전한 결과(isComplete=false)라 뺀다: ${labPathList[1]}`,
-    `실험실 run.json 이 없어 같은 영상인지 보지 못했다: ${labFixturePath}`,
+    `불완전한 결과라 뺀다(isComplete 가 true 가 아님): ${factoryPathList[1]}`,
+    `불완전한 결과라 뺀다(isComplete 가 true 가 아님): ${factoryPathList[2]}`,
+    `불완전한 결과라 뺀다(isComplete 가 true 가 아님): ${labPathList[1]}`,
+    `실험실 run.json 이 없어 같은 영상인지·완료된 실행인지 보지 못했다(파일만 옮겼거나 정리 중 멈춘 실행): ${labFixturePath}`,
   ]);
   assert.throws(() => readDistributionInput({ factoryPathList: [factoryPathList[1]], labPathList }), /^Error: 공장 쪽에 견줄 완료 결과가 없다/);
   assert.throws(() => readDistributionInput({ factoryPathList: [path.join(dirPath, 'none.json')], labPathList }), /^Error: 공장 결과를 읽지 못했다\(.*none\.json\): /);
   const brokenRunInfoPath = writeLabRun({ dirPath, name: 'lab-bad-info', runInfo: null });
   writeJson(path.join(path.dirname(brokenRunInfoPath), 'run.json'), '{"videoName": ');
   assert.throws(() => readDistributionInput({ factoryPathList, labPathList: [brokenRunInfoPath] }), /^Error: 실험실 run\.json 을 읽지 못했다\(/);
+});
+
+test('분포 비교 입력: 공장 결과끼리 코드 버전(seeon-meet·공장 커밋·수정 지문)이나 결과 설정이 다르면 경고 한 줄을 남긴다(분포에서 빼지는 않는다)', () => {
+  const dirPath = makeTempDir('factory-distribution-version-');
+  const labPathList = [writeLabRun({ dirPath, name: 'lab-ok' })];
+  const writeRun = (name, extra = {}) => writeFactoryReport({ dirPath, name, ...extra });
+  const mixedPathList = [
+    writeRun('sample-5slides-r1'),
+    writeRun('sample-5slides-r2', { factory: { ...SAME_FACTORY, isDirty: true, dirtyHash: 'd1' } }),
+    writeRun('sample-5slides-r3', { seeonMeet: { ...SAME_SEEON_MEET, commit: 'bbbbbbb2' }, resultConfig: { ...SAME_RESULT_CONFIG, vlmModel: 'other' } }),
+    writeRun('sample-5slides-r4', { isComplete: false, seeonMeet: { ...SAME_SEEON_MEET, commit: 'ccccccc3' } }),
+  ];
+  const { factoryRunList, warningList } = readDistributionInput({ factoryPathList: mixedPathList, labPathList });
+  assert.equal(factoryRunList.length, 3);
+  // 빼는 결과(r4)는 견주지 않는다. 다른 곳은 정해진 순서로 한 번씩, 파일은 첫 결과와 처음 다른 결과를 적는다.
+  assert.deepEqual(warningList.filter((warning) => warning.startsWith('공장 결과끼리')), [
+    `공장 결과끼리 코드 버전·결과 설정이 다르다(다른 곳: seeon-meet · 공장 · 결과 설정) — 다른 버전의 결과가 한 분포에 섞인다: ${mixedPathList[0]} ↔ ${mixedPathList[1]}`,
+  ]);
+  // 결과 설정은 키가 하나만 늘거나 줄어도 다르다. 같으면 경고가 없다.
+  const keyPathList = [writeRun('key-r1'), writeRun('key-r2', { resultConfig: { ...SAME_RESULT_CONFIG, isScaleEnabled: true } })];
+  assert.deepEqual(readDistributionInput({ factoryPathList: keyPathList, labPathList }).warningList, [
+    `공장 결과끼리 코드 버전·결과 설정이 다르다(다른 곳: 결과 설정) — 다른 버전의 결과가 한 분포에 섞인다: ${keyPathList[0]} ↔ ${keyPathList[1]}`,
+  ]);
+  assert.deepEqual(readDistributionInput({ factoryPathList: [writeRun('same-r1'), writeRun('same-r2')], labPathList }).warningList, []);
 });
 
 const runTool = (argList) => spawnSync(process.execPath, [toolPath, ...argList], { encoding: 'utf8' });
@@ -179,7 +213,7 @@ test('compare-lab 도구 새 형식: --factory <json>... --lab <ad-timeline.json
   assert.match(run.stdout, /^\| visual_description \| 1\/3 \| 1\/2 \| 43500\(43500~43500\) \| 42441\(42441~42441\) \| 1059 \| /m);
   assert.match(run.stdout, /^\| deixis \| 0\/3 \| 1\/2 \| - \| 51389\(51389~51389\) \| - \| - \| 평가 구조 \|$/m);
   assert.match(run.stdout, /^\| rate-limited \| 0·0·0 \| 0·1 \|$/m);
-  assert.equal(run.stderr, `경고: 실험실 run.json 이 없어 같은 영상인지 보지 못했다: ${labFixturePath}\n`);
+  assert.equal(run.stderr, `경고: 실험실 run.json 이 없어 같은 영상인지·완료된 실행인지 보지 못했다(파일만 옮겼거나 정리 중 멈춘 실행): ${labFixturePath}\n`);
   // --lab 을 먼저 주거나 --factory 를 나눠 줘도 같다.
   const reordered = runTool(['--lab', labPath, labFixturePath, '--factory', factoryPathList[0], '--factory', ...factoryPathList.slice(1)]);
   assert.equal(reordered.stdout, run.stdout);
