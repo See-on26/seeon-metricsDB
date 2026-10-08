@@ -63,9 +63,9 @@ export function compareAdTimeline({ factoryReport, labTimeline, toleranceMs = AD
   };
 }
 
-// 해설 문장에 줄바꿈이나 | 가 들어 있어도 마크다운 한 줄·표 한 칸에 들어가게 한다.
+// 해설 문장에 줄바꿈이나 | 가 들어 있어도 마크다운 한 줄·표 한 칸에 들어가게 한다. 분포 비교 표도 같이 쓴다.
 const toInlineText = (value) => String(value ?? '').replace(/\s*\n\s*/g, ' ');
-const toCellText = (value) => toInlineText(value).replace(/\|/g, '\\|');
+export const toCellText = (value) => toInlineText(value).replace(/\|/g, '\\|');
 const formatAdList = (adList) => adList.map((ad) => `${ad.type} "${toInlineText(ad.text)}" @${ad.playedMediaMs ?? '-'}`).join(' / ') || '없음';
 
 export function formatCompareMarkdown(result) {
