@@ -20,9 +20,9 @@ import { makeTempDir } from './helpers/temp-dir.mjs';
 const makeDir = (name) => makeTempDir(`factory-${name}-`);
 const FAKE_WORKER_PATH = fileURLToPath(new URL('./helpers/fake-video-worker.mjs', import.meta.url));
 
-test('인자: 기본값(동시 3·auto)과 잘못된 값', () => {
+test('인자: 기본값(동시 1·auto)과 잘못된 값', () => {
   assert.deepEqual(parseFactoryArgs(['--input', 'videos']), {
-    input: 'videos', out: null, concurrency: 3, language: 'auto', isPageTransitionIncluded: false, isForced: false, limit: null, timeoutMin: null,
+    input: 'videos', out: null, concurrency: 1, language: 'auto', isPageTransitionIncluded: false, isForced: false, limit: null, timeoutMin: null,
   });
   assert.equal(parseFactoryArgs(['--input', 'a', '--concurrency', '2', '--language', 'en', '--include-page-transition', '--force', '--limit', '5', '--out', 'o']).limit, 5);
   assert.throws(() => parseFactoryArgs([]), /--input/);
