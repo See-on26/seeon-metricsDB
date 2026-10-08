@@ -3,7 +3,7 @@ import path from 'node:path';
 import { MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 import { bootProductPipeline } from '../product/boot-pipeline.mjs';
 import { getJudgeSourceCountMap, getTriggerAnalyzerCountMap } from '../product/product-loader.mjs';
-import { readVersionMap, buildResultConfig } from './result-identity.mjs';
+import { readVersionMap, buildResultConfig, buildRepeatRecord } from './result-identity.mjs';
 import { createVirtualClock } from '../clock/virtual-clock.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
 import { probeVideo } from '../media/probe.mjs';
@@ -28,12 +28,6 @@ export function buildReportConfig({ job, pipelineConfig, runConcurrency = null }
     featureToggleMap: { ...EVAL_PRESET_MAP, page_transition: Boolean(job.isPageTransitionIncluded) }, modelConfig,
     resultConfig: buildResultConfig({ pipelineConfig }), runConcurrency,
   };
-}
-
-// 결과 JSON 의 repeat: 이 결과가 같은 영상의 몇 번째 회차(index)인지와 그 실행의 반복 수(count). --repeat 1 의 작업은 회차 필드가 없어 { 1, 1 }.
-// 재실행 건너뛰기는 index 만 견준다(count 를 늘려도 끝난 회차는 그대로 쓴다).
-export function buildRepeatRecord({ job }) {
-  return { index: job.repeatIndex ?? 1, count: job.repeatCount ?? 1 };
 }
 
 // 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 제품 부팅(Kiwi 준비까지) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).

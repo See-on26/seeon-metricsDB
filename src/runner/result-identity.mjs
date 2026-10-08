@@ -31,6 +31,12 @@ export function readVersionMap() {
   return { seeonMeet: readSeeonMeetVersion(), factory: readFactoryVersion() };
 }
 
+// 결과 JSON 의 repeat: 이 결과가 같은 영상의 몇 번째 회차(index)인지와 그 실행의 반복 수(count). --repeat 1 의 작업은 회차 필드가 없어 { 1, 1 }.
+// 재실행 건너뛰기는 index 만 견준다(count 를 늘려도 끝난 회차는 그대로 쓴다). 워커와 시험용 가짜 워커가 같이 쓴다.
+export function buildRepeatRecord({ job }) {
+  return { index: job.repeatIndex ?? 1, count: job.repeatCount ?? 1 };
+}
+
 // 지금 실행이 만들 결과의 정체: 코드 버전과 결과 설정. 끝난 결과를 다시 쓸지 이것과 견준다.
 export function readResultIdentity({ pipelineConfig }) {
   return { versionMap: readVersionMap(), resultConfig: buildResultConfig({ pipelineConfig }) };

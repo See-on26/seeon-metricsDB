@@ -5,7 +5,7 @@ import path from 'node:path';
 import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { listInputVideos } from '../src/input/video-list.mjs';
 import { inspectVideoResult, buildManifest, formatSummary, formatJobLabel } from '../src/runner/manifest.mjs';
-import { buildRepeatRecord } from '../src/runner/run-video-job.mjs';
+import { buildRepeatRecord } from '../src/runner/result-identity.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const makeDir = (name) => makeTempDir(`factory-repeat-${name}-`);

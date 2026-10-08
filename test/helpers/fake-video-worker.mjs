@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { buildOutputPathMap } from '../../src/runner/output-paths.mjs';
-import { readResultIdentity } from '../../src/runner/result-identity.mjs';
+import { readResultIdentity, buildRepeatRecord } from '../../src/runner/result-identity.mjs';
 import { loadPipelineConfig } from '../../src/product/product-loader.mjs';
 
 // video-worker.mjs 와 같은 메시지 규약으로 도는 가짜 워커. 제품 파이프라인 없이 videoId 에 든 낱말로 결과를 고른다.
@@ -49,7 +49,7 @@ function writeDoneOutput({ job, outDir, runConcurrency }) {
   fs.writeFileSync(pathMap.jsonPath, JSON.stringify({
     schemaVersion: 1, isComplete: true,
     video: { videoId: job.videoId, file: job.filePath, durationMs: 60000, language: job.language }, ...versionMap,
-    repeat: { index: job.repeatIndex ?? 1, count: job.repeatCount ?? 1 },
+    repeat: buildRepeatRecord({ job }),
     config: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded), resultConfig, runConcurrency },
     adList, droppedList: FAKE_DROPPED_LIST, incompleteReasonList: [], warningList,
   }));

@@ -1,5 +1,6 @@
 // src/runner/repeat-summary.mjs
 import fs from 'node:fs';
+import path from 'node:path';
 import { buildOutputPathMap } from './output-paths.mjs';
 import { AD_MATCH_TOLERANCE_MS } from '../compare/compare-ad-timeline.mjs';
 import { clusterRunAdList } from '../compare/ad-cluster.mjs';
@@ -19,7 +20,7 @@ function readCompletedReport({ outDir, outStem }) {
   return { report };
 }
 
-const sortKeyList = (map) => Object.fromEntries(Object.entries(map).sort(([left], [right]) => (left < right ? -1 : Number(left > right))));
+const toSortedCountMap = (countMap) => Object.fromEntries(Object.entries(countMap).sort(([left], [right]) => (left < right ? -1 : Number(left > right))));
 
 function countBy(itemList, readKey) {
   const countMap = {};
@@ -27,7 +28,7 @@ function countBy(itemList, readKey) {
     const key = String(readKey(item));
     countMap[key] = (countMap[key] || 0) + 1;
   }
-  return sortKeyList(countMap);
+  return toSortedCountMap(countMap);
 }
 
 // 실행별 AD 수(완료 회차 순)와 평균(소수 둘째 자리)·최소·최대. 완료가 없으면 수치는 null.
@@ -38,7 +39,8 @@ function summarizeAdCount(countList) {
 }
 
 // 영상 하나의 회차 기록(manifest 작업 줄)으로 요약을 만든다. 수치는 완료 회차만으로 내고, 목록은 모두 completedRunList 순서다.
-function summarizeVideo({ outDir, videoList }) {
+// runCount 는 이번 실행의 반복 수다(작업 줄은 이번 실행의 회차 1..N 만 있다).
+function summarizeVideo({ outDir, videoList, runCount }) {
   const [first] = videoList;
   const completedList = [];
   const failedRunList = [];
@@ -52,7 +54,7 @@ function summarizeVideo({ outDir, videoList }) {
   const classCountMapList = completedList.map((run) => countBy(run.adList, (ad) => ad.type));
   const classList = [...new Set(classCountMapList.flatMap((countMap) => Object.keys(countMap)))].sort();
   return {
-    videoId: first.videoId, outStem: first.videoOutStem, filePath: first.filePath, runCount: first.repeatCount,
+    videoId: first.videoId, outStem: first.videoOutStem, filePath: first.filePath, runCount,
     completedRunList: completedList.map((run) => run.repeatIndex), failedRunList,
     adCount: summarizeAdCount(completedList.map((run) => run.adList.length)),
     adCountByClass: Object.fromEntries(classList.map((type) => [type, classCountMapList.map((countMap) => countMap[type] || 0)])),
@@ -71,11 +73,18 @@ export function buildRepeatSummary({ outDir, manifest }) {
     if (!videoListByStem.has(video.videoOutStem)) videoListByStem.set(video.videoOutStem, []);
     videoListByStem.get(video.videoOutStem).push(video);
   }
+  const repeatCount = manifest.runOptions?.repeatCount ?? 1;
   return {
-    repeatCount: manifest.runOptions?.repeatCount ?? 1, matchToleranceMs: AD_MATCH_TOLERANCE_MS,
+    repeatCount, matchToleranceMs: AD_MATCH_TOLERANCE_MS,
     startedAt: manifest.startedAt, endedAt: manifest.endedAt, ...(manifest.interruptedBy ? { interruptedBy: manifest.interruptedBy } : {}),
-    videoList: [...videoListByStem.values()].map((videoList) => summarizeVideo({ outDir, videoList })),
+    videoList: [...videoListByStem.values()].map((videoList) => summarizeVideo({ outDir, videoList, runCount: repeatCount })),
   };
+}
+
+// 지난 실행이 남긴 반복 요약을 지운다. 이번 실행이 --repeat 1 이거나 아직 끝나지 않았는데 이전 요약이 남아 이번 결과로 읽히지 않게,
+// 잠금을 잡은 뒤 첫 기록 때 N 과 상관없이 부른다(N > 1 이면 끝날 때 새로 쓴다).
+export function removeRepeatSummary({ outDir }) {
+  fs.rmSync(path.join(outDir, REPEAT_SUMMARY_FILE_NAME), { force: true });
 }
 
 const formatMean = (value) => String(Math.round(value * 10) / 10);

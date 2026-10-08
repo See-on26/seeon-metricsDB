@@ -12,7 +12,7 @@ import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
 import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
 import { formatWarningBrief } from '../runner/result-health.mjs';
-import { buildRepeatSummary } from '../runner/repeat-summary.mjs';
+import { buildRepeatSummary, removeRepeatSummary } from '../runner/repeat-summary.mjs';
 import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 import { readResultIdentity } from '../runner/result-identity.mjs';
 import { FACTORY_ROOT } from '../product/product-paths.mjs';
@@ -219,9 +219,16 @@ export async function runFactoryCli({
       jobList, resultList: [...resultByStem.values()], skippedJobList, startedAt, endedAt, interruptedBy,
     });
     // --repeat N 이면 실행이 끝날 때(중단 포함) 끝난 회차까지로 반복 요약을 함께 쓴다. 중간 기록에는 쓰지 않는다.
+    // manifest 를 먼저 만들고, 반복 요약을 만들지 못하면(결과 JSON 모양이 이상함 등) 경고만 찍고 요약 없이 마지막 기록을 쓴다.
     const buildFinalRecord = () => {
       const finalManifest = buildCurrentManifest(new Date().toISOString());
-      return { manifest: finalManifest, repeatSummary: repeatCount > 1 ? buildRepeatSummary({ outDir, manifest: finalManifest }) : null };
+      if (repeatCount === 1) return { manifest: finalManifest, repeatSummary: null };
+      try {
+        return { manifest: finalManifest, repeatSummary: buildRepeatSummary({ outDir, manifest: finalManifest }) };
+      } catch (error) {
+        log.warn(`[factory] 반복 요약을 만들지 못했다: ${error.message}`);
+        return { manifest: finalManifest, repeatSummary: null };
+      }
     };
     writeFinalRecord = () => {
       try {
@@ -230,6 +237,7 @@ export async function runFactoryCli({
         log.warn(`[factory] 실행 기록 쓰기 실패: ${error.message}`);
       }
     };
+    removeRepeatSummary({ outDir });
     writeRunRecord({ outDir, manifest: buildCurrentManifest(null) });
     const jobCountText = repeatCount > 1 ? `영상 ${jobList.length / repeatCount}개 × 반복 ${repeatCount} = 작업 ${jobList.length}개` : `영상 ${jobList.length}개`;
     log.log(`[factory] ${jobCountText}(건너뜀 ${skippedJobList.length}) · 동시 ${options.concurrency} · 출력 ${outDir}`);

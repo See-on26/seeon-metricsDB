@@ -72,6 +72,10 @@ export function readManifest({ outDir }) {
   }
 }
 
+// --repeat N 작업의 회차 필드. 건너뛴 작업에 이전 실행의 기록을 이을 때 이 필드는 지금 작업 것을 둔다 — 같은 --out 에서 N 을 바꿔
+// 이어 돌리면 이전 기록의 반복 수가 달라, 그대로 두면 작업 줄(r1/3)·반복 요약이 이번 실행의 N 이 아닌 값을 보인다. N = 1 작업에는 없다.
+const pickRepeatField = (job) => (job.repeatCount ? { videoOutStem: job.videoOutStem, repeatIndex: job.repeatIndex, repeatCount: job.repeatCount } : {});
+
 // resultList 에 없는 영상은 not_run(아직 돌지 않았거나 중단으로 띄우지 않음). endedAt 이 null 이면 실행 중 기록이다.
 // seeonMeet·factory·resultConfig 는 이번 실행이 견준 코드 버전·결과 설정이다(건너뛴 영상도 이와 같을 때만 건너뛴다).
 export function buildManifest({
@@ -85,7 +89,7 @@ export function buildManifest({
     if (skippedSet.has(job.outStem)) {
       // 이전 실행의 끝난 기록(AD 수 등)만 잇는다. 실패 기록의 이유가 끝난 영상에 섞이지 않게.
       const previous = previousMap.get(job.outStem);
-      return { ...job, ...(previous?.status === 'done' ? previous : {}), status: 'done', isSkipped: true };
+      return { ...job, ...(previous?.status === 'done' ? previous : {}), ...pickRepeatField(job), status: 'done', isSkipped: true };
     }
     return { ...job, status: 'not_run' };
   });
