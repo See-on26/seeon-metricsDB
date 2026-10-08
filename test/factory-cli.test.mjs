@@ -470,3 +470,224 @@ test('CLI: 경고(부하로 생긴 시간 초과 등)가 있는 영상은 완료
   assert.equal(await runOnce(createLogCollector().log), 0);
   assert.equal(countStart({ outDir, outStem: 'a-warn' }), 1);
 });
+
+const listRunFile = (outDir) => fs.readdirSync(outDir).filter((name) => !name.endsWith('.log')).sort();
+
+test('CLI --repeat N: 영상마다 -r<k> 작업 N개를 같은 워커 풀에서 돌리고, 결과 JSON·manifest·summary·터미널에 videoId 와 회차를 남긴다', async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b.mp4']);
+  const outDir = path.join(makeDir('repeat'), 'run');
+  const { lineList, log } = createLogCollector();
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, '--repeat', '3', '--concurrency', '2'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 0);
+  const outStemList = ['a-r1', 'a-r2', 'a-r3', 'b-r1', 'b-r2', 'b-r3'];
+  for (const outStem of outStemList) {
+    for (const suffix of ['_SEEON_AD.mp3', '_SEEON_AD.json', '.log']) assert.ok(fs.existsSync(path.join(outDir, `${outStem}${suffix}`)), `${outStem}${suffix}`);
+    assert.equal(countStart({ outDir, outStem }), 1);
+  }
+  assert.deepEqual(readJson(path.join(outDir, 'a-r2_SEEON_AD.json')).repeat, { index: 2, count: 3 });
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.deepEqual(manifest.videoList.map((video) => [video.videoId, video.repeatIndex, video.repeatCount, video.outStem, video.videoOutStem, video.status]),
+    outStemList.map((outStem) => [outStem[0], Number(outStem.at(-1)), 3, outStem, outStem[0], 'done']));
+  assert.equal(manifest.runOptions.repeatCount, 3);
+  assert.deepEqual(manifest.counts, { total: 6, done: 6, failed: 0, skipped: 0 });
+  const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(summary, /^작업 6\(영상 2 × 반복 3\) · 완료 6 · 실패 0 · 건너뜀 0$/m);
+  assert.match(summary, /^ {2}✔ b r3\/3: AD 2개$/m);
+  assert.ok(lineList.includes(`[factory] 영상 2개 × 반복 3 = 작업 6개(건너뜀 0) · 동시 2 · 출력 ${outDir}`), lineList.join('\n'));
+  assert.ok(lineList.includes('[factory] ▶ a r2/3'), lineList.join('\n'));
+  assert.ok(lineList.includes('[factory] a r2/3 영상 10/60초 · AD 1'), lineList.join('\n'));
+  assert.ok(lineList.some((line) => /^\[factory\] ✔ \[\d\/6\] b r1\/3 AD 2개 · 1초$/.test(line)), lineList.join('\n'));
+});
+
+test('CLI --repeat: 건너뛰기는 작업(영상 × 회차)마다 정하고 반복 수는 견주지 않아 N 을 3 → 5 로 올리면 r4·r5 만 돌며, --repeat 1 결과(접미 없음)와는 서로 건너뛰지 않는다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4']);
+  const outDir = path.join(makeDir('repeat-resume'), 'run');
+  const runOnce = async (extraArgList, onLine) => {
+    const { lineList, log } = createLogCollector({ onLine });
+    const exitCode = await runFactoryCli({
+      argList: ['--input', inputDir, '--out', outDir, ...extraArgList], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    });
+    return { exitCode, lineList };
+  };
+  const countStartList = (outStemList) => outStemList.map((outStem) => (fs.existsSync(path.join(outDir, `${outStem}.log`)) ? countStart({ outDir, outStem }) : 0));
+  const repeatSummaryPath = path.join(outDir, 'repeat-summary.json');
+  assert.equal((await runOnce(['--repeat', '3'])).exitCode, 0);
+  // 지난 실행의 반복 요약은 이번 실행의 첫 기록 때 지운다(작업이 도는 동안 남아 있지 않다).
+  const staleSummaryList = [];
+  const grown = await runOnce(['--repeat', '5'], (line) => {
+    if (line === '[factory] ▶ a r4/5') staleSummaryList.push(fs.existsSync(repeatSummaryPath));
+  });
+  assert.equal(grown.exitCode, 0);
+  assert.deepEqual(staleSummaryList, [false]);
+  assert.deepEqual(countStartList(['a-r1', 'a-r2', 'a-r3', 'a-r4', 'a-r5']), [1, 1, 1, 1, 1]);
+  assert.deepEqual(grown.lineList.filter((line) => line.startsWith('[factory] ↻')), [], '반복 수가 달라도 같은 회차는 같은 결과다');
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.deepEqual(manifest.videoList.map((video) => [video.outStem, Boolean(video.isSkipped), video.repeatIndex, video.repeatCount]), [
+    ['a-r1', true, 1, 5], ['a-r2', true, 2, 5], ['a-r3', true, 3, 5], ['a-r4', false, 4, 5], ['a-r5', false, 5, 5],
+  ], '건너뛴 회차도 이번 실행의 반복 수를 적는다');
+  assert.deepEqual(readJson(path.join(outDir, 'a-r4_SEEON_AD.json')).repeat, { index: 4, count: 5 });
+  assert.deepEqual(readJson(path.join(outDir, 'a-r1_SEEON_AD.json')).repeat, { index: 1, count: 3 }, '건너뛴 결과는 그대로 둔다');
+  const grownSummary = readJson(repeatSummaryPath);
+  assert.deepEqual([grownSummary.repeatCount, grownSummary.videoList[0].runCount, grownSummary.videoList[0].completedRunList, grownSummary.videoList[0].failedRunList], [
+    5, 5, [1, 2, 3, 4, 5], [],
+  ]);
+  const grownText = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(grownText, /^ {2}✔ a r1\/5: AD 2개 \(이전 실행\)$/m);
+  assert.match(grownText, /^ {2}a: 반복 5회\(완료 5\): AD 평균 2\(2~2\) · 늘 나온 AD 2 · 가끔 나온 AD 0$/m);
+  assert.doesNotMatch(grownText, /r\d\/3/);
+
+  assert.equal((await runOnce([])).exitCode, 0);
+  assert.deepEqual(countStartList(['a', 'a-r1']), [1, 1], '--repeat 1 은 접미 없는 이름이라 -r1 결과를 건너뛰지 않고 따로 돈다');
+  assert.equal(fs.existsSync(repeatSummaryPath), false, '--repeat 1 실행도 지난 반복 요약을 지운다');
+  assert.equal((await runOnce(['--repeat', '2'])).exitCode, 0);
+  assert.deepEqual(countStartList(['a', 'a-r1', 'a-r2']), [1, 1, 1], '-r1·-r2 는 이전 결과를 건너뛴다');
+
+  // 다른 회차로 만든 결과가 그 이름에 있으면(손으로 옮김 등) 다시 만든다.
+  fs.copyFileSync(path.join(outDir, 'a-r1_SEEON_AD.json'), path.join(outDir, 'a-r2_SEEON_AD.json'));
+  const moved = await runOnce(['--repeat', '2']);
+  assert.deepEqual(moved.lineList.filter((line) => line.startsWith('[factory] ↻')), ['[factory] ↻ a r2/2 이전 완료 결과와 달라 다시 만든다 — 반복 회차 1 → 2']);
+  assert.deepEqual(countStartList(['a-r1', 'a-r2']), [1, 2]);
+});
+
+test('CLI --repeat: N 을 5 → 3 으로 줄이면 r1~r3 만 이번 실행이고, 반복 요약·작업 줄은 지금 반복 수(3)를 쓴다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4']);
+  const outDir = path.join(makeDir('repeat-shrink'), 'run');
+  const runOnce = async (repeatText) => {
+    const { lineList, log } = createLogCollector();
+    const exitCode = await runFactoryCli({
+      argList: ['--input', inputDir, '--out', outDir, '--repeat', repeatText], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    });
+    return { exitCode, lineList };
+  };
+  assert.equal((await runOnce('5')).exitCode, 0);
+  const shrunk = await runOnce('3');
+  assert.equal(shrunk.exitCode, 0);
+  assert.deepEqual(['a-r1', 'a-r2', 'a-r3', 'a-r4', 'a-r5'].map((outStem) => countStart({ outDir, outStem })), [1, 1, 1, 1, 1], '줄여도 다시 돌지 않는다');
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.equal(manifest.runOptions.repeatCount, 3);
+  assert.deepEqual(manifest.videoList.map((video) => [video.outStem, Boolean(video.isSkipped), video.repeatIndex, video.repeatCount]), [
+    ['a-r1', true, 1, 3], ['a-r2', true, 2, 3], ['a-r3', true, 3, 3],
+  ]);
+  const repeatSummary = readJson(path.join(outDir, 'repeat-summary.json'));
+  assert.deepEqual([repeatSummary.repeatCount, repeatSummary.videoList[0].runCount, repeatSummary.videoList[0].completedRunList, repeatSummary.videoList[0].failedRunList], [
+    3, 3, [1, 2, 3], [],
+  ]);
+  assert.deepEqual(repeatSummary.videoList[0].adCount.countList, [2, 2, 2]);
+  const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(summary, /^작업 3\(영상 1 × 반복 3\) · 완료 3 · 실패 0 · 건너뜀 3$/m);
+  assert.match(summary, /^ {2}✔ a r3\/3: AD 2개 \(이전 실행\)$/m);
+  assert.match(summary, /^ {2}a: 반복 3회\(완료 3\): AD 평균 2\(2~2\) · 늘 나온 AD 2 · 가끔 나온 AD 0$/m);
+  assert.doesNotMatch(summary, /r[45]|\/5/);
+  assert.ok(shrunk.lineList.at(-1).includes('  a: 반복 3회(완료 3)'), shrunk.lineList.join('\n'));
+});
+
+test('CLI --repeat: 반복 요약을 만들지 못해도(결과 JSON 의 adList 모양이 이상함) 경고만 찍고 마지막 manifest·summary 는 쓴다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4']);
+  const outDir = path.join(makeDir('repeat-summary-error'), 'run');
+  const runOnce = async () => {
+    const { lineList, log } = createLogCollector();
+    const exitCode = await runFactoryCli({
+      argList: ['--input', inputDir, '--out', outDir, '--repeat', '2'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    });
+    return { exitCode, lineList };
+  };
+  assert.equal((await runOnce()).exitCode, 0);
+  // 건너뛰기 정체(영상·회차·코드 버전·결과 설정)는 그대로 두고 adList 만 배열이 아니게 바꾼다.
+  const jsonPath = path.join(outDir, 'a-r1_SEEON_AD.json');
+  fs.writeFileSync(jsonPath, JSON.stringify({ ...readJson(jsonPath), adList: {} }));
+  const rerun = await runOnce();
+  assert.equal(rerun.exitCode, 0);
+  assert.equal(rerun.lineList.filter((line) => line.startsWith('[factory] 반복 요약을 만들지 못했다: ')).length, 1, rerun.lineList.join('\n'));
+  const manifest = readJson(path.join(outDir, 'manifest.json'));
+  assert.notEqual(manifest.endedAt, null, '마지막 manifest 를 쓴다');
+  assert.deepEqual(manifest.counts, { total: 2, done: 2, failed: 0, skipped: 2 });
+  assert.equal(fs.existsSync(path.join(outDir, 'repeat-summary.json')), false, '지난 반복 요약은 지우고 새로 쓰지 못했다');
+  const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(summary, /^작업 2\(영상 1 × 반복 2\) · 완료 2 · 실패 0 · 건너뜀 2$/m);
+  assert.doesNotMatch(summary, /반복 요약/);
+});
+
+test('CLI --repeat 1: 출력 이름·파일·manifest·summary·결과 JSON 이 --repeat 을 주지 않은 실행과 같다(결과 JSON 의 repeat 은 { index: 1, count: 1 })', async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b-fail.mp4']);
+  const runInto = async (name, extraArgList) => {
+    const outDir = path.join(makeDir(name), 'run');
+    const { lineList, log } = createLogCollector();
+    assert.equal(await runFactoryCli({
+      argList: ['--input', inputDir, '--out', outDir, '--concurrency', '1', ...extraArgList], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    }), 1);
+    const manifest = readJson(path.join(outDir, 'manifest.json'));
+    const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+    return {
+      outDir, fileList: listRunFile(outDir), report: readJson(path.join(outDir, 'a_SEEON_AD.json')),
+      manifest: { ...manifest, startedAt: null, endedAt: null, runOptions: { ...manifest.runOptions, out: null } },
+      summary: summary.replace(manifest.startedAt, '<시작>').replace(manifest.endedAt, '<끝>'),
+      lineList: lineList.map((line) => line.replace(outDir, '<출력>').replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<시각>')),
+    };
+  };
+  const plain = await runInto('repeat-none', []);
+  const single = await runInto('repeat-one', ['--repeat', '1']);
+  assert.deepEqual(single.fileList, plain.fileList);
+  assert.deepEqual(plain.fileList, ['a_SEEON_AD.json', 'a_SEEON_AD.mp3', 'manifest.json', 'summary.txt']);
+  assert.deepEqual(single.manifest, plain.manifest);
+  assert.equal(Object.hasOwn(plain.manifest.runOptions, 'repeatCount'), false, 'runOptions 모양이 이전과 같다');
+  assert.deepEqual(plain.manifest.videoList.map((video) => Object.keys(video).sort()), [
+    ['adCount', 'droppedCount', 'durationMs', 'filePath', 'isPageTransitionIncluded', 'language', 'outStem', 'outputPathMap', 'processingMs', 'status', 'videoId', 'warningList'],
+    ['errorMessage', 'filePath', 'isPageTransitionIncluded', 'language', 'outStem', 'status', 'videoId'],
+  ]);
+  assert.equal(single.summary, plain.summary);
+  assert.doesNotMatch(plain.summary, /반복/);
+  assert.deepEqual(single.lineList.filter((line) => !/ · \d+초$/.test(line)), plain.lineList.filter((line) => !/ · \d+초$/.test(line)));
+  assert.deepEqual(plain.report.repeat, { index: 1, count: 1 });
+  assert.deepEqual(single.report.repeat, { index: 1, count: 1 });
+});
+
+test('CLI --repeat: 끝나면 repeat-summary.json 과 summary.txt·터미널의 영상별 반복 줄을 남기고, 실패한 회차는 요약 수치에서 빠져 failedRunList 에 남는다', async () => {
+  const inputDir = makeInputDir(['deck-vary.mp4', 'talk-flaky.mp4']);
+  const outDir = path.join(makeDir('repeat-summary'), 'run');
+  const { lineList, log } = createLogCollector();
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, '--repeat', '3'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 1, '실패한 회차가 있으면 종료 코드 1');
+  const repeatSummary = readJson(path.join(outDir, 'repeat-summary.json'));
+  assert.equal(repeatSummary.repeatCount, 3);
+  const [deckSummary, talkSummary] = repeatSummary.videoList;
+  assert.deepEqual([deckSummary.videoId, deckSummary.runCount, deckSummary.completedRunList, deckSummary.failedRunList], ['deck-vary', 3, [1, 2, 3], []]);
+  assert.deepEqual(deckSummary.adCount, { countList: [2, 3, 2], mean: 2.33, min: 2, max: 3 });
+  assert.deepEqual(deckSummary.droppedReasonCountList, [{ feature_off: 1 }, { feature_off: 1 }, { feature_off: 1 }]);
+  assert.deepEqual(deckSummary.clusterList.map((cluster) => [cluster.type, cluster.hitRunList, cluster.playedMediaMs, cluster.textList]), [
+    ['deixis', [1, 2, 3], { median: 10000, min: 10000, max: 10500 }, ['빨간 막대 그래프', '왼쪽 막대 그래프']],
+    ['interpretation', [1, 2, 3], { median: 30000, min: 30000, max: 30000 }, ['250은 연봉 조정 금액을 의미']],
+    ['visual_description', [2], { median: 45000, min: 45000, max: 45000 }, ['여행 사진이 있는 페이지']],
+  ]);
+  assert.deepEqual([talkSummary.completedRunList, talkSummary.failedRunList], [[1, 3], [{ repeatIndex: 2, reason: 'talk-flaky 영상 스트림이 없다' }]]);
+  assert.deepEqual(talkSummary.adCount.countList, [2, 2]);
+  const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(summary, /^ {2}✖ talk-flaky r2\/3: talk-flaky 영상 스트림이 없다$/m);
+  assert.match(summary, /^ {2}deck-vary: 반복 3회\(완료 3\): AD 평균 2\.3\(2~3\) · 늘 나온 AD 2 · 가끔 나온 AD 1$/m);
+  assert.match(summary, /^ {2}talk-flaky: 반복 3회\(완료 2\): AD 평균 2\(2~2\) · 늘 나온 AD 2 · 가끔 나온 AD 0$/m);
+  assert.ok(lineList.at(-1).includes('  deck-vary: 반복 3회(완료 3): AD 평균 2.3(2~3)'), '터미널 마지막 요약에도 반복 줄을 찍는다');
+});
+
+test('CLI --repeat: 중단돼도 끝난 회차까지로 반복 요약을 쓰고, 중단된·띄우지 않은 회차는 failedRunList 에 남는다', { timeout: 20000 }, async () => {
+  const inputDir = makeInputDir(['a.mp4', 'b-hang.mp4']);
+  const outDir = path.join(makeDir('repeat-signal'), 'run');
+  const signalSource = new EventEmitter();
+  const { log } = createLogCollector({
+    onLine: (line) => {
+      if (line === '[factory] ▶ b-hang r1/2') setTimeout(() => signalSource.emit('SIGINT', 'SIGINT'), 150);
+    },
+  });
+  assert.equal(await runFactoryCli({
+    argList: ['--input', inputDir, '--out', outDir, '--repeat', '2', '--concurrency', '1'], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH, signalSource, ...PASSING_PREFLIGHT,
+  }), 130);
+  const repeatSummary = readJson(path.join(outDir, 'repeat-summary.json'));
+  assert.equal(repeatSummary.interruptedBy, 'SIGINT');
+  assert.deepEqual(repeatSummary.videoList.map((video) => [video.videoId, video.completedRunList, video.failedRunList]), [
+    ['a', [1, 2], []],
+    ['b-hang', [], [{ repeatIndex: 1, reason: '중단됨(SIGINT)' }, { repeatIndex: 2, reason: '돌지 않았다(중단 등으로 띄우지 않음)' }]],
+  ]);
+  const summary = fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8');
+  assert.match(summary, /^ {2}a: 반복 2회\(완료 2\): AD 평균 2\(2~2\) · 늘 나온 AD 2 · 가끔 나온 AD 0$/m);
+  assert.match(summary, /^ {2}b-hang: 반복 2회\(완료 0\): 완료 결과 없음$/m);
+});

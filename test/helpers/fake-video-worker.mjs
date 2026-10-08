@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { buildOutputPathMap } from '../../src/runner/output-paths.mjs';
-import { readResultIdentity } from '../../src/runner/result-identity.mjs';
+import { readResultIdentity, buildRepeatRecord } from '../../src/runner/result-identity.mjs';
 import { loadPipelineConfig } from '../../src/product/product-loader.mjs';
 
 // video-worker.mjs 와 같은 메시지 규약으로 도는 가짜 워커. 제품 파이프라인 없이 videoId 에 든 낱말로 결과를 고른다.
@@ -8,6 +8,7 @@ import { loadPipelineConfig } from '../../src/product/product-loader.mjs';
 // stubborn → SIGTERM 을 무시하고 끝나지 않음, hang → 끝나지 않다가 SIGTERM 에 정리하고 종료 1,
 // linger → hang 과 같되 SIGTERM·SIGHUP 뒤 정리에 LINGER_MS 가 걸림(정리 중에 신호가 더 오는 상황),
 // slow → 영상 길이 1000ms 를 알린 뒤 500ms 지나 done, warn → 경고(VLM 시간 초과) 를 담아 done, 그 밖 → progress 뒤 mp3·JSON 을 쓰고 done.
+// 반복 회차(job.repeatIndex)를 보는 낱말: flaky → 2회차만 failed, vary → 회차마다 AD 가 조금씩 다름(buildFakeAdList).
 // 끝나지 않는 워커도 HANG_LIMIT_MS 뒤에는 스스로 끝내, 멈추기가 회귀해도 테스트 프로세스가 영영 남지 않게 한다.
 const HANG_LIMIT_MS = 30000;
 const LINGER_MS = 400;
@@ -23,21 +24,37 @@ function hangUntilLimit() {
 }
 
 const WARN_WARNING_LIST = [{ code: 'vlm_timeout', count: 4, message: 'VLM 호출 시간 초과 4/16건' }];
+const FAKE_DROPPED_LIST = [{ text: '슬라이드 1', type: 'page_transition', eventMediaMs: 1000, reason: 'feature_off' }];
+
+// 기본은 회차와 상관없이 같은 AD 2개. vary 면 2회차에만 묘사가 하나 더 나오고 3회차는 지시가 0.5초 늦게 다른 문장으로 나온다
+// (3번 돌리면 AD 2·3·2개, 늘 나온 AD 2 · 가끔 나온 AD 1).
+function buildFakeAdList(job) {
+  const repeatIndex = job.repeatIndex ?? 1;
+  const isVary = job.videoId.includes('vary');
+  const adList = [
+    { id: 'ad-001', type: 'deixis', text: isVary && repeatIndex === 3 ? '왼쪽 막대 그래프' : '빨간 막대 그래프', eventMediaMs: 9000, playedMediaMs: isVary && repeatIndex === 3 ? 10500 : 10000 },
+    { id: 'ad-002', type: 'interpretation', text: '250은 연봉 조정 금액을 의미', eventMediaMs: 29000, playedMediaMs: 30000 },
+  ];
+  if (isVary && repeatIndex === 2) adList.push({ id: 'ad-003', type: 'visual_description', text: '여행 사진이 있는 페이지', eventMediaMs: 44000, playedMediaMs: 45000 });
+  return adList;
+}
 
 function writeDoneOutput({ job, outDir, runConcurrency }) {
   const warningList = job.videoId.includes('warn') ? WARN_WARNING_LIST : [];
+  const adList = buildFakeAdList(job);
   const pathMap = buildOutputPathMap({ outDir, outStem: job.outStem });
   fs.writeFileSync(pathMap.mp3Path, 'mp3');
-  // AD 기록 JSON 과 같은 자리(video·seeonMeet·factory·config)에 작업 정보·코드 버전·결과 설정을 남긴다.
+  // AD 기록 JSON 과 같은 자리(video·seeonMeet·factory·repeat·config)에 작업 정보·코드 버전·결과 설정을 남긴다.
   const { versionMap, resultConfig } = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(process.env) });
   fs.writeFileSync(pathMap.jsonPath, JSON.stringify({
     schemaVersion: 1, isComplete: true,
-    video: { videoId: job.videoId, file: job.filePath, language: job.language }, ...versionMap,
+    video: { videoId: job.videoId, file: job.filePath, durationMs: 60000, language: job.language }, ...versionMap,
+    repeat: buildRepeatRecord({ job }),
     config: { isPageTransitionIncluded: Boolean(job.isPageTransitionIncluded), resultConfig, runConcurrency },
-    incompleteReasonList: [], warningList,
+    adList, droppedList: FAKE_DROPPED_LIST, incompleteReasonList: [], warningList,
   }));
   return {
-    videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: 2, droppedCount: 1, warningList,
+    videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: 60000, processingMs: 1200, adCount: adList.length, droppedCount: FAKE_DROPPED_LIST.length, warningList,
     outputPathMap: { mp3: `${job.outStem}_SEEON_AD.mp3`, json: `${job.outStem}_SEEON_AD.json` },
   };
 }
@@ -50,7 +67,7 @@ process.on('message', (message) => {
     setTimeout(() => process.exit(137), 10);
     return;
   }
-  if (job.videoId.includes('fail')) {
+  if (job.videoId.includes('fail') || (job.videoId.includes('flaky') && job.repeatIndex === 2)) {
     console.error(`[fake-worker] ${job.videoId} 실패`);
     process.send({ type: 'failed', message: `${job.videoId} 영상 스트림이 없다` }, () => process.exit(1));
     return;

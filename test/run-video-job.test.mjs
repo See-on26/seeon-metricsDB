@@ -58,4 +58,5 @@ test('프레임 읽기가 중간에 실패하면 mp3·JSON 은 남기되 JSON �
     ['broken', filePath, 'auto', false],
   );
   assert.deepEqual(progressList[0], { videoTimeMs: 0, durationMs: 6000, adCount: 0 }, '준비 전에 영상 길이를 먼저 알린다');
+  assert.deepEqual(report.repeat, { index: 1, count: 1 }, '회차 필드가 없는 작업(--repeat 1)은 1회차 · 1번');
 });

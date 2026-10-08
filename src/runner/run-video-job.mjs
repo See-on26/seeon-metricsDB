@@ -3,7 +3,7 @@ import path from 'node:path';
 import { MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 import { bootProductPipeline } from '../product/boot-pipeline.mjs';
 import { getJudgeSourceCountMap, getTriggerAnalyzerCountMap } from '../product/product-loader.mjs';
-import { readVersionMap, buildResultConfig } from './result-identity.mjs';
+import { readVersionMap, buildResultConfig, buildRepeatRecord } from './result-identity.mjs';
 import { createVirtualClock } from '../clock/virtual-clock.mjs';
 import { resolveFfmpegPaths } from '../media/ffmpeg.mjs';
 import { probeVideo } from '../media/probe.mjs';
@@ -109,9 +109,10 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   const warningList = buildWarningList({
     callLog, judgeSourceCountMap, judgeBackend: pipelineConfig.judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList,
   });
-  // 공장 버전은 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
+  // 공장 버전·반복 회차는 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
   const finalReport = {
     schemaVersion: report.schemaVersion, isComplete: report.isComplete, video: report.video, seeonMeet: report.seeonMeet, factory: versionMap.factory,
+    repeat: buildRepeatRecord({ job }),
     ...report,
     isComplete: incompleteReasonList.length === 0,
     // swallowedErrorCountMap: 연결 코드가 제품처럼 삼킨 오류 수(task: 비동기 작업 이름별, ipc: IPC 채널별). 0 이 아니면 연결 코드 버그를 의심한다.
