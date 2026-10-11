@@ -65,7 +65,7 @@ export function createProductScope({ clock, fetch }) {
   };
 }
 
-// 제품 paths.js 는 저장소 안 out/ 을 가리킨다. 영상별 작업 폴더로 돌린다(index.js:45 가 OUT_DIR·CONTEXT_DIR 를 읽는다).
+// 제품 paths.js 는 저장소 안 out/ 을 가리킨다. 영상별 작업 폴더로 돌린다(index.js:52 가 OUT_DIR·CONTEXT_DIR 를 읽는다).
 function installPathsShim({ outDir }) {
   const pathsFile = require.resolve(resolveProductPath('src/main/paths.js'));
   const realPaths = require(pathsFile);

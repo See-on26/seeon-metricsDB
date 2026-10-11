@@ -27,7 +27,7 @@ const SESSION_END_LIMIT_MS = 30000;
 // 이보다 짧은 원음 꼬리는 표본 하나도 안 되어 붙이지 않는다.
 const MIN_SOURCE_TAIL_MS = 1;
 
-// main.js:986-994 describeBeforeWindow
+// main.js:1006-1014 describeBeforeWindow
 function describeBeforeWindow({ policy, anchorTs, nowPerf }) {
   const { beforeMs } = policy || {};
   if (Number.isFinite(anchorTs)) {
@@ -48,7 +48,7 @@ function appendSourceTail({ pieceList, fromMediaMs, toMediaMs }) {
   return { pieceList: [...pieceList, tailPiece], appendedTailMs: tailMs };
 }
 
-// main.js 의 attemptStartExperiment(1764-1871)·stopExperiment(1877-1935)·finalizeSession(1937-1953) 을 영상 하나의 세션으로 옮긴다.
+// main.js 의 attemptStartExperiment(1833-1944)·stopExperiment(1950-2011)·finalizeSession(2013-2029) 을 영상 하나의 세션으로 옮긴다.
 // 회의 캡처 시작 = 영상 0ms, 영상 끝(D) 에서 캡처 쪽 감지를 멈추고, 지연 재생·생성 중인 해설이 빠질 때까지(배수) 돌린 뒤 정지한다.
 export function createSessionSimulator({ clock, bridge, video, prep, options, workDir, log = console, onProgress = () => {} }) {
   const mediaDurationMs = video.probe.durationMs;
@@ -76,7 +76,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
   let startElapsedMs = null;
   let playingUntilElapsedMs = -Infinity;
 
-  // main.js:1590-1595 onPipelineEvent. asr 이벤트에는 main 트리거가 뽑은 후보 구(triggerCandidateList)가 실려 온다.
+  // main.js:1653-1658 onPipelineEvent. asr 이벤트에는 main 트리거가 뽑은 후보 구(triggerCandidateList)가 실려 온다.
   bridge.onRendererEvent('pipeline-event', ({ payload, requestContext }) => {
     if (payload.type === 'asr') { asrGlue.handleAsrTranscript(payload); return; }
     if (payload.type === 'caption') outputGlue.handleCaptionEvent({ payload, requestContext });
@@ -137,7 +137,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
 
   async function start() {
     const { state, policy } = ctx;
-    // 꺼 둔 분류를 main 에 먼저 알린다(main.js:1233-1238, 1294).
+    // 꺼 둔 분류를 main 에 먼저 알린다(main.js:1257-1262, 1318).
     await invokeUnderClock({
       channel: 'pipeline-feature-toggles', payload: { disabledClassList: listDisabledNarrationClass({ store: featureToggleStore }) },
       limitMs: SESSION_START_LIMIT_MS,
@@ -192,7 +192,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     playbackChain?.stop();
   }
 
-  // main.js:1937-1953 finalizeSession. 제품처럼 정지 뒤 ASR 드레인을 main 이 가상 setTimeout 으로 기다리므로 시계를 돌리며 기다린다.
+  // main.js:2013-2029 finalizeSession. 제품처럼 정지 뒤 ASR 드레인을 main 이 가상 setTimeout 으로 기다리므로 시계를 돌리며 기다린다.
   async function endPipelineSession() {
     ctx.state.currentSessionId = null;
     let endResult = null;

@@ -17,7 +17,7 @@ const buildCaptionKey = ({ ts, text }) => `${ts}|${text}`;
 // 새 필드를 더해도 여기에 넣기 전에는 기록에 실리지 않는다(Bedrock 토큰 bedrockApiKey 는 넣지 않는다).
 export const REPORT_MODEL_CONFIG_KEY_LIST = [
   'vlmUrl', 'vlmModel', 'asrUrl', 'asrLanguage', 'questionAsrLanguage', 'ttsUrl', 'ttsLongUrl', 'embedUrl',
-  'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend', 'judgeGpuUrl', 'judgeGpuModel',
+  'slideTextBackend', 'ocrUrl', 'gapSource', 'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend', 'judgeGpuUrl', 'judgeGpuModel',
   'summaryModelId', 'summaryRewriteModelId', 'gapModelByModeMap', 'routerMode', 'isScaleEnabled',
   'isVlmFallbackEnabled', 'vlmFallbackModelId', 'hasBedrockCredentials',
 ];

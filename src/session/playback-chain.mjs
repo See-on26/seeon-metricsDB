@@ -4,9 +4,9 @@ import {
 import { FakeDelaySource, FakeAudioContext, createFakeCaptureStream } from './fake-media.mjs';
 
 // 교차 모드의 재생 사슬을 세운다: 지연 재생(DelayBuffer) → 삽입 시점 감시(NarrationScheduler) → 보류 게이트 → CaptionNarrator.
-// main.js 의 startDelayBufferIfNeeded(283-336)·startNarrationPlayer(260-276)·모듈 범위 CaptionNarrator(121-129)·narrationGate(134-137) 를 옮긴다.
+// main.js 의 startDelayBufferIfNeeded(295-348)·startNarrationPlayer(272-288)·모듈 범위 CaptionNarrator(133-141)·narrationGate(146-149) 를 옮긴다.
 // 브라우저 쪽(StreamDelaySource·<audio>·AudioContext·캡처 스트림)만 대역이고 클래스는 제품 그대로다.
-// prepareAudio 는 재생 차례가 온 해설의 소리를 주는 함수다(main.js:122 narrationAudio.take). 기본은 출력 연결 코드가 core 에 둔 prefetcher 다.
+// prepareAudio 는 재생 차례가 온 해설의 소리를 주는 함수다(main.js:134 narrationAudio.take). 기본은 출력 연결 코드가 core 에 둔 prefetcher 다.
 export function startPlaybackChain({
   ctx, recorder, onAdStart = () => {}, onAdStop = () => {}, onNarrationDrop = () => {}, prepareAudio = (entry) => ctx.core.narrationAudio.take(entry),
 }) {
@@ -27,7 +27,7 @@ export function startPlaybackChain({
     onDrop: onNarrationDrop,
     isEntryEnabled: (entry) => ctx.featureToggleStore.isClassOn(entry.narrationClass),
     getRateRange: () => getCatchupRateRange({ mode }),
-    // 교차 모드는 따라잡기를 DelayBuffer 가 맡는다(main.js:128). 그래서 CaptionNarrator 의 실제 setTimeout 따라잡기(caption-narrator.js:245)는 돌지 않는다.
+    // 교차 모드는 따라잡기를 DelayBuffer 가 맡는다(main.js:140). 그래서 CaptionNarrator 의 실제 setTimeout 따라잡기(caption-narrator.js:245)는 돌지 않는다.
     isCatchupDelegated: () => true,
     now: () => clock.nowPerf(),
     createAudioContext: () => new FakeAudioContext({
@@ -67,7 +67,7 @@ export function startPlaybackChain({
 
   return {
     ...chain,
-    // stopExperiment(main.js:1877-1935) 의 내레이션 출력기 → 해설 보류 게이트(+ 미리 만들기 비움) → 지연 버퍼(stopDelayBuffer 388-399)
+    // stopExperiment(main.js:1950-2011) 의 내레이션 출력기 → 해설 보류 게이트(+ 미리 만들기 비움) → 지연 버퍼(stopDelayBuffer 400-411)
     // 순서로 정리한다. 재생하지 못한 해설(소리 나기 전 해설·대기 줄·보류·삽입 대기)은 제품처럼 모두 stopped 로 알린다.
     stop() {
       chain.narrator.stop();

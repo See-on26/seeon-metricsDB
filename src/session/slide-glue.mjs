@@ -9,10 +9,10 @@ import {
 
 const LOCAL_EMBEDDING_WARNING = '[slide] GPU 임베딩 서버 미연결 — 로컬 그리드 임베딩으로 폴백(정확도 낮음, 고지는 유지)';
 
-// main.js 의 slideDwellGate 콜백(553-581)·samplePointingFrame(657-675)·detectSlideTransition(677-693)·
-// confirmSlideCandidate(695-741)·releasePendingTransition(744-746)·requestPageTransitionNarration(748-785)·
-// attachPointingMotion(943-956)·saveSlideFrameWithMark(959-966)·saveAnnotationSnapshot(968-980).
-// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:563, 740).
+// main.js 의 slideDwellGate 콜백(566-594)·samplePointingFrame(671-689)·detectSlideTransition(691-707)·
+// confirmSlideCandidate(709-755)·releasePendingTransition(758-760)·requestPageTransitionNarration(762-799)·
+// attachPointingMotion(963-976)·saveSlideFrameWithMark(979-986)·saveAnnotationSnapshot(988-1000).
+// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:576, 754).
 // 전환을 확정한 순간부터 고지의 삽입 시각이 정해질 때까지는 진행 중인 전환(pendingTransitions)이다. 화자 안내가 그 고지 뒤로 미뤄진다.
 export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   const { clock, bridge, state, core } = ctx;
@@ -117,7 +117,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     core.slideDwellGate.enter({ label: decision.label, isRevisit });
   }
 
-  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:641-655, 686)는 없다.
+  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:655-669, 700)는 없다.
   function detectSlideTransition({ imageData, ts }) {
     const verdict = core.histogramGate.sample({ imageData, ts });
     if (!verdict.isTransition && !verdict.isFirst) return;
@@ -207,7 +207,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   }
 
   return {
-    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1842).
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1915).
     start() {
       isStopped = false;
       samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);

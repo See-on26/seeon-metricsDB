@@ -88,7 +88,7 @@ test('제품 PointingLocator 가 흰 상자 자리를 찾는다(포인팅은 재
   assert.ok(motion.rect.x <= 0.13 && motion.rect.x + motion.rect.w >= 0.24 && motion.rect.w < 0.3, JSON.stringify(motion.rect));
 });
 
-test('포인팅 crop 식은 main.js:580-586 과 같다(여백 0.12, 0~1 로 자름)', () => {
+test('포인팅 crop 식은 main.js:625-631 과 같다(여백 0.12, 0~1 로 자름)', () => {
   assert.deepEqual(narrowToPointingRegion({ sub: { x: 0.05, y: 0.5, w: 0.2, h: 0.6 } }),
     { x: 0, y: 0.38, w: 0.37, h: 0.62 });
 });

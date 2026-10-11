@@ -82,11 +82,65 @@ test('앞의 끝나지 않은 조각은 lead 로, lookahead 중 온 조각은 fo
   deliverAt(harness, 6800, { text: '이 그래프를 보시면', startMs: 3000, endMs: 6000, segmentList: [], triggerCandidateList: [GRAPH_CANDIDATE] });
   deliverAt(harness, 9200, { text: '매출이 늘었습니다.', startMs: 6000, endMs: 9000, segmentList: [], triggerCandidateList: [RISE_CANDIDATE] });
   await harness.clock.runUntil({ isDone: () => harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis') });
-  const { payload } = harness.bridge.invokeList.find((item) => item.channel === 'pipeline-deixis');
+  const deixisCallList = harness.bridge.invokeList.filter((item) => item.channel === 'pipeline-deixis');
+  const { payload } = deixisCallList[0];
   assert.equal(payload.utterance, '그래서 다음 자료로 이 그래프를 보시면 매출이 늘었습니다.');
   assert.equal(payload.afterTranscript, '매출이 늘었습니다.');
   assert.equal(payload.beforeTranscript, '그래서 다음 자료로 이 그래프를 보시면');
-  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE], '뒤 조각은 앞 후보의 문장으로만 붙고, 그 조각의 후보는 새 판단에 넣지 않는다(판정이 났거나 4초 쿨다운 안)');
+  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE, RISE_CANDIDATE], 'lookahead 중 온 뒤 조각의 후보도 같은 판단에 합친다');
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 30000 });
+  assert.equal(harness.bridge.invokeList.filter((item) => item.channel === 'pipeline-deixis').length, 1, '합친 조각으로 새 판단을 따로 만들지 않는다');
+  assert.deepEqual(harness.warnList, []);
+});
+
+const PLAIN_SEGMENT = { segmentList: [] };
+const findDebug = (harness, reason) => harness.bridge.sendList.filter(({ channel, payload }) => channel === 'pipeline-debug' && payload.reason === reason);
+
+test('판정 뒤 균형 보류(2.5초) 중에 온 뒤 조각의 후보는 같은 결정에 합쳐, 판정 때 뜬 화면과 함께 보류가 끝날 때 한 번에 보낸다', async () => {
+  const harness = setupDetection();
+  deliverAt(harness, 6800, { text: '이 그래프를 보시면', startMs: 3000, endMs: 6000, ...PLAIN_SEGMENT, triggerCandidateList: [GRAPH_CANDIDATE] });
+  deliverAt(harness, 9200, { text: '상반기에는 비슷하다가', startMs: 6000, endMs: 9000, ...PLAIN_SEGMENT });
+  // lookahead 는 9300ms 에 끝나 판정이 나고, 보류는 11800ms 까지다. 그 사이에 후보가 실린 뒤 조각이 온다.
+  deliverAt(harness, 11000, { text: '하반기에 크게 늘었습니다.', startMs: 9000, endMs: 10500, ...PLAIN_SEGMENT, triggerCandidateList: [RISE_CANDIDATE] });
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 30000 });
+  const deixisCallList = harness.bridge.invokeList.filter((item) => item.channel === 'pipeline-deixis');
+  assert.equal(deixisCallList.length, 1, '보류 중 후보로 새 판단을 따로 만들지 않는다');
+  assert.equal(deixisCallList[0].atElapsedMs, 6800 + 2500 + 2500);
+  assert.deepEqual(harness.captureList, [{ videoTimeMs: 6800 + 2500, normRect: null }], '화면은 판정이 난 때 한 번만 뜬다');
+  const { payload } = deixisCallList[0];
+  assert.equal(payload.utterance, '이 그래프를 보시면 상반기에는 비슷하다가 하반기에 크게 늘었습니다.');
+  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE, RISE_CANDIDATE]);
+  assert.equal(payload.eventVideoTimeMs, 6000, '해설 자리는 첫 후보 시각 그대로다');
+  const [joinDebug] = findDebug(harness, '조각을 문장 단위로 이어 붙임');
+  assert.match(joinDebug.payload.detail, /판단 전 보류 중 합친 뒤 조각 1개\)$/);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('보류가 끝난 뒤 온 후보는 앞 판정과 4초 안이어도 버리지 않고 새로 판단한다', async () => {
+  const harness = setupDetection();
+  deliverAt(harness, 6800, { text: '이 그래프를 보시면', startMs: 3000, endMs: 6000, ...PLAIN_SEGMENT, triggerCandidateList: [GRAPH_CANDIDATE] });
+  // 앞 후보 조각 끝(6000ms)과 3.5초 차이지만 ASR 이 늦게 와 보류(11800ms)가 끝난 뒤 도착한다.
+  deliverAt(harness, 12000, { text: '매출이 늘었습니다.', startMs: 6500, endMs: 9500, ...PLAIN_SEGMENT, triggerCandidateList: [RISE_CANDIDATE] });
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 30000 });
+  const deixisCallList = harness.bridge.invokeList.filter((item) => item.channel === 'pipeline-deixis');
+  assert.deepEqual(deixisCallList.map((call) => [call.atElapsedMs, call.payload.triggerCandidateList]), [
+    [6800 + 2500 + 2500, [GRAPH_CANDIDATE]],
+    [12000 + 2500 + 2500, [RISE_CANDIDATE]],
+  ]);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('보류 중에 세션을 멈춰 후보 스케줄러를 비우면 그 결정은 보내지 않고 작업도 남기지 않는다', async () => {
+  const harness = setupDetection();
+  deliverAt(harness, 6800, { text: '이 그래프를 보시면', startMs: 3000, endMs: 6000, ...PLAIN_SEGMENT, triggerCandidateList: [GRAPH_CANDIDATE] });
+  harness.clock.setTimeout(() => {
+    harness.ctx.state.isSessionActive = false;
+    harness.ctx.core.candidateScheduler.reset();
+  }, 10000);
+  await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 30000 });
+  assert.equal(harness.captureList.length, 1, '판정 때 화면은 떴다');
+  assert.equal(harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis'), false);
+  assert.equal(harness.ctx.getTaskCount(), 0);
   assert.deepEqual(harness.warnList, []);
 });
 

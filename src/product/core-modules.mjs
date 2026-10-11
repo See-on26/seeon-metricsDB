@@ -38,7 +38,7 @@ export {
   SilenceTrigger, evaluateSilencePrecondition, SILENCE_TRANSCRIPT_WINDOW_MS, SILENCE_SKIP_LABEL_MAP,
 } from '../../seeon-meet/src/renderer/core/trigger/silence-trigger.js';
 export {
-  DeixisCandidateScheduler, CANDIDATE_SOURCE_MAP,
+  DeixisCandidateScheduler, CANDIDATE_SOURCE_MAP, SUBMIT_RESULT_MAP,
 } from '../../seeon-meet/src/renderer/core/trigger/deixis-candidate-scheduler.js';
 export { judgeScreenDependency, SCREEN_DEPENDENCY_REASON_MAP } from '../../seeon-meet/src/renderer/core/trigger/screen-dependency.js';
 export { PointingLocator, describeDirection } from '../../seeon-meet/src/renderer/core/trigger/pointing-locator.js';
