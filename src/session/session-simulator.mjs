@@ -57,7 +57,8 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
   let fatalError = null;
   const frameAccess = createFrameAccess({
     clock, frameReader: prep.frameReader, filePath: video.filePath, mediaDurationMs,
-    frameWidth: video.probe.width, frameHeight: video.probe.height, ffmpegPath: options.ffmpegPath,
+    frameWidth: video.probe.frameWidth, frameHeight: video.probe.frameHeight,
+    displayWidth: video.probe.displayWidth, displayHeight: video.probe.displayHeight, ffmpegPath: options.ffmpegPath,
     timeoutMs: options.frameIoTimeoutMs ?? FRAME_IO_TIMEOUT_MS, log,
     onFatal: (error) => { fatalError ??= error; },
   });
