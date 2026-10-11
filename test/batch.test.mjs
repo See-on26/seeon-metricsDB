@@ -659,8 +659,8 @@ test('결과 설정: 결과를 바꾸는 모델·판정 백엔드·라우터·�
     pipelineConfig: readPipelineConfig({ SEEON_VLM_MODEL: 'vlm-x', SEEON_JUDGE_BACKEND: 'bedrock', AWS_BEARER_TOKEN_BEDROCK: 'secret', SEEON_VLM_URL: 'http://127.0.0.1:9/v' }),
   });
   assert.deepEqual(Object.keys(resultConfig).sort(), [
-    'bedrockModelId', 'delayMs', 'gapModelId', 'isScaleEnabled', 'isVlmFallbackEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
-    'mode', 'routerMode', 'vlmFallbackModelId', 'vlmModel',
+    'bedrockModelId', 'delayMs', 'gapModelId', 'gapSource', 'isScaleEnabled', 'isVlmFallbackEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
+    'mode', 'routerMode', 'slideTextBackend', 'vlmFallbackModelId', 'vlmModel',
   ]);
   assert.deepEqual([resultConfig.mode, resultConfig.delayMs, resultConfig.vlmModel, resultConfig.judgeBackend], ['delayed', 10000, 'vlm-x', 'bedrock']);
   assert.equal(JSON.stringify(resultConfig).includes('secret'), false);
@@ -688,7 +688,10 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
   const recordedConfig = JSON.parse(fs.readFileSync(path.join(outDir, 'a_SEEON_AD.json'), 'utf8')).config;
   assert.equal(JSON.stringify(recordedConfig).includes('secret'), false);
   // 견주는 모델 항목은 기록된 modelConfig(허용 목록 모양)에 있고 값도 같다.
-  const comparedModelKeyList = ['vlmModel', 'isVlmFallbackEnabled', 'vlmFallbackModelId', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled'];
+  const comparedModelKeyList = [
+    'vlmModel', 'isVlmFallbackEnabled', 'vlmFallbackModelId', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled',
+    'slideTextBackend', 'gapSource',
+  ];
   for (const key of comparedModelKeyList) {
     assert.ok(Object.hasOwn(recordedConfig.modelConfig, key), `기록 허용 목록에 ${key} 가 없다`);
     assert.equal(recordedConfig.resultConfig[key], recordedConfig.modelConfig[key], key);
@@ -710,4 +713,13 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
   });
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_JUDGE_GPU_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] },
     '판정 주소만 바뀐 것은 같은 결과다');
+  // 슬라이드 전사 백엔드를 바꾸면(A/B) 다른 결과로 보고 다시 돈다. OCR 주소만 바꾼 것은 같은 결과다.
+  assert.equal(recordedConfig.resultConfig.slideTextBackend, 'vlm');
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_SLIDE_TEXT_BACKEND: 'ocr' }), {
+    status: 'mismatch', mismatchList: ['결과 설정 slideTextBackend vlm → ocr'],
+  });
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_OCR_URL: 'http://127.0.0.1:9/ocr' }), { status: 'done', mismatchList: [] },
+    'OCR 주소만 바뀐 것은 같은 결과다');
+  assert.equal(recordedConfig.resultConfig.gapSource, 'asr');
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_GAP_SOURCE: 'audio' }).mismatchList, ['결과 설정 gapSource asr → audio']);
 });
