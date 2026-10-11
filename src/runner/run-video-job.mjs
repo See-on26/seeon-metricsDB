@@ -105,9 +105,10 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
     judgeSourceCountMap, triggerAnalyzerCountMap,
     adFileByRef, outputFileName: path.basename(pathMap.mp3Path), renderedDurationMs, processingMs,
   });
-  const incompleteReasonList = buildIncompleteReasonList({ sessionResult, callLog });
+  const slideTextHealth = { slideTextBackend: pipelineConfig.slideTextBackend, slideText: report.stats.slideText };
+  const incompleteReasonList = buildIncompleteReasonList({ sessionResult, callLog, ...slideTextHealth });
   const warningList = buildWarningList({
-    callLog, judgeSourceCountMap, judgeBackend: pipelineConfig.judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList,
+    callLog, judgeSourceCountMap, judgeBackend: pipelineConfig.judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList, ...slideTextHealth,
   });
   // 공장 버전·반복 회차는 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
   const finalReport = {

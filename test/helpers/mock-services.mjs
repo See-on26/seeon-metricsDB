@@ -80,7 +80,7 @@ export async function startMockServices({
 } = {}) {
   const state = {
     asrIndex: 0, asrStatus: 200, ttsStatus: 200, routerGapVerdict: 'O', callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0, ocr: 0 },
-    ocrMeanScoreList: [0.95],
+    ocrMeanScoreList: [0.95], ocrStatus: 200,
   };
   const serverList = [];
   async function listen(handler) {
@@ -139,6 +139,7 @@ export async function startMockServices({
     if (new URL(request.url, 'http://mock').pathname === '/ocr') {
       const meanScore = state.ocrMeanScoreList[state.callCountMap.ocr % state.ocrMeanScoreList.length];
       state.callCountMap.ocr += 1;
+      if (state.ocrStatus !== 200) { sendJson(response, state.ocrStatus, { detail: 'mock OCR 장애' }); return; }
       const lineList = [{ text: '매출 추이', score: meanScore }, { text: '2분기 | 120억 원', score: meanScore }];
       sendJson(response, 200, { text: lineList.map((line) => line.text).join('\n'), lineList, meanScore, verticalBoxRatio: 0 });
       return;
@@ -161,6 +162,7 @@ export async function startMockServices({
     setTtsStatus: (status) => { state.ttsStatus = status; },
     setRouterGapVerdict: (verdict) => { state.routerGapVerdict = verdict; },
     setOcrMeanScoreList: (scoreList) => { state.ocrMeanScoreList = scoreList; },
+    setOcrStatus: (status) => { state.ocrStatus = status; },
     close: () => Promise.all(serverList.map((server) => new Promise((resolve) => server.close(resolve)))),
   };
 }

@@ -107,6 +107,44 @@ test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedroc
   assert.equal(formatWarningBrief([]), '');
 });
 
+const slideTextOf = ({ ocr = 0, vlm = 0, lowScore = 0, verticalText = 0, ocrError = 0, ocrBypass = 0 }) => ({
+  count: ocr + vlm, statusCountMap: { ready: ocr + vlm }, sourceCountMap: { ocr, vlm },
+  fallbackReasonCountMap: { low_score: lowScore, vertical_text: verticalText, ocr_error: ocrError, ocr_bypass: ocrBypass },
+});
+const HEALTHY_WARNING_INPUT = { judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: OK_SESSION, swallowedErrorCountMap: { task: {}, ipc: {} } };
+
+test('불완전·경고: ocr 백엔드에서 OCR 이 죽어 OCR 로 읽은 장이 없으면 불완전(ocr_unavailable), 일부만 넘겼으면 경고(ocr_fallback)다', () => {
+  const ocrDownLog = [call('ocr', { status: 503 }), call('vlm'), call('vlm'), call('vlm')];
+  // 도중에 OCR 이 죽음: 첫 장은 오류, 나머지는 60초 우회로 모두 VLM.
+  const downSlideText = slideTextOf({ vlm: 3, ocrError: 1, ocrBypass: 2 });
+  const downReasonList = buildIncompleteReasonList({ sessionResult: OK_SESSION, callLog: ocrDownLog, slideTextBackend: 'ocr', slideText: downSlideText });
+  assert.deepEqual(downReasonList, [{ code: 'ocr_unavailable', count: 3, total: 3, message: 'HTTP 503' }]);
+  assert.equal(describeIncompleteReason(downReasonList[0]), 'OCR 장애 — 슬라이드 전사 3장 중 OCR 로 읽은 장 없음(OCR 오류·우회로 VLM 으로 넘김 3장) — HTTP 503');
+  assert.deepEqual(buildWarningList({
+    ...HEALTHY_WARNING_INPUT, callLog: ocrDownLog, incompleteReasonList: downReasonList, slideTextBackend: 'ocr', slideText: downSlideText,
+  }), [], '불완전으로 센 OCR 실패는 경고로 다시 세지 않는다');
+
+  // 몇 장을 OCR 로 읽은 뒤 죽음: 완료이고 경고로 남긴다.
+  const partialSlideText = slideTextOf({ ocr: 2, vlm: 3, lowScore: 1, ocrError: 1, ocrBypass: 1 });
+  const partialLog = [call('ocr'), call('ocr'), call('ocr'), call('ocr', { status: 503 })];
+  const partialReasonList = buildIncompleteReasonList({ sessionResult: OK_SESSION, callLog: partialLog, slideTextBackend: 'ocr', slideText: partialSlideText });
+  assert.deepEqual(partialReasonList, []);
+  assert.deepEqual(buildWarningList({
+    ...HEALTHY_WARNING_INPUT, callLog: partialLog, incompleteReasonList: partialReasonList, slideTextBackend: 'ocr', slideText: partialSlideText,
+  }), [
+    { code: 'ocr_error', count: 1, message: 'OCR 호출 실패 1/4건 — HTTP 503' },
+    { code: 'ocr_fallback', count: 2, message: 'OCR 오류·우회로 VLM 으로 넘긴 슬라이드 2/5장(ocr_error 1 · ocr_bypass 1)' },
+  ]);
+
+  // OCR 은 답했지만 모두 저신뢰·세로 글씨라 넘긴 것은 장애가 아니다. vlm 백엔드도 보지 않는다.
+  const lowScoreSlideText = slideTextOf({ vlm: 3, lowScore: 2, verticalText: 1 });
+  for (const option of [{ slideTextBackend: 'ocr', slideText: lowScoreSlideText }, { slideTextBackend: 'vlm', slideText: downSlideText }, {}]) {
+    const reasonList = buildIncompleteReasonList({ sessionResult: OK_SESSION, callLog: [], ...option });
+    assert.deepEqual(reasonList, [], JSON.stringify(option));
+    assert.deepEqual(buildWarningList({ ...HEALTHY_WARNING_INPUT, callLog: [], incompleteReasonList: reasonList, ...option }), [], JSON.stringify(option));
+  }
+});
+
 test('경고: OCR 호출 시간 초과·실패는 VLM 뒤에 OCR 경고로 센다(그 장은 제품이 VLM 으로 넘겨 전사한다)', () => {
   const warningList = buildWarningList({
     callLog: [call('vlm'), timeoutCall('vlm'), call('ocr'), timeoutCall('ocr'), call('ocr', { status: 422 }), call('judge')],

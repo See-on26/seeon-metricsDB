@@ -164,6 +164,34 @@ test('슬라이드 전사 백엔드 ocr: OCR 평균 점수가 낮은 장은 제�
   }
 });
 
+test('슬라이드 전사 백엔드 ocr: 도중에 OCR 이 죽어 모든 장을 VLM 으로 넘기면 불완전(ocr_unavailable)으로 남겨, 다시 돌리면 그 영상을 다시 처리한다', { timeout: 180000 }, async () => {
+  const dirPath = makeTempDir('factory-e2e-ocr-down-');
+  const filePath = await createTestClip({
+    dirPath, fileName: 'deck.mp4', width: 640, height: 360,
+    colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
+  });
+  const outDir = path.join(dirPath, 'out');
+  const extraEnv = { SEEON_SLIDE_TEXT_BACKEND: 'ocr' };
+  mock.setOcrStatus(503);
+  try {
+    const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir, extraEnv });
+    assert.equal(result.status, 'failed', result.logText.slice(-2000));
+    assert.match(result.message, /OCR 장애 — 슬라이드 전사 \d+장 중 OCR 로 읽은 장 없음/);
+    const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
+    assert.equal(report.isComplete, false);
+    const { slideText } = report.stats;
+    assert.ok(slideText.count >= 1);
+    assert.equal(slideText.sourceCountMap.ocr, 0);
+    assert.equal(slideText.fallbackReasonCountMap.ocr_error + slideText.fallbackReasonCountMap.ocr_bypass, slideText.count);
+    assert.deepEqual(report.incompleteReasonList.map((reason) => [reason.code, reason.count, reason.total]), [['ocr_unavailable', slideText.count, slideText.count]]);
+    assert.equal(report.warningList.some((warning) => warning.code.startsWith('ocr_')), false, '불완전으로 센 OCR 실패는 경고로 다시 세지 않는다');
+    const identity = readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig({ ...WORKER_ENV, ...extraEnv }) });
+    assert.equal(inspectVideoResult({ outDir, outStem: 'deck', videoId: 'deck', filePath, language: 'ko', isPageTransitionIncluded: false, identity }).status, 'incomplete');
+  } finally {
+    mock.setOcrStatus(200);
+  }
+});
+
 test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', { timeout: 120000 }, async () => {
   const dirPath = makeTempDir('factory-e2e-silent-');
   const filePath = await createTestClip({ dirPath, fileName: 'mute.mp4', colorTimeline: [['gray', 6]], hasAudio: false });
