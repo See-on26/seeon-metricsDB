@@ -101,11 +101,15 @@ test('시작: 제품 세션이 틈 후보 출처 audio 로 시작하면(공장 �
   });
   await assert.rejects(audioHarness.simulator.start(), /틈 후보 출처 audio\(SEEON_GAP_SOURCE\)는 공장이 아직 지원하지 않는다/);
   assert.equal(audioHarness.simulator.debugCtx.state.isCaptureActive, false);
-  const asrHarness = setupSimulator({
-    handlerMap: { 'pipeline-session-start': async () => ({ isOk: true, sessionId: 'session-test', recordPath: null, gapSource: 'asr' }) },
-  });
-  await asrHarness.simulator.start();
-  assert.equal(asrHarness.simulator.debugCtx.state.isCaptureActive, true);
+  // asr 와, gapSource 가 없는 옛 세션 응답은 제품 렌더러처럼 asr 로 보고 캡처를 시작한다.
+  for (const sessionResult of [{ gapSource: 'asr' }, {}]) {
+    const harness = setupSimulator({
+      handlerMap: { 'pipeline-session-start': async () => ({ isOk: true, sessionId: 'session-test', recordPath: null, ...sessionResult }) },
+    });
+    await harness.simulator.start();
+    assert.equal(harness.simulator.debugCtx.state.isCaptureActive, true, JSON.stringify(sessionResult));
+    assert.match(debugList(harness).find(({ reason }) => reason === '캡처 시작').detail, / · 틈 후보=asr$/, JSON.stringify(sessionResult));
+  }
 });
 
 test('막힌 작업이 없으면 지연 재생이 끝난 직후 배수를 마치고, 원음을 끝까지 틀며 진행 상황을 영상 길이 안에서 알린다', async () => {
