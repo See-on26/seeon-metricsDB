@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { runBinary } from '../media/ffmpeg.mjs';
 import { resolveProductPath } from '../product/product-paths.mjs';
 import { checkKiwiSetup } from '../product/kiwi-setup.mjs';
+import { GAP_CANDIDATE_SOURCE_MAP } from '../product/core-modules.mjs';
 
 const require = createRequire(import.meta.url);
 const TUNNEL_POLL_MS = 200;
@@ -54,6 +55,90 @@ export function probeHttpService({ url, timeoutMs = PROBE_TIMEOUT_MS }) {
   });
 }
 
+// 슬라이드 전사 OCR 점검에 보내는 흰 64×32 JPEG(234바이트). 글자가 없어 엔진은 빈 줄 목록으로 곧바로 답한다.
+const OCR_PROBE_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjExLjEwMAD/2wBDAAgKCgsKCw0NDQ0NDRAPEBAQEBAQEBAQEBASEhIVFRUSEhIQEBISFBQVFRcXFxUVFRUXFxkZGR4eHBwjIyQrKzP/'
+  + 'xABMAAEBAAAAAAAAAAAAAAAAAAAABwEBAQAAAAAAAAAAAAAAAAAAAAEQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAAgAEADASIAAhEAAxEA/9oADAMBAAIRAxEA'
+  + 'PwC/gIgAAAAAAAAAAAAAD//Z',
+  'base64',
+);
+// 제품 ocr-client.js 의 요청 상한(5초)과 같다.
+const OCR_PROBE_TIMEOUT_MS = 5000;
+const OCR_PROBE_DETAIL_MAX_LENGTH = 160;
+const OCR_STATUS_HINT_MAP = {
+  404: '/ocr 경로가 없다(OCR 이 없는 GPU 서버)', 405: '/ocr 경로가 없다(OCR 이 없는 GPU 서버)', 503: 'OCR 엔진이 없다(GPU 서버 setup-embed.sh·fetch-ocr-models.sh)',
+};
+
+// 제품 ocr-client.js isOcrResponse 와 같은 응답 모양.
+function isOcrResponseBody(body) {
+  return Boolean(body) && typeof body.text === 'string'
+    && Array.isArray(body.lineList) && body.lineList.every((line) => Boolean(line) && typeof line.text === 'string')
+    && Number.isFinite(body.meanScore) && Number.isFinite(body.verticalBoxRatio);
+}
+
+function describeOcrFailure({ statusCode, bodyText }) {
+  let serverDetail = '';
+  try {
+    serverDetail = String(JSON.parse(bodyText)?.detail ?? '').slice(0, OCR_PROBE_DETAIL_MAX_LENGTH);
+  } catch {
+    serverDetail = '';
+  }
+  return [`HTTP ${statusCode}`, OCR_STATUS_HINT_MAP[statusCode], serverDetail].filter(Boolean).join(' — ');
+}
+
+// 슬라이드 전사 OCR(/ocr)이 실제로 전사하는지 작은 JPEG 한 장을 POST 해 본다. GPU 서비스 점검처럼 응답만 보면 /ocr 이 없는 서버(404)·
+// OCR 엔진이 없는 서버(503)도 살아 있다고 보게 되고, 그대로 돌리면 제품이 장마다 VLM 으로 넘겨 결과는 ocr 이라 적힌 채 VLM 으로 전사된다.
+// 2xx 와 제품이 읽는 응답 모양일 때만 통과다. isReachable 은 HTTP 응답이 왔는지다 — 연결 거부·끊김·응답 없음(GPU 서비스 점검과 같은 문구)만
+// false 이고, 터널을 열면 고쳐질 수 있는 것은 이쪽뿐이다. HTTP 로 답했는데 실패(상태 코드·모양)한 것은 GPU 서버의 OCR 문제다.
+export function probeOcrService({ url, timeoutMs = OCR_PROBE_TIMEOUT_MS }) {
+  return new Promise((resolve) => {
+    const target = new URL(url);
+    const httpModule = HTTP_MODULE_BY_PROTOCOL_MAP[target.protocol];
+    if (!httpModule) {
+      resolve({ isUp: false, isReachable: false, detail: `HTTP 주소가 아니다(${target.protocol})` });
+      return;
+    }
+    let isSettled = false;
+    const request = httpModule.request(target, {
+      method: 'POST', timeout: timeoutMs, agent: false,
+      headers: { 'content-type': 'image/jpeg', 'content-length': OCR_PROBE_JPEG.length },
+    }, (response) => {
+      const chunkList = [];
+      response.on('data', (chunk) => chunkList.push(chunk));
+      response.on('end', () => {
+        const bodyText = Buffer.concat(chunkList).toString('utf8');
+        const { statusCode } = response;
+        if (statusCode < 200 || statusCode >= 300) {
+          finish({ isUp: false, isReachable: true, detail: describeOcrFailure({ statusCode, bodyText }) });
+          return;
+        }
+        let body = null;
+        try {
+          body = JSON.parse(bodyText);
+        } catch {
+          body = null;
+        }
+        finish(isOcrResponseBody(body)
+          ? { isUp: true, isReachable: true, detail: `HTTP ${statusCode}` }
+          : { isUp: false, isReachable: true, detail: `HTTP ${statusCode} 이지만 OCR 응답 모양이 아니다` });
+      });
+      response.on('error', (error) => finish({ isUp: false, isReachable: false, detail: describeProbeError(error) }));
+    });
+    function finish(result) {
+      if (isSettled) return;
+      isSettled = true;
+      request.destroy();
+      resolve(result);
+    }
+    request.on('timeout', () => finish({ isUp: false, isReachable: false, detail: `응답 없음(${timeoutMs / 1000}초)` }));
+    request.on('error', (error) => finish({ isUp: false, isReachable: false, detail: describeProbeError(error) }));
+    request.end(OCR_PROBE_JPEG);
+  });
+}
+
+// 제품 config.js SLIDE_TEXT_BACKEND_LIST 의 ocr.
+const SLIDE_TEXT_BACKEND_OCR = 'ocr';
+
 // 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함). 탐지 판정 GPU 주소(judgeGpuUrl)는
 // 판정 백엔드가 gpu 일 때만 쓰므로 따로 둔다(listServiceUrlKeyList).
 const GPU_SERVICE_URL_KEY_LIST = [['VLM', 'vlmUrl'], ['ASR', 'asrUrl'], ['TTS', 'ttsUrl'], ['TTS_LONG', 'ttsLongUrl'], ['EMBED', 'embedUrl']];
@@ -97,13 +182,44 @@ export async function listDownServices({ pipelineConfig, checkService = probeHtt
   return downServiceList;
 }
 
+// 슬라이드 전사 백엔드가 ocr 이면 OCR 주소(제품 터널도 넘긴다)가 실제로 전사하는지 본다. 닿지 않으면(연결 거부·끊김·응답 없음)
+// 터널로 고쳐질 수 있어 downServiceList 로, 닿았지만 실패하면(HTTP 404·503·모양 다름) 터널로 고칠 수 없어 problemList 로 바로 낸다.
+async function inspectOcrBackend({ pipelineConfig, checkOcrService }) {
+  if (pipelineConfig.slideTextBackend !== SLIDE_TEXT_BACKEND_OCR) return { downServiceList: [], problemList: [] };
+  const { ocrUrl } = pipelineConfig;
+  if (!ocrUrl) return { downServiceList: [], problemList: ['OCR 주소가 없다(SEEON_OCR_URL 또는 SEEON_EMBED_URL 확인)'] };
+  const { isUp, isReachable, detail } = await checkOcrService({ url: ocrUrl });
+  if (isUp) return { downServiceList: [], problemList: [] };
+  const { hostname, portNumber } = readHostPort(ocrUrl);
+  const label = `OCR ${hostname}:${portNumber}`;
+  if (!isReachable) return { downServiceList: [`${label} ${detail}`], problemList: [] };
+  return {
+    downServiceList: [],
+    problemList: [`${label} 에 닿았지만 실패했다(${detail}) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 SEEON_SLIDE_TEXT_BACKEND 를 지운다`],
+  };
+}
+
+// GPU 서비스와 (ocr 백엔드면) OCR 을 함께 본다. 시작 전 점검과 터널을 연 뒤 다시 볼 때 같이 쓴다.
+// downServiceList 는 닿지 않는 것(터널 대상), problemList 는 닿았지만 OCR 이 실패한 것이다.
+export async function inspectGpuServices({ pipelineConfig, checkService = probeHttpService, checkOcrService = probeOcrService }) {
+  const downServiceList = await listDownServices({ pipelineConfig, checkService });
+  const ocr = await inspectOcrBackend({ pipelineConfig, checkOcrService });
+  return { downServiceList: [...downServiceList, ...ocr.downServiceList], problemList: ocr.problemList };
+}
+
 // Bedrock 은 호출마다 돈이 들어 점검하지 않는다(토큰이 있는지만 본다). 토큰 만료는 영상 결과의 불완전 사유(bedrock_auth_failed)로 잡힌다.
 // 한국어 트리거 형태소 분석기(Kiwi)의 의존성·모델이 seeon-meet 에 있는지도 본다(checkTriggerAnalyzer, 테스트는 대역).
+// 틈 후보를 잰 무음에서 고르는 audio(SEEON_GAP_SOURCE=audio)는 공장이 아직 옮기지 않았다. 그대로 돌리면 결과 설정에 audio 라고
+// 적힌 채 ASR 끝 시각 후보로 돌므로 시작 전에 멈춘다.
 export async function runPreflight({
-  pipelineConfig, ffmpegPath, ffprobePath, checkService = probeHttpService,
+  pipelineConfig, ffmpegPath, ffprobePath, checkService = probeHttpService, checkOcrService = probeOcrService,
   runVersion = (binaryPath) => runBinary({ binaryPath, argList: ['-version'] }), checkTriggerAnalyzer = checkKiwiSetup,
 }) {
   const problemList = [];
+  const gapSource = pipelineConfig.gapSource ?? GAP_CANDIDATE_SOURCE_MAP.asr;
+  if (gapSource !== GAP_CANDIDATE_SOURCE_MAP.asr) {
+    problemList.push(`SEEON_GAP_SOURCE=${gapSource} 는 공장이 아직 지원하지 않는다 — 공장은 ASR 끝 시각 틈 후보(asr)만 옮겼다. SEEON_GAP_SOURCE 를 지우거나 asr 로 둔다`);
+  }
   for (const [label, binaryPath] of [['ffmpeg', ffmpegPath], ['ffprobe', ffprobePath]]) {
     try {
       await runVersion(binaryPath);
@@ -112,7 +228,8 @@ export async function runPreflight({
     }
   }
   problemList.push(...await checkTriggerAnalyzer());
-  const downServiceList = await listDownServices({ pipelineConfig, checkService });
+  const { downServiceList, problemList: serviceProblemList } = await inspectGpuServices({ pipelineConfig, checkService, checkOcrService });
+  problemList.push(...serviceProblemList);
   if (!pipelineConfig.bedrockApiKey) {
     // 백엔드가 없는 설정은 제품 judge-llm.js 처럼 Bedrock 판정으로 본다.
     const impact = MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP[pipelineConfig.judgeBackend]

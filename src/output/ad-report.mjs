@@ -8,7 +8,7 @@ export const AID_MAP = { page_transition: 'A1', deixis: 'A2', interpretation: 'A
 const LEGACY_TRANSITION_SOURCE = 'page-transition';
 const NOT_PLAYED_REASON = 'not_played';
 const SUPPRESSED_REASON = 'suppressed';
-const PIPELINE_RECORD_KIND_MAP = { narration: 'narration', deixis: 'deixis' };
+const PIPELINE_RECORD_KIND_MAP = { narration: 'narration', deixis: 'deixis', debug: 'debug' };
 const roundOrNull = (value) => (Number.isFinite(value) ? Math.round(value) : null);
 const normalizeType = (source) => (source === LEGACY_TRANSITION_SOURCE ? 'page_transition' : source || null);
 const buildCaptionKey = ({ ts, text }) => `${ts}|${text}`;
@@ -17,7 +17,7 @@ const buildCaptionKey = ({ ts, text }) => `${ts}|${text}`;
 // 새 필드를 더해도 여기에 넣기 전에는 기록에 실리지 않는다(Bedrock 토큰 bedrockApiKey 는 넣지 않는다).
 export const REPORT_MODEL_CONFIG_KEY_LIST = [
   'vlmUrl', 'vlmModel', 'asrUrl', 'asrLanguage', 'questionAsrLanguage', 'ttsUrl', 'ttsLongUrl', 'embedUrl',
-  'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend', 'judgeGpuUrl', 'judgeGpuModel',
+  'slideTextBackend', 'ocrUrl', 'gapSource', 'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend', 'judgeGpuUrl', 'judgeGpuModel',
   'summaryModelId', 'summaryRewriteModelId', 'gapModelByModeMap', 'routerMode', 'isScaleEnabled',
   'isVlmFallbackEnabled', 'vlmFallbackModelId', 'hasBedrockCredentials',
 ];
@@ -40,6 +40,41 @@ export function readPipelineRecordList({ recordPath }) {
   return fs.readFileSync(recordPath, 'utf8').split('\n').filter(Boolean).map((line) => {
     try { return JSON.parse(line); } catch { return null; }
   }).filter(Boolean);
+}
+
+// 슬라이드 전사(새 슬라이드마다 한 번) 기록. 제품 slide-text-store 의 onSettled 가 남기는 디버그 줄(index.js:227-235)에서 읽는다:
+// stage value_check, reason '슬라이드 텍스트 전사 <ready|none|failed>',
+// detail '슬라이드=<라벨> 글자수=<n> 출처=<ocr|vlm|->[ 넘김=<이유>] 줄=<n> <ms>ms[ · <오류>]'.
+// 넘김 이유는 제품 slide-text-agent.js OCR_FALLBACK_REASON_MAP 과 ocr_error:<문구> 다. ocr_error 는 문구를 떼고 센다.
+const SLIDE_TEXT_STAGE = 'value_check';
+const SLIDE_TEXT_REASON_PATTERN = /^슬라이드 텍스트 전사 (\S+)$/;
+const SLIDE_TEXT_DETAIL_PATTERN = / 출처=(\S+)(?: 넘김=(.*?))? 줄=\d+ -?\d+ms/;
+export const SLIDE_TEXT_SOURCE_LIST = ['ocr', 'vlm'];
+export const SLIDE_TEXT_FALLBACK_REASON_LIST = ['low_score', 'vertical_text', 'ocr_error', 'ocr_bypass'];
+const OCR_ERROR_REASON = 'ocr_error';
+const toZeroCountMap = (keyList) => Object.fromEntries(keyList.map((key) => [key, 0]));
+
+// count: 전사가 끝난 슬라이드 수, statusCountMap: 결과(ready 글자 있음·none 글자 없음·failed 실패),
+// sourceCountMap: 실제로 전사한 엔진(OCR 이 실패·저신뢰·세로 글씨라 VLM 으로 넘긴 장은 vlm), fallbackReasonCountMap: VLM 으로 넘긴 이유.
+export function summarizeSlideTextRecordList({ pipelineRecordList }) {
+  const summary = {
+    count: 0, statusCountMap: {}, sourceCountMap: toZeroCountMap(SLIDE_TEXT_SOURCE_LIST),
+    fallbackReasonCountMap: toZeroCountMap(SLIDE_TEXT_FALLBACK_REASON_LIST),
+  };
+  for (const record of pipelineRecordList) {
+    if (record.kind !== PIPELINE_RECORD_KIND_MAP.debug || record.stage !== SLIDE_TEXT_STAGE) continue;
+    const status = SLIDE_TEXT_REASON_PATTERN.exec(record.reason || '')?.[1];
+    if (!status) continue;
+    summary.count += 1;
+    summary.statusCountMap[status] = (summary.statusCountMap[status] || 0) + 1;
+    const [, source, fallbackReason] = SLIDE_TEXT_DETAIL_PATTERN.exec(record.detail || '') || [];
+    if (source && source !== '-') summary.sourceCountMap[source] = (summary.sourceCountMap[source] || 0) + 1;
+    if (fallbackReason) {
+      const reasonKey = fallbackReason.startsWith(`${OCR_ERROR_REASON}:`) ? OCR_ERROR_REASON : fallbackReason;
+      summary.fallbackReasonCountMap[reasonKey] = (summary.fallbackReasonCountMap[reasonKey] || 0) + 1;
+    }
+  }
+  return summary;
 }
 
 // 해설 소리 합성(pipeline-tts) 수. 렌더러는 재생 차례가 가까운 해설만 합성하므로 요청 수는 해설 수보다 적을 수 있다.
@@ -134,8 +169,9 @@ export function buildAdReport({
     timeline: pieceList.map((piece) => ({ ...piece, outStartMs: Math.round(piece.outStartMs), outEndMs: Math.round(piece.outEndMs) })),
     // judgeSourceCountMap: 탐지 판정기(router·silence·deixis)마다 답한 곳(gpu·bedrock)·실패(error) 수. GPU 판정 호출의 지연은 serviceMap.judge 에 있다.
     // triggerAnalyzerCountMap: main 트리거가 전사마다 쓴 분석기(kiwi·english, 한국어를 Kiwi 없이 뽑으면 rule) 수.
+    // slideText: 슬라이드 전사 출처(ocr·vlm)와 VLM 으로 넘긴 이유 수(summarizeSlideTextRecordList).
     stats: {
-      serviceMap, bedrockModelMap, judgeSourceCountMap, triggerAnalyzerCountMap,
+      serviceMap, bedrockModelMap, judgeSourceCountMap, triggerAnalyzerCountMap, slideText: summarizeSlideTextRecordList({ pipelineRecordList }),
       tts: summarizeTtsStat({ captionRecordList, playedSeqSet }), processingMs: Math.round(processingMs),
       realtimeFactor: processingMs > 0 ? Math.round((video.durationMs / processingMs) * 100) / 100 : null,
     },

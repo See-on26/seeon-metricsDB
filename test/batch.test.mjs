@@ -9,12 +9,12 @@ import { setTimeout as sleepReal } from 'node:timers/promises';
 import { listInputVideos } from '../src/input/video-list.mjs';
 import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../src/runner/worker-pool.mjs';
-import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
+import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatCallBrief, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
 import { buildResultConfig } from '../src/runner/result-identity.mjs';
 import { buildReportConfig } from '../src/runner/run-video-job.mjs';
 import { buildAdReport } from '../src/output/ad-report.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
-import { runPreflight, probeHttpService, startProductTunnel } from '../src/runner/preflight.mjs';
+import { runPreflight, probeHttpService, probeOcrService, startProductTunnel } from '../src/runner/preflight.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const makeDir = (name) => makeTempDir(`factory-${name}-`);
@@ -342,6 +342,27 @@ test('manifest: 건너뛴 영상은 이전 기록(AD 수)을 살리고, 이전 �
   assert.match(summary, /lost: AD -개 \(이전 실행\)/);
 });
 
+test('summary: 완료 영상 아래에 서비스별 호출 수(OCR 포함)와 슬라이드 전사 출처·넘긴 이유를 한 줄 더 적는다', () => {
+  const slideText = {
+    count: 3, statusCountMap: { ready: 3 }, sourceCountMap: { ocr: 2, vlm: 1 },
+    fallbackReasonCountMap: { low_score: 1, vertical_text: 0, ocr_error: 0, ocr_bypass: 0 },
+  };
+  const manifest = buildManifest({
+    previousManifest: null, runOptions: {}, seeonMeet: { commit: 'abc', isDirty: false },
+    jobList: [{ videoId: 'a', outStem: 'a' }, { videoId: 'b', outStem: 'b' }],
+    resultList: [
+      { videoId: 'a', outStem: 'a', status: 'done', adCount: 2, serviceCountMap: { other: 1, embed: 8, ocr: 3, vlm: 6, asr: 18, judge: 0 }, slideText },
+      { videoId: 'b', outStem: 'b', status: 'done', adCount: 1 },
+    ],
+    skippedJobList: [], startedAt: 's', endedAt: 'e',
+  });
+  const lineList = formatSummary(manifest).split('\n');
+  const aIndex = lineList.indexOf('  ✔ a: AD 2개');
+  assert.equal(lineList[aIndex + 1], '      호출 asr 18 · vlm 6 · ocr 3 · embed 8 · other 1 / 슬라이드 전사 ocr 2 · vlm 1(VLM 으로 넘김 low_score 1)');
+  assert.equal(lineList[aIndex + 2], '  ✔ b: AD 1개', '호출 기록이 없는 결과는 줄을 더하지 않는다');
+  assert.equal(formatCallBrief({ serviceCountMap: { vlm: 4 }, slideText: { ...slideText, count: 0 } }), '호출 vlm 4');
+});
+
 test('manifest: 건너뛴 영상에 이전 실행의 실패 기록(이유)을 섞지 않는다', () => {
   const manifest = buildManifest({
     previousManifest: { videoList: [{ videoId: 'a', outStem: 'a', status: 'failed', errorMessage: '시간 초과' }] },
@@ -530,6 +551,90 @@ test('HTTP 점검: 상태 코드와 상관없이 HTTP 로 답하면 살아 있�
   }
 });
 
+test('시작 전 점검: 슬라이드 전사 백엔드가 ocr 이면 OCR 주소(기본 임베딩 origin + /ocr)가 전사하는지 보고, 닿지 않으면 터널 대상·닿았지만 실패면 바로 점검 실패, vlm 이면 보지 않는다', async () => {
+  const runWith = async (env, checkOcrService) => {
+    const checkedOcrList = [];
+    const { downServiceList, problemList } = await runPreflight({
+      pipelineConfig: loadPipelineConfig().readPipelineConfig({ AWS_BEARER_TOKEN_BEDROCK: 'token', ...env }),
+      ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', runVersion: async () => Buffer.from('ok'), checkTriggerAnalyzer: async () => [],
+      checkService: async () => SERVICE_UP,
+      checkOcrService: async ({ url }) => { checkedOcrList.push(url); return checkOcrService(); },
+    });
+    return { checkedOcrList, downServiceList, problemList };
+  };
+  const vlm = await runWith({}, () => assert.fail('vlm 백엔드는 OCR 을 부르지 않는다'));
+  assert.deepEqual([vlm.checkedOcrList, vlm.downServiceList], [[], []]);
+  const healthy = await runWith({ SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, () => ({ isUp: true, isReachable: true, detail: 'HTTP 200' }));
+  assert.deepEqual([healthy.checkedOcrList, healthy.downServiceList, healthy.problemList], [['http://127.0.0.1:8804/ocr'], [], []]);
+  const broken = await runWith(
+    { SEEON_SLIDE_TEXT_BACKEND: 'ocr', SEEON_OCR_URL: 'http://127.0.0.1:18806/ocr' },
+    () => ({ isUp: false, isReachable: true, detail: 'HTTP 503 — OCR 엔진이 없다' }),
+  );
+  assert.deepEqual(broken.checkedOcrList, ['http://127.0.0.1:18806/ocr']);
+  assert.deepEqual(broken.downServiceList, [], '닿았지만 실패한 OCR 은 터널로 고칠 수 없어 터널 대상이 아니다');
+  assert.deepEqual(broken.problemList, [
+    'OCR 127.0.0.1:18806 에 닿았지만 실패했다(HTTP 503 — OCR 엔진이 없다) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 SEEON_SLIDE_TEXT_BACKEND 를 지운다',
+  ]);
+  const unreachable = await runWith({ SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, () => ({ isUp: false, isReachable: false, detail: '연결 거부(ECONNREFUSED)' }));
+  assert.deepEqual([unreachable.downServiceList, unreachable.problemList], [['OCR 127.0.0.1:8804 연결 거부(ECONNREFUSED)'], []]);
+});
+
+test('시작 전 점검: 틈 후보 출처가 asr 가 아니면(SEEON_GAP_SOURCE=audio, 공장 미지원) 분명한 이유로 막는다', async () => {
+  const readProblemList = async (env) => (await runPreflight({
+    pipelineConfig: loadPipelineConfig().readPipelineConfig({ AWS_BEARER_TOKEN_BEDROCK: 'token', ...env }),
+    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', runVersion: async () => Buffer.from('ok'), checkTriggerAnalyzer: async () => [],
+    checkService: async () => SERVICE_UP,
+  })).problemList;
+  assert.deepEqual(await readProblemList({ SEEON_GAP_SOURCE: 'audio' }), [
+    'SEEON_GAP_SOURCE=audio 는 공장이 아직 지원하지 않는다 — 공장은 ASR 끝 시각 틈 후보(asr)만 옮겼다. SEEON_GAP_SOURCE 를 지우거나 asr 로 둔다',
+  ]);
+  assert.deepEqual(await readProblemList({}), [], '기본은 asr');
+  assert.deepEqual(await readProblemList({ SEEON_GAP_SOURCE: 'asr' }), []);
+});
+
+test('OCR 점검: 작은 JPEG 를 POST 해 2xx 와 제품이 읽는 응답 모양일 때만 통과, /ocr 없음·엔진 없음·모양 다름·닫힌 포트는 이유와 함께 실패', async () => {
+  // GPU 실서비스 포트(8801–8805)는 쓰지 않고 빈 포트를 받는다.
+  const receivedList = [];
+  const replyByPathMap = {
+    '/ok': [200, { text: '', lineList: [], meanScore: 0, verticalBoxRatio: 0 }],
+    '/no-engine': [503, { detail: 'OCR 엔진 없음: FileNotFoundError: OCR 모델 없음' }],
+    '/missing': [404, { detail: 'Not Found' }],
+    '/odd': [200, { embedding: [0.1] }],
+  };
+  const server = http.createServer((request, response) => {
+    const chunkList = [];
+    request.on('data', (chunk) => chunkList.push(chunk));
+    request.on('end', () => {
+      receivedList.push({ method: request.method, contentType: request.headers['content-type'], body: Buffer.concat(chunkList) });
+      const [status, body] = replyByPathMap[request.url];
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(body));
+    });
+  });
+  await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const closedServer = net.createServer();
+  await new Promise((resolve) => { closedServer.listen(0, '127.0.0.1', resolve); });
+  const closedUrl = `http://127.0.0.1:${closedServer.address().port}/ocr`;
+  await new Promise((resolve) => { closedServer.close(resolve); });
+  try {
+    assert.deepEqual(await probeOcrService({ url: `${origin}/ok`, timeoutMs: 1000 }), { isUp: true, isReachable: true, detail: 'HTTP 200' });
+    const { method, contentType, body } = receivedList[0];
+    assert.deepEqual([method, contentType], ['POST', 'image/jpeg']);
+    assert.deepEqual([body[0], body[1], body.at(-2), body.at(-1)], [0xff, 0xd8, 0xff, 0xd9], 'JPEG 한 장을 보낸다');
+    assert.deepEqual(await probeOcrService({ url: `${origin}/no-engine`, timeoutMs: 1000 }), {
+      isUp: false, isReachable: true, detail: 'HTTP 503 — OCR 엔진이 없다(GPU 서버 setup-embed.sh·fetch-ocr-models.sh) — OCR 엔진 없음: FileNotFoundError: OCR 모델 없음',
+    });
+    assert.deepEqual(await probeOcrService({ url: `${origin}/missing`, timeoutMs: 1000 }), {
+      isUp: false, isReachable: true, detail: 'HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버) — Not Found',
+    });
+    assert.deepEqual(await probeOcrService({ url: `${origin}/odd`, timeoutMs: 1000 }), { isUp: false, isReachable: true, detail: 'HTTP 200 이지만 OCR 응답 모양이 아니다' });
+    assert.deepEqual(await probeOcrService({ url: closedUrl, timeoutMs: 1000 }), { isUp: false, isReachable: false, detail: '연결 거부(ECONNREFUSED)' });
+  } finally {
+    await new Promise((resolve) => { server.close(resolve); });
+  }
+});
+
 const TUNNEL_PIPELINE_CONFIG = {
   vlmUrl: 'http://127.0.0.1:8801/v1/chat/completions', asrUrl: 'http://127.0.0.1:8802/asr',
   ttsUrl: 'http://127.0.0.1:8803/tts', ttsLongUrl: 'http://127.0.0.1:8803/tts-long', embedUrl: 'http://127.0.0.1:8804/embed',
@@ -659,8 +764,8 @@ test('결과 설정: 결과를 바꾸는 모델·판정 백엔드·라우터·�
     pipelineConfig: readPipelineConfig({ SEEON_VLM_MODEL: 'vlm-x', SEEON_JUDGE_BACKEND: 'bedrock', AWS_BEARER_TOKEN_BEDROCK: 'secret', SEEON_VLM_URL: 'http://127.0.0.1:9/v' }),
   });
   assert.deepEqual(Object.keys(resultConfig).sort(), [
-    'bedrockModelId', 'delayMs', 'gapModelId', 'isScaleEnabled', 'isVlmFallbackEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
-    'mode', 'routerMode', 'vlmFallbackModelId', 'vlmModel',
+    'bedrockModelId', 'delayMs', 'gapModelId', 'gapSource', 'isScaleEnabled', 'isVlmFallbackEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
+    'mode', 'routerMode', 'slideTextBackend', 'vlmFallbackModelId', 'vlmModel',
   ]);
   assert.deepEqual([resultConfig.mode, resultConfig.delayMs, resultConfig.vlmModel, resultConfig.judgeBackend], ['delayed', 10000, 'vlm-x', 'bedrock']);
   assert.equal(JSON.stringify(resultConfig).includes('secret'), false);
@@ -688,7 +793,10 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
   const recordedConfig = JSON.parse(fs.readFileSync(path.join(outDir, 'a_SEEON_AD.json'), 'utf8')).config;
   assert.equal(JSON.stringify(recordedConfig).includes('secret'), false);
   // 견주는 모델 항목은 기록된 modelConfig(허용 목록 모양)에 있고 값도 같다.
-  const comparedModelKeyList = ['vlmModel', 'isVlmFallbackEnabled', 'vlmFallbackModelId', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled'];
+  const comparedModelKeyList = [
+    'vlmModel', 'isVlmFallbackEnabled', 'vlmFallbackModelId', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled',
+    'slideTextBackend', 'gapSource',
+  ];
   for (const key of comparedModelKeyList) {
     assert.ok(Object.hasOwn(recordedConfig.modelConfig, key), `기록 허용 목록에 ${key} 가 없다`);
     assert.equal(recordedConfig.resultConfig[key], recordedConfig.modelConfig[key], key);
@@ -710,4 +818,13 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
   });
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_JUDGE_GPU_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] },
     '판정 주소만 바뀐 것은 같은 결과다');
+  // 슬라이드 전사 백엔드를 바꾸면(A/B) 다른 결과로 보고 다시 돈다. OCR 주소만 바꾼 것은 같은 결과다.
+  assert.equal(recordedConfig.resultConfig.slideTextBackend, 'vlm');
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_SLIDE_TEXT_BACKEND: 'ocr' }), {
+    status: 'mismatch', mismatchList: ['결과 설정 slideTextBackend vlm → ocr'],
+  });
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_OCR_URL: 'http://127.0.0.1:9/ocr' }), { status: 'done', mismatchList: [] },
+    'OCR 주소만 바뀐 것은 같은 결과다');
+  assert.equal(recordedConfig.resultConfig.gapSource, 'asr');
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_GAP_SOURCE: 'audio' }).mismatchList, ['결과 설정 gapSource asr → audio']);
 });

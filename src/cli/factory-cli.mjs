@@ -7,7 +7,7 @@ import { parseFactoryArgs } from './parse-args.mjs';
 import { listInputVideos } from '../input/video-list.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/worker-pool.mjs';
 import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord, formatJobLabel } from '../runner/manifest.mjs';
-import { runPreflight, listDownServices, startProductTunnel, buildMemoryWarning } from '../runner/preflight.mjs';
+import { runPreflight, inspectGpuServices, startProductTunnel, buildMemoryWarning } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
 import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
@@ -30,8 +30,9 @@ function loadFactoryEnv() {
   if (fs.existsSync(envPath)) process.loadEnvFile(envPath);
 }
 
-// GPU 서비스가 HTTP 로 답하지 않으면 제품 터널로 연 뒤 다시 점검한다. 연 터널은 돌려줘 실행이 끝날 때 닫는다.
-async function openGpuAccess({ preflight, env, pipelineConfig, checkService, startTunnel, log }) {
+// GPU 서비스(OCR 포함)가 HTTP 로 답하지 않으면 제품 터널로 연 뒤 다시 점검한다. 연 터널은 돌려줘 실행이 끝날 때 닫는다.
+// OCR 이 닿았지만 실패한 것은 터널 대상이 아니다(시작 전 점검이 점검 실패로 넣는다). 다시 볼 때는 새로 생긴 실패만 더한다.
+async function openGpuAccess({ preflight, env, pipelineConfig, checkService, checkOcrService, startTunnel, log }) {
   if (!preflight.downServiceList.length) return null;
   log.log(`[factory] GPU 서비스 응답 없음(${preflight.downServiceList.join(', ')}) — 제품 터널 모듈로 연결을 시도한다`);
   let tunnel = null;
@@ -42,7 +43,11 @@ async function openGpuAccess({ preflight, env, pipelineConfig, checkService, sta
     preflight.problemList.push(error.message);
   }
   // 터널이 열려도 원격 주소를 쓰는 서비스는 터널로 넘기지 않고, 터널 뒤 서비스가 죽었을 수도 있으므로 다시 본다.
-  const downServiceList = tunnel ? await listDownServices({ pipelineConfig, checkService }) : preflight.downServiceList;
+  const recheck = tunnel ? await inspectGpuServices({ pipelineConfig, checkService, checkOcrService }) : null;
+  for (const problem of recheck?.problemList ?? []) {
+    if (!preflight.problemList.includes(problem)) preflight.problemList.push(problem);
+  }
+  const downServiceList = recheck ? recheck.downServiceList : preflight.downServiceList;
   if (downServiceList.length) preflight.problemList.push(`GPU 서비스에 닿지 못했다: ${downServiceList.join(', ')}`);
   return tunnel;
 }
@@ -131,10 +136,10 @@ function listenStopSignal({ signalSource, onStop, onForce, now = () => performan
 }
 
 // 종료 코드를 돌려준다: 시작 전 점검 실패·영상 없음·영상 하나라도 실패면 1, 신호로 중단하면 128 + 신호 번호(SIGHUP 129, SIGINT 130, SIGTERM 143).
-// workerPath·checkService·runVersion·checkTriggerAnalyzer·readFreeMemoryBytes·startTunnel·signalSource·exitProcess 는 테스트가
+// workerPath·checkService·checkOcrService·runVersion·checkTriggerAnalyzer·readFreeMemoryBytes·startTunnel·signalSource·exitProcess 는 테스트가
 // 실제 워커·GPU 서비스·Kiwi 모델·남은 메모리·SSH·프로세스 신호 없이 돌리려고 바꿔 끼운다.
 export async function runFactoryCli({
-  argList, env = process.env, log = console, workerPath, checkService, runVersion, checkTriggerAnalyzer, readFreeMemoryBytes = os.freemem,
+  argList, env = process.env, log = console, workerPath, checkService, checkOcrService, runVersion, checkTriggerAnalyzer, readFreeMemoryBytes = os.freemem,
   startTunnel = startProductTunnel, signalSource = process,
   exitProcess = (exitCode) => process.exit(exitCode),
 }) {
@@ -152,8 +157,8 @@ export async function runFactoryCli({
   // 이전 manifest 가 깨져 있으면 영상을 다 돌린 뒤가 아니라 지금 멈춘다. 이어 쓸 내용은 잠금을 잡은 뒤 다시 읽는다.
   readManifest({ outDir });
 
-  const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkService, runVersion, checkTriggerAnalyzer });
-  const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkService, startTunnel, log });
+  const preflight = await runPreflight({ pipelineConfig, ffmpegPath, ffprobePath, checkService, checkOcrService, runVersion, checkTriggerAnalyzer });
+  const tunnel = await openGpuAccess({ preflight, env, pipelineConfig, checkService, checkOcrService, startTunnel, log });
   if (preflight.problemList.length) {
     // 터널 모듈 오류 등 바깥 문구에는 주소가 실릴 수 있어 사용자 정보를 지운다.
     for (const problem of preflight.problemList) log.error(`[factory] 시작 전 점검 실패: ${redactUrlCredential(problem)}`);

@@ -92,7 +92,24 @@ test('시작: 꺼 둔 분류 → 세션 시작 순서로 알리고, 화면 전�
   assert.equal(ctx.state.lastScreenTransitionAt, ctx.state.sessionStartPerf);
   assert.deepEqual([ctx.state.isCaptureActive, ctx.state.isSessionActive], [true, true]);
   const startDebug = debugList(harness).find(({ reason }) => reason === '캡처 시작');
-  assert.match(startDebug.detail, /^모드=delayed · 시작 시점 = 회의 시작 시점\(0초\) · 앞 맥락 화면 전환 후 0초 \(상한 (\d+초|없음)\) · 뒤 맥락 \d+초 \(ASR 청크 \d+ms\(무음 절단 \d+ms 이후\) \+ look-ahead \d+ms \+ 보류 \d+ms\)$/);
+  assert.match(startDebug.detail, /^모드=delayed · 시작 시점 = 회의 시작 시점\(0초\) · 앞 맥락 화면 전환 후 0초 \(상한 (\d+초|없음)\) · 뒤 맥락 \d+초 \(ASR 청크 \d+ms\(무음 절단 \d+ms 이후\) \+ look-ahead \d+ms \+ 보류 \d+ms\) · 틈 후보=asr$/);
+});
+
+test('시작: 제품 세션이 틈 후보 출처 audio 로 시작하면(공장 미지원) 캡처를 시작하지 않고 멈추고, asr·옛 응답(출처 없음)은 그대로 돈다', async () => {
+  const audioHarness = setupSimulator({
+    handlerMap: { 'pipeline-session-start': async () => ({ isOk: true, sessionId: 'session-test', recordPath: null, gapSource: 'audio' }) },
+  });
+  await assert.rejects(audioHarness.simulator.start(), /틈 후보 출처 audio\(SEEON_GAP_SOURCE\)는 공장이 아직 지원하지 않는다/);
+  assert.equal(audioHarness.simulator.debugCtx.state.isCaptureActive, false);
+  // asr 와, gapSource 가 없는 옛 세션 응답은 제품 렌더러처럼 asr 로 보고 캡처를 시작한다.
+  for (const sessionResult of [{ gapSource: 'asr' }, {}]) {
+    const harness = setupSimulator({
+      handlerMap: { 'pipeline-session-start': async () => ({ isOk: true, sessionId: 'session-test', recordPath: null, ...sessionResult }) },
+    });
+    await harness.simulator.start();
+    assert.equal(harness.simulator.debugCtx.state.isCaptureActive, true, JSON.stringify(sessionResult));
+    assert.match(debugList(harness).find(({ reason }) => reason === '캡처 시작').detail, / · 틈 후보=asr$/, JSON.stringify(sessionResult));
+  }
 });
 
 test('막힌 작업이 없으면 지연 재생이 끝난 직후 배수를 마치고, 원음을 끝까지 틀며 진행 상황을 영상 길이 안에서 알린다', async () => {

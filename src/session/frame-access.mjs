@@ -25,9 +25,11 @@ function raceRealTimeout({ promise, timeoutMs, buildError, onTimeout }) {
 // 세션이 보는 화면 입력. 제품은 그 순간 <video> 에 보이는 프레임을 그리는데, 영상이 끝난 뒤나 영상 stream 이 오디오보다
 // 먼저 끝난 뒤에도 마지막 화면이 계속 보인다. 그래서 그 시각들에도 null 대신 마지막 화면을 준다.
 // 멈춘 ffmpeg 는 onFatal 로 알리고, 그 영상은 실패로 끝낸다(멈춘 읽기는 리더를 닫고, 멈춘 캡처는 그 프로세스만 죽인다).
+// frameWidth·frameHeight 는 ffmpeg 필터가 받는 화소(자동 회전 뒤), displayWidth·displayHeight 는 제품 <video> 표시 크기다
+// (probe resolveFrameGeometry). JPEG 를 제품 canvas 크기(긴 변 1280 상한)로 맞추는 데 쓴다(jpeg-capture resolveCaptureSize).
 export function createFrameAccess({
-  clock, frameReader, filePath, mediaDurationMs, ffmpegPath, timeoutMs = FRAME_IO_TIMEOUT_MS, sampleMs = POINTING_SAMPLE_MS,
-  onFatal = () => {}, log = console,
+  clock, frameReader, filePath, mediaDurationMs, frameWidth = null, frameHeight = null, displayWidth = frameWidth, displayHeight = frameHeight,
+  ffmpegPath, timeoutMs = FRAME_IO_TIMEOUT_MS, sampleMs = POINTING_SAMPLE_MS, onFatal = () => {}, log = console,
 }) {
   // 격자 마지막 칸은 영상 길이보다 작은 마지막 sampleMs 배수다. ffmpeg fps 필터는 영상 끝 시각의 칸을 내지 않는다.
   const lastGridMs = Math.max(0, Math.floor((mediaDurationMs - 1) / sampleMs) * sampleMs);
@@ -58,7 +60,9 @@ export function createFrameAccess({
   function runCapture({ timeMs, normRect }) {
     const controller = new AbortController();
     return raceRealTimeout({
-      promise: captureJpeg({ filePath, timeMs, durationMs: mediaDurationMs, normRect, ffmpegPath, signal: controller.signal }),
+      promise: captureJpeg({
+        filePath, timeMs, durationMs: mediaDurationMs, normRect, frameWidth, frameHeight, displayWidth, displayHeight, ffmpegPath, signal: controller.signal,
+      }),
       timeoutMs,
       buildError: () => new FrameIoTimeoutError(
         `JPEG 캡처가 실제 ${formatSec(timeoutMs)} 안에 끝나지 않았다(영상 ${Math.round(timeMs)}ms) — ffmpeg 가 멈춘 것으로 보고 영상을 실패로 끝낸다`,

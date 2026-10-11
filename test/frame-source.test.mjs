@@ -5,13 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { openSampleFrameReader, narrowToPointingRegion } from '../src/media/frame-source.mjs';
-import { captureJpeg, toMjpegQscale } from '../src/media/jpeg-capture.mjs';
+import { captureJpeg, toMjpegQscale, resolveCaptureSize, buildJpegCaptureArgList } from '../src/media/jpeg-capture.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
-import { SlideHistogramGate, PointingLocator } from '../src/product/core-modules.mjs';
+import { probeVideo, resolveFrameGeometry } from '../src/media/probe.mjs';
+import { SlideHistogramGate, PointingLocator, fitWithinLongEdge, MAX_FRAME_LONG_EDGE_PX } from '../src/product/core-modules.mjs';
 import { POINTING_LOCATOR_OPTION_MAP } from '../src/session/renderer-constants.mjs';
 import { createTestClip, readJpegSize } from './helpers/media-fixtures.mjs';
 
-const { ffmpegPath } = resolveFfmpegPaths({ env: process.env });
+const { ffmpegPath, ffprobePath } = resolveFfmpegPaths({ env: process.env });
 const dirPath = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-frame-'));
 // 빨강 0~2s(1.0~1.5s 에 흰 상자), 파랑 2~4s. 상자는 400ms 격자 중 1.2s 에만 보인다. 1.6s 격자에도 보이면 게이트가
 // 상자가 멈춘 1.6s 를 전환으로 잡고, 2.4s 에 확정될 파랑 전환은 쿨다운(1200ms) 안이라 놓친다(제품도 같다).
@@ -88,7 +89,7 @@ test('제품 PointingLocator 가 흰 상자 자리를 찾는다(포인팅은 재
   assert.ok(motion.rect.x <= 0.13 && motion.rect.x + motion.rect.w >= 0.24 && motion.rect.w < 0.3, JSON.stringify(motion.rect));
 });
 
-test('포인팅 crop 식은 main.js:580-586 과 같다(여백 0.12, 0~1 로 자름)', () => {
+test('포인팅 crop 식은 main.js:625-631 과 같다(여백 0.12, 0~1 로 자름)', () => {
   assert.deepEqual(narrowToPointingRegion({ sub: { x: 0.05, y: 0.5, w: 0.2, h: 0.6 } }),
     { x: 0, y: 0.38, w: 0.37, h: 0.62 });
 });
@@ -99,7 +100,7 @@ test('JPEG 캡처: 전체 프레임·crop 크기, 영상 끝 뒤 시각은 마�
   assert.deepEqual(readJpegSize(full), { width: 320, height: 180 });
   const cropped = await captureJpeg({ filePath: deckPath, timeMs: 1200, durationMs: 4000, normRect: { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, ffmpegPath });
   assert.deepEqual(readJpegSize(cropped), { width: 160, height: 90 });
-  // 제품 canvas 크기는 Math.max(2, Math.round(영역 화소))다(main.js:596-597). 4:2:0 영상이어도 홀수 크기를 그대로 낸다.
+  // 긴 변 1280 안의 영역은 제품 canvas 크기가 Math.max(2, Math.round(영역 화소))다(frame-scale.js fitWithinLongEdge). 4:2:0 영상이어도 홀수 크기를 그대로 낸다.
   const oddCropped = await captureJpeg({ filePath: deckPath, timeMs: 1200, durationMs: 4000, normRect: { x: 0.11, y: 0.11, w: 0.36, h: 0.35 }, ffmpegPath });
   assert.deepEqual(readJpegSize(oddCropped), { width: Math.round(320 * 0.36), height: Math.round(180 * 0.35) });
   const late = await captureJpeg({ filePath: deckPath, timeMs: 99_000, durationMs: 4000, ffmpegPath });
@@ -181,6 +182,127 @@ test('프레임이 드문 영상(1fps)도 그 시각에 보이는 프레임을 �
   assert.ok(tail, '마지막 프레임 구간(3~4s) 캡처');
   const [r2, , b2] = await readJpegColor(tail);
   assert.ok(b2 > 200 && r2 < 80, `3.5s JPEG 파랑: ${r2},${b2}`);
+});
+
+test('JPEG 크기: 영역 화소의 긴 변이 1280 을 넘으면 제품 fitWithinLongEdge 크기로 줄이고, 그 안이면 줄이지 않는다', () => {
+  assert.equal(MAX_FRAME_LONG_EDGE_PX, 1280);
+  const caseList = [
+    [{ frameWidth: 1920, frameHeight: 1080 }, { width: 1920, height: 1080 }, { width: 1280, height: 720 }],
+    [{ frameWidth: 1080, frameHeight: 1920 }, { width: 1080, height: 1920 }, { width: 720, height: 1280 }],
+    [{ frameWidth: 1920, frameHeight: 1080, normRect: { x: 0, y: 0, w: 0.5, h: 0.5 } }, { width: 960, height: 540 }, { width: 960, height: 540 }],
+    [{ frameWidth: 1920, frameHeight: 1080, normRect: { x: 0.05, y: 0.1, w: 0.9, h: 0.6 } }, { width: 1728, height: 648 }, { width: 1280, height: 480 }],
+    [{ frameWidth: 321, frameHeight: 181, normRect: { x: 0, y: 0.38, w: 0.37, h: 0.62 } }, { width: 119, height: 112 }, { width: 119, height: 112 }],
+  ];
+  for (const [input, crop, output] of caseList) {
+    const size = resolveCaptureSize(input);
+    assert.deepEqual(size, { crop, output }, JSON.stringify(input));
+    const regionWidth = input.frameWidth * (input.normRect?.w ?? 1);
+    const regionHeight = input.frameHeight * (input.normRect?.h ?? 1);
+    assert.deepEqual(size.output, fitWithinLongEdge({ width: regionWidth, height: regionHeight }), '제품 함수로 정한 크기');
+  }
+  const argText = (option) => buildJpegCaptureArgList({ filePath: 'v.mp4', timeMs: 0, qscale: 2, ...option }).join(' ');
+  assert.match(argText({ frameWidth: 1920, frameHeight: 1080 }), /round=up,scale=w=1280:h=720:flags=bilinear,setsar=1 /);
+  assert.doesNotMatch(argText({ frameWidth: 1280, frameHeight: 720 }), /scale=/, '상한 안이면 예전과 같은 인자');
+  assert.doesNotMatch(argText({}), /scale=/, '원본 크기를 모르면 줄이지 않는다');
+});
+
+test('JPEG 캡처: 원본 크기를 주면 긴 변 1280 상한으로 줄여 굽는다(crop 뒤 줄임)', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'wide.mp4', width: 1600, height: 900, colorTimeline: [['red', 1]], hasAudio: false });
+  const sizeOption = { frameWidth: 1600, frameHeight: 900 };
+  const full = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption });
+  assert.deepEqual(readJpegSize(full), { width: 1280, height: 720 });
+  const [r, , b] = await readJpegColor(full);
+  assert.ok(r > 200 && b < 80, `줄인 JPEG 도 빨강: ${r},${b}`);
+  const half = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption, normRect: { x: 0, y: 0, w: 0.5, h: 0.5 } });
+  assert.deepEqual(readJpegSize(half), { width: 800, height: 450 }, '상한 안의 crop 은 줄이지 않는다');
+  const wide = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption, normRect: { x: 0.05, y: 0.1, w: 0.9, h: 0.6 } });
+  assert.deepEqual(readJpegSize(wide), resolveCaptureSize({ ...sizeOption, normRect: { w: 0.9, h: 0.6 } }).output);
+  assert.deepEqual(readJpegSize(wide), { width: 1280, height: 480 });
+  const unknownSize = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath });
+  assert.deepEqual(readJpegSize(unknownSize), { width: 1600, height: 900 });
+});
+
+test('영상 크기: 90°·270° 회전이면 필터 화소·표시 크기의 가로·세로를 바꾸고, 정사각이 아닌 화소는 Chromium 처럼 한 변을 늘린 표시 크기를 쓴다', () => {
+  assert.deepEqual(resolveFrameGeometry({ width: 1600, height: 900 }), { frameWidth: 1600, frameHeight: 900, displayWidth: 1600, displayHeight: 900 });
+  for (const rotation of [90, -90, 270, -270]) {
+    assert.deepEqual(resolveFrameGeometry({ width: 1600, height: 900, rotation }), { frameWidth: 900, frameHeight: 1600, displayWidth: 900, displayHeight: 1600 }, String(rotation));
+  }
+  assert.deepEqual(resolveFrameGeometry({ width: 1600, height: 900, rotation: -180 }), { frameWidth: 1600, frameHeight: 900, displayWidth: 1600, displayHeight: 900 });
+  // 넓은 화소(HDV 1440×1080, 4:3)는 가로를, 좁은 화소(3:4)는 세로를 늘린다. 필터 화소는 저장 화소 그대로다.
+  assert.deepEqual(resolveFrameGeometry({ width: 1440, height: 1080, sampleAspectRatio: 4 / 3 }), { frameWidth: 1440, frameHeight: 1080, displayWidth: 1920, displayHeight: 1080 });
+  assert.deepEqual(resolveFrameGeometry({ width: 1080, height: 1080, sampleAspectRatio: 3 / 4 }), { frameWidth: 1080, frameHeight: 1080, displayWidth: 1080, displayHeight: 1440 });
+  assert.deepEqual(resolveFrameGeometry({ width: 1440, height: 1080, rotation: 90, sampleAspectRatio: 4 / 3 }), { frameWidth: 1080, frameHeight: 1440, displayWidth: 1080, displayHeight: 1920 });
+  // 출력 크기는 표시 크기, crop 은 필터 화소로 정한다. 상한 안이어도 표시 크기가 저장 화소와 다르면 맞춰 늘린다.
+  assert.deepEqual(resolveCaptureSize({ frameWidth: 900, frameHeight: 1600, displayWidth: 900, displayHeight: 1600 }),
+    { crop: { width: 900, height: 1600 }, output: { width: 720, height: 1280 } });
+  assert.deepEqual(resolveCaptureSize({ frameWidth: 1440, frameHeight: 1080, displayWidth: 1920, displayHeight: 1080, normRect: { x: 0, y: 0, w: 0.5, h: 0.5 } }),
+    { crop: { width: 720, height: 540 }, output: { width: 960, height: 540 } });
+  assert.match(buildJpegCaptureArgList({ filePath: 'v.mp4', timeMs: 0, qscale: 2, frameWidth: 720, frameHeight: 576, displayWidth: 768, displayHeight: 576 }).join(' '),
+    /scale=w=768:h=576:flags=bilinear,setsar=1 /);
+});
+
+// 표시 회전만 다르게 담는다(화소는 그대로). 회전 행렬을 쓰는 -display_rotation 이 없는 ffmpeg 는 옛 rotate 태그로 담는다.
+async function createRotatedClip({ basePath, fileName, rotation }) {
+  const filePath = path.join(dirPath, fileName);
+  try {
+    await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-y', '-display_rotation', String(rotation), '-i', basePath, '-c', 'copy', filePath] });
+  } catch {
+    await runBinary({ binaryPath: ffmpegPath, argList: ['-v', 'error', '-y', '-i', basePath, '-c', 'copy', '-metadata:s:v:0', `rotate=${(360 - rotation) % 360}`, filePath] });
+  }
+  return filePath;
+}
+
+// JPEG 의 위·아래 1/4 띠 평균색. 회전이 맞는지(눕지 않았는지) 본다.
+async function readJpegBandColor(buffer, band) {
+  const cropFilter = band === 'top' ? 'crop=iw:ih/4:0:0' : 'crop=iw:ih/4:0:ih*3/4';
+  const rgb = await runBinary({
+    binaryPath: ffmpegPath, inputBuffer: buffer,
+    argList: ['-v', 'error', '-f', 'image2pipe', '-i', 'pipe:0', '-vf', `${cropFilter},scale=1:1,format=rgb24`, '-f', 'rawvideo', 'pipe:1'],
+  });
+  return Array.from(rgb);
+}
+
+test('JPEG 캡처: 90° 회전 영상은 제품 표시 크기(세로 영상)로 줄이고 방향은 자동 회전 그대로, 넓은 화소 영상은 표시 크기로 편다', async () => {
+  // 왼쪽 빨강·오른쪽 파랑 1600×900 을 반시계 90° 로 표시하면 위가 파랑, 아래가 빨강인 900×1600 화면이 된다.
+  const basePath = await createRawClip({
+    fileName: 'split.mp4',
+    inputArgList: ['-f', 'lavfi', '-i', 'color=c=red:s=800x900:r=5:d=1', '-f', 'lavfi', '-i', 'color=c=blue:s=800x900:r=5:d=1'],
+    filterComplex: '[0:v][1:v]hstack=inputs=2,format=yuv420p[v]',
+    outputArgList: ['-map', '[v]', '-c:v', 'libx264', '-preset', 'veryfast'],
+  });
+  const rotatedPath = await createRotatedClip({ basePath, fileName: 'split-rot90.mp4', rotation: 90 });
+  const probe = await probeVideo({ filePath: rotatedPath, ffprobePath });
+  assert.equal(Math.abs(probe.rotation), 90, '시험 영상에 회전 정보가 들어 있다');
+  assert.deepEqual([probe.width, probe.height, probe.frameWidth, probe.frameHeight, probe.displayWidth, probe.displayHeight], [1600, 900, 900, 1600, 900, 1600]);
+  const sizeOption = { frameWidth: probe.frameWidth, frameHeight: probe.frameHeight, displayWidth: probe.displayWidth, displayHeight: probe.displayHeight };
+  const unscaled = await captureJpeg({ filePath: rotatedPath, timeMs: 400, durationMs: 1000, ffmpegPath });
+  const scaled = await captureJpeg({ filePath: rotatedPath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption });
+  assert.deepEqual(readJpegSize(unscaled), { width: 900, height: 1600 }, '자동 회전한 화면');
+  assert.deepEqual(readJpegSize(scaled), { width: 720, height: 1280 }, '제품 canvas 크기(세로 긴 변 1280)');
+  for (const buffer of [unscaled, scaled]) {
+    const [topRed, , topBlue] = await readJpegBandColor(buffer, 'top');
+    const [bottomRed, , bottomBlue] = await readJpegBandColor(buffer, 'bottom');
+    assert.ok(topBlue > 200 && topRed < 80, `위는 파랑: ${topRed},${topBlue}`);
+    assert.ok(bottomRed > 200 && bottomBlue < 80, `아래는 빨강: ${bottomRed},${bottomBlue}`);
+  }
+  const cropped = await captureJpeg({ filePath: rotatedPath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption, normRect: { x: 0, y: 0, w: 1, h: 0.5 } });
+  assert.deepEqual(readJpegSize(cropped), { width: 900, height: 800 }, '상한 안의 crop 은 자동 회전 뒤 화소 그대로');
+  const [croppedRed, , croppedBlue] = await readJpegColor(cropped);
+  assert.ok(croppedBlue > 200 && croppedRed < 80, `회전 화면의 위 절반은 파랑: ${croppedRed},${croppedBlue}`);
+
+  const widePixelPath = await createRawClip({
+    fileName: 'hdv.mp4',
+    inputArgList: ['-f', 'lavfi', '-i', 'color=c=red:s=1440x1080:r=5:d=1'],
+    filterComplex: '[0:v]setsar=4/3,format=yuv420p[v]',
+    outputArgList: ['-map', '[v]', '-c:v', 'libx264', '-preset', 'veryfast'],
+  });
+  const wideProbe = await probeVideo({ filePath: widePixelPath, ffprobePath });
+  assert.deepEqual([wideProbe.frameWidth, wideProbe.frameHeight, wideProbe.displayWidth, wideProbe.displayHeight], [1440, 1080, 1920, 1080]);
+  const wide = await captureJpeg({
+    filePath: widePixelPath, timeMs: 400, durationMs: 1000, ffmpegPath,
+    frameWidth: wideProbe.frameWidth, frameHeight: wideProbe.frameHeight, displayWidth: wideProbe.displayWidth, displayHeight: wideProbe.displayHeight,
+  });
+  assert.deepEqual(readJpegSize(wide), { width: 1280, height: 720 }, '표시 크기 1920×1080 의 긴 변 1280');
 });
 
 test('홀수 해상도도 480×270 으로 샘플링하고 JPEG 는 원본 화소 기준으로 자른다', async () => {

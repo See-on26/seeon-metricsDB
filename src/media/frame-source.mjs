@@ -5,7 +5,7 @@ import {
 
 const STDERR_TAIL_LENGTH = 2000;
 
-// 제품은 400ms 마다 공유 화면 ROI 를 480×270 canvas 에 늘려 그려 RGBA 를 읽는다(main.js:657-675). 비율을 지키지 않으므로
+// 제품은 400ms 마다 공유 화면 ROI 를 480×270 canvas 에 늘려 그려 RGBA 를 읽는다(main.js:671-689). 비율을 지키지 않으므로
 // 4:3·홀수 해상도도 여백 없이 480×270 으로 늘린다. 공장은 ROI 가 전체 프레임이고, ffmpeg 가 같은 격자로 줄인 원시 프레임을 흘린다.
 // 격자 k 번째 프레임은 영상 시각 k×sampleMs 에 화면에 보이는 프레임, 곧 그 시각 이하에서 시작한 마지막 프레임이다.
 // fps 필터 round=up 이 그 프레임을 고른다(기본 near 는 반 칸 안의 다음 프레임을 당겨 온다). start_time=0 은 영상 stream 이
@@ -121,7 +121,7 @@ export function openSampleFrameReader({
   };
 }
 
-// main.js:612-618 의 narrowToPointingRegion 과 같은 식. ROI 가 전체 프레임이라 결과도 프레임 기준 정규화 사각형이다.
+// main.js:625-631 의 narrowToPointingRegion 과 같은 식. ROI 가 전체 프레임이라 결과도 프레임 기준 정규화 사각형이다.
 export function narrowToPointingRegion({ sub, margin = POINTING_CROP_MARGIN }) {
   const x0 = Math.max(0, sub.x - margin);
   const y0 = Math.max(0, sub.y - margin);

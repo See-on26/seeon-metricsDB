@@ -23,6 +23,10 @@ export function buildResultConfig({ pipelineConfig, mode = MODE_MAP.delayed }) {
     gapModelId: modelConfig.gapModelByModeMap?.[mode] ?? null,
     routerMode: modelConfig.routerMode ?? null,
     isScaleEnabled: modelConfig.isScaleEnabled ?? null,
+    // 슬라이드 전사 백엔드(vlm·ocr)와 틈 후보 출처(asr·audio). 같은 --out 에서 백엔드를 바꿔 돌리면 다른 결과로 보고 다시 만든다.
+    // OCR 주소(ocrUrl)는 다른 서비스 주소처럼 견주지 않는다.
+    slideTextBackend: modelConfig.slideTextBackend ?? null,
+    gapSource: modelConfig.gapSource ?? null,
   };
 }
 

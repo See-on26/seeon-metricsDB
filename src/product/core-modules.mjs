@@ -14,6 +14,7 @@ export {
 export { DelayBuffer, isCaptionDroppable, EXCESS_DROP_MS } from '../../seeon-meet/src/renderer/core/audio-renderer/delay-buffer.js';
 export { NarrationScheduler } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-scheduler.js';
 export { GapCandidateStore, resolveGapSearchFromMs } from '../../seeon-meet/src/renderer/core/audio-renderer/gap-candidate-store.js';
+export { GAP_CANDIDATE_SOURCE_MAP } from '../../seeon-meet/src/renderer/core/audio-renderer/audio-gap-candidates.js';
 export {
   isImmediateCaption, isAnchoredCaption, NarrationHoldGate,
 } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-entry.js';
@@ -38,7 +39,7 @@ export {
   SilenceTrigger, evaluateSilencePrecondition, SILENCE_TRANSCRIPT_WINDOW_MS, SILENCE_SKIP_LABEL_MAP,
 } from '../../seeon-meet/src/renderer/core/trigger/silence-trigger.js';
 export {
-  DeixisCandidateScheduler, CANDIDATE_SOURCE_MAP,
+  DeixisCandidateScheduler, CANDIDATE_SOURCE_MAP, SUBMIT_RESULT_MAP,
 } from '../../seeon-meet/src/renderer/core/trigger/deixis-candidate-scheduler.js';
 export { judgeScreenDependency, SCREEN_DEPENDENCY_REASON_MAP } from '../../seeon-meet/src/renderer/core/trigger/screen-dependency.js';
 export { PointingLocator, describeDirection } from '../../seeon-meet/src/renderer/core/trigger/pointing-locator.js';
@@ -46,4 +47,7 @@ export { SlideHistogramGate } from '../../seeon-meet/src/renderer/core/trigger/s
 export { SlideEmbeddingRegistry } from '../../seeon-meet/src/renderer/core/trigger/slide-embedding-registry.js';
 export { SlideDwellGate, DWELL_STATE_MAP } from '../../seeon-meet/src/renderer/core/trigger/slide-dwell-gate.js';
 export { computeGridEmbedding } from '../../seeon-meet/src/renderer/core/trigger/frame-embedding.js';
-export { wallToVideoTimeMs, resolveSpeechEndWallTs } from '../../seeon-meet/src/renderer/core/capture/video-time.js';
+export {
+  wallToVideoTimeMs, resolveSpeechEndWallTs, attachCandidateEventVideoTime,
+} from '../../seeon-meet/src/renderer/core/capture/video-time.js';
+export { fitWithinLongEdge, MAX_FRAME_LONG_EDGE_PX } from '../../seeon-meet/src/renderer/core/capture/frame-scale.js';

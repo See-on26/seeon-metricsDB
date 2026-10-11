@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {
-  MODE_MAP, DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_QUEUE_TTL_MS, listDisabledNarrationClass, computeLookaheadMs, computeContextHoldMs,
+  MODE_MAP, DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_QUEUE_TTL_MS, GAP_CANDIDATE_SOURCE_MAP, listDisabledNarrationClass,
+  computeLookaheadMs, computeContextHoldMs,
 } from '../product/core-modules.mjs';
 import { POINTING_SAMPLE_MS } from './renderer-constants.mjs';
 import { createSessionContext } from './session-context.mjs';
@@ -27,7 +28,7 @@ const SESSION_END_LIMIT_MS = 30000;
 // 이보다 짧은 원음 꼬리는 표본 하나도 안 되어 붙이지 않는다.
 const MIN_SOURCE_TAIL_MS = 1;
 
-// main.js:986-994 describeBeforeWindow
+// main.js:1006-1014 describeBeforeWindow
 function describeBeforeWindow({ policy, anchorTs, nowPerf }) {
   const { beforeMs } = policy || {};
   if (Number.isFinite(anchorTs)) {
@@ -48,14 +49,16 @@ function appendSourceTail({ pieceList, fromMediaMs, toMediaMs }) {
   return { pieceList: [...pieceList, tailPiece], appendedTailMs: tailMs };
 }
 
-// main.js 의 attemptStartExperiment(1764-1871)·stopExperiment(1877-1935)·finalizeSession(1937-1953) 을 영상 하나의 세션으로 옮긴다.
+// main.js 의 attemptStartExperiment(1837-1948)·stopExperiment(1954-2015)·finalizeSession(2017-2033) 을 영상 하나의 세션으로 옮긴다.
 // 회의 캡처 시작 = 영상 0ms, 영상 끝(D) 에서 캡처 쪽 감지를 멈추고, 지연 재생·생성 중인 해설이 빠질 때까지(배수) 돌린 뒤 정지한다.
 export function createSessionSimulator({ clock, bridge, video, prep, options, workDir, log = console, onProgress = () => {} }) {
   const mediaDurationMs = video.probe.durationMs;
   const featureToggleStore = buildFeatureToggleStore({ isPageTransitionIncluded: options.isPageTransitionIncluded });
   let fatalError = null;
   const frameAccess = createFrameAccess({
-    clock, frameReader: prep.frameReader, filePath: video.filePath, mediaDurationMs, ffmpegPath: options.ffmpegPath,
+    clock, frameReader: prep.frameReader, filePath: video.filePath, mediaDurationMs,
+    frameWidth: video.probe.frameWidth, frameHeight: video.probe.frameHeight,
+    displayWidth: video.probe.displayWidth, displayHeight: video.probe.displayHeight, ffmpegPath: options.ffmpegPath,
     timeoutMs: options.frameIoTimeoutMs ?? FRAME_IO_TIMEOUT_MS, log,
     onFatal: (error) => { fatalError ??= error; },
   });
@@ -76,7 +79,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
   let startElapsedMs = null;
   let playingUntilElapsedMs = -Infinity;
 
-  // main.js:1590-1595 onPipelineEvent. asr 이벤트에는 main 트리거가 뽑은 후보 구(triggerCandidateList)가 실려 온다.
+  // main.js:1657-1662 onPipelineEvent. asr 이벤트에는 main 트리거가 뽑은 후보 구(triggerCandidateList)가 실려 온다.
   bridge.onRendererEvent('pipeline-event', ({ payload, requestContext }) => {
     if (payload.type === 'asr') { asrGlue.handleAsrTranscript(payload); return; }
     if (payload.type === 'caption') outputGlue.handleCaptionEvent({ payload, requestContext });
@@ -137,7 +140,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
 
   async function start() {
     const { state, policy } = ctx;
-    // 꺼 둔 분류를 main 에 먼저 알린다(main.js:1233-1238, 1294).
+    // 꺼 둔 분류를 main 에 먼저 알린다(main.js:1261-1266, 1322).
     await invokeUnderClock({
       channel: 'pipeline-feature-toggles', payload: { disabledClassList: listDisabledNarrationClass({ store: featureToggleStore }) },
       limitMs: SESSION_START_LIMIT_MS,
@@ -147,6 +150,12 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
       channel: 'pipeline-session-start', payload: { mode: ctx.mode, asrLanguage: video.language }, limitMs: SESSION_START_LIMIT_MS,
     });
     if (!sessionResult?.sessionId) throw new Error(`제품 파이프라인 세션을 시작하지 못했다: ${sessionResult?.message || '세션 ID 없음'}`);
+    // 제품 렌더러는 세션 시작 결과의 gapSource 로 틈 후보 출처를 정한다(main.js:1857-1858). 공장은 ASR 끝 시각 후보(asr)만 옮겼으므로
+    // 다른 출처면 멈춘다. CLI 는 시작 전 점검에서 막고, 여기서는 워커를 따로 띄운 경우에도 audio 로 적힌 결과가 asr 로 돌지 않게 한다.
+    const gapSource = sessionResult.gapSource ?? GAP_CANDIDATE_SOURCE_MAP.asr;
+    if (gapSource !== GAP_CANDIDATE_SOURCE_MAP.asr) {
+      throw new Error(`틈 후보 출처 ${gapSource}(SEEON_GAP_SOURCE)는 공장이 아직 지원하지 않는다 — 지우거나 asr 로 둔다`);
+    }
     state.currentSessionId = sessionResult.sessionId;
     state.recordPath = sessionResult.recordPath || null;
     state.lastScreenTransitionAt = clock.nowPerf();
@@ -157,7 +166,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
         + ` · 앞 맥락 ${describeBeforeWindow({ policy, anchorTs: state.lastScreenTransitionAt, nowPerf: clock.nowPerf() })}`
         + ` · 뒤 맥락 ${Math.round((policy?.afterMs ?? 0) / 1000)}초`
         + ` (ASR 청크 ${policy?.asrSegmentMs}ms(무음 절단 ${policy?.asrMinSegmentMs}ms 이후)`
-        + ` + look-ahead ${computeLookaheadMs({ mode: ctx.mode })}ms + 보류 ${computeContextHoldMs({ mode: ctx.mode })}ms)`,
+        + ` + look-ahead ${computeLookaheadMs({ mode: ctx.mode })}ms + 보류 ${computeContextHoldMs({ mode: ctx.mode })}ms) · 틈 후보=${gapSource}`,
     });
     ctx.markSessionStart();
     startElapsedMs = clock.elapsedMs();
@@ -192,7 +201,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     playbackChain?.stop();
   }
 
-  // main.js:1937-1953 finalizeSession. 제품처럼 정지 뒤 ASR 드레인을 main 이 가상 setTimeout 으로 기다리므로 시계를 돌리며 기다린다.
+  // main.js:2017-2033 finalizeSession. 제품처럼 정지 뒤 ASR 드레인을 main 이 가상 setTimeout 으로 기다리므로 시계를 돌리며 기다린다.
   async function endPipelineSession() {
     ctx.state.currentSessionId = null;
     let endResult = null;

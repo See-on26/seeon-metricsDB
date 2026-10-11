@@ -6,7 +6,7 @@ import { createVirtualClock } from '../src/clock/virtual-clock.mjs';
 import { createFrameAccess } from '../src/session/frame-access.mjs';
 import { openSampleFrameReader } from '../src/media/frame-source.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
-import { createTestClip } from './helpers/media-fixtures.mjs';
+import { createTestClip, readJpegSize } from './helpers/media-fixtures.mjs';
 import { waitRealUntil } from './helpers/real-wait.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
@@ -66,6 +66,21 @@ test('영상 stream 이 끝난 뒤 시각은 마지막으로 받은 프레임을
     const [r, , b] = await readJpegColor(buffer);
     assert.ok(b > 200 && r < 80, `마지막 화면은 파랑: ${r},${b}`);
     assert.deepEqual(access.getStats(), { captureCount: 1, captureFailCount: 0, captureFallbackCount: 1 });
+  } finally {
+    frameReader.close();
+  }
+});
+
+test('JPEG 캡처는 원본 영상 크기를 받아 제품처럼 긴 변 1280 상한으로 줄인다', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'wide.mp4', width: 1600, height: 900, colorTimeline: [['blue', 1]], hasAudio: false });
+  const clock = createVirtualClock();
+  const frameReader = openSampleFrameReader({ filePath, ffmpegPath });
+  const access = createFrameAccess({
+    clock, frameReader, filePath, mediaDurationMs: 1000, frameWidth: 1600, frameHeight: 900, ffmpegPath, log: silentLog,
+  });
+  try {
+    assert.deepEqual(readJpegSize(await access.captureFrameJpeg({ timeMs: 400 })), { width: 1280, height: 720 });
+    assert.deepEqual(readJpegSize(await access.captureFrameJpeg({ timeMs: 400, normRect: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 } })), { width: 800, height: 450 });
   } finally {
     frameReader.close();
   }

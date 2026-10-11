@@ -5,7 +5,7 @@ import {
 import { readLevelAt } from '../media/audio-levels.mjs';
 import { AUDIO_SPEAK_THRESHOLD, NARRATION_ECHO_TAIL_MS, SILENCE_TICK_MS } from './renderer-constants.mjs';
 
-// main.js 의 isNarrationEchoWindow(1660-1667)·100ms 침묵 tick(1669-1682)·handleSilenceTrigger(1684-1719).
+// main.js 의 isNarrationEchoWindow(1727-1734)·100ms 침묵 tick(1736-1751)·handleSilenceTrigger(1753-1788).
 export function createSilenceGlue({ ctx }) {
   const { clock, bridge, state, core } = ctx;
   let timer = null;
@@ -59,7 +59,7 @@ export function createSilenceGlue({ ctx }) {
   }
 
   return {
-    // attemptStartExperiment(main.js:1818) 의 silenceTrigger.reset 과 100ms tick 시작.
+    // attemptStartExperiment(main.js:1894) 의 silenceTrigger.reset 과 100ms tick 시작.
     start() {
       core.silenceTrigger.reset({ nowPerf: clock.nowPerf() });
       timer = clock.setInterval(tick, SILENCE_TICK_MS);

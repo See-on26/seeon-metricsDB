@@ -79,7 +79,8 @@ export async function startMockServices({
   asrScriptList = DEFAULT_ASR_SCRIPT_LIST, ttsDurationMs = 800, vlmGroundingText = '빨간 막대 그래프의 상승 구간',
 } = {}) {
   const state = {
-    asrIndex: 0, asrStatus: 200, ttsStatus: 200, routerGapVerdict: 'O', callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0 },
+    asrIndex: 0, asrStatus: 200, ttsStatus: 200, routerGapVerdict: 'O', callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0, ocr: 0 },
+    ocrMeanScoreList: [0.95], ocrStatus: 200,
   };
   const serverList = [];
   async function listen(handler) {
@@ -131,8 +132,18 @@ export async function startMockServices({
     response.writeHead(200, { 'content-type': 'audio/wav' });
     response.end(ttsWav);
   });
+  // 임베딩 서버는 슬라이드 전사 OCR(/ocr)도 받는다(제품 기본 OCR 주소 = 임베딩 origin + /ocr). OCR 답은 제품 ocr-client 가 읽는 모양이고,
+  // 평균 점수는 ocrMeanScoreList 를 호출 순서대로 돈다(낮으면 제품이 그 장을 VLM 으로 넘긴다).
   const embedOrigin = await listen(async (request, response) => {
     const body = await readBody(request);
+    if (new URL(request.url, 'http://mock').pathname === '/ocr') {
+      const meanScore = state.ocrMeanScoreList[state.callCountMap.ocr % state.ocrMeanScoreList.length];
+      state.callCountMap.ocr += 1;
+      if (state.ocrStatus !== 200) { sendJson(response, state.ocrStatus, { detail: 'mock OCR 장애' }); return; }
+      const lineList = [{ text: '매출 추이', score: meanScore }, { text: '2분기 | 120억 원', score: meanScore }];
+      sendJson(response, 200, { text: lineList.map((line) => line.text).join('\n'), lineList, meanScore, verticalBoxRatio: 0 });
+      return;
+    }
     state.callCountMap.embed += 1;
     sendJson(response, 200, { embedding: computeMockEmbedding(body) });
   });
@@ -150,6 +161,8 @@ export async function startMockServices({
     setAsrStatus: (status) => { state.asrStatus = status; },
     setTtsStatus: (status) => { state.ttsStatus = status; },
     setRouterGapVerdict: (verdict) => { state.routerGapVerdict = verdict; },
+    setOcrMeanScoreList: (scoreList) => { state.ocrMeanScoreList = scoreList; },
+    setOcrStatus: (status) => { state.ocrStatus = status; },
     close: () => Promise.all(serverList.map((server) => new Promise((resolve) => server.close(resolve)))),
   };
 }

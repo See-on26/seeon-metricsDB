@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildOutputPathMap } from './output-paths.mjs';
 import { listIdentityMismatch } from './result-identity.mjs';
-import { formatWarningBrief } from './result-health.mjs';
+import { formatWarningBrief, SERVICE_ORDER_LIST } from './result-health.mjs';
 import { REPEAT_SUMMARY_FILE_NAME, formatRepeatSummary } from './repeat-summary.mjs';
 
 const MANIFEST_FILE_NAME = 'manifest.json';
@@ -110,6 +110,22 @@ export function formatJobLabel(job) {
   return job.repeatCount > 1 ? `${job.videoId} r${job.repeatIndex}/${job.repeatCount}` : job.videoId;
 }
 
+const describePositiveCountMap = (countMap, keyList = Object.keys(countMap || {})) => keyList
+  .filter((key) => countMap?.[key] > 0).map((key) => `${key} ${countMap[key]}`).join(' · ');
+
+// 완료 영상의 서비스별 호출 수(0 은 뺀다)와 슬라이드 전사 출처·VLM 으로 넘긴 이유. 슬라이드 전사 백엔드(vlm·ocr)를 바꿔 견줄 때
+// VLM·OCR 호출 수를 summary 에서 바로 본다. 이 기록이 없는 결과(이전 형식·테스트 대역)는 빈 문자열이다.
+export function formatCallBrief({ serviceCountMap = null, slideText = null }) {
+  const partList = [];
+  const serviceText = describePositiveCountMap(serviceCountMap, SERVICE_ORDER_LIST);
+  if (serviceText) partList.push(`호출 ${serviceText}`);
+  if (slideText?.count > 0) {
+    const fallbackText = describePositiveCountMap(slideText.fallbackReasonCountMap);
+    partList.push(`슬라이드 전사 ${describePositiveCountMap(slideText.sourceCountMap) || '-'}${fallbackText ? `(VLM 으로 넘김 ${fallbackText})` : ''}`);
+  }
+  return partList.join(' / ');
+}
+
 // 완료 영상 중 경고(부하로 생긴 시간 초과·판정 대체 등)가 있는 것은 수와 ⚠ 로 드러낸다. 자세한 내용은 영상 JSON 의 warningList 에 있다.
 // --repeat N(N > 1)이면 수는 작업(영상 × 회차) 단위라 머리줄에 작업 수와 영상 수 × 반복 수를 적고, 반복 요약을 주면 끝에 영상별 반복 줄을 붙인다.
 export function formatSummary(manifest, repeatSummary = null) {
@@ -131,6 +147,8 @@ export function formatSummary(manifest, repeatSummary = null) {
     else if (video.status === 'done') {
       const warningText = formatWarningBrief(video.warningList);
       lineList.push(`  ✔ ${formatJobLabel(video)}: AD ${video.adCount ?? '-'}개${video.isSkipped ? ' (이전 실행)' : ''}${warningText ? ` ${warningText}` : ''}`);
+      const callText = formatCallBrief(video);
+      if (callText) lineList.push(`      ${callText}`);
     }
   }
   return `${lineList.join('\n')}\n${repeatSummary ? formatRepeatSummary(repeatSummary) : ''}`;

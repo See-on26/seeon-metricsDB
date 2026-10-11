@@ -1,7 +1,8 @@
 import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 
 // judge 는 탐지 단계 경량 LLM 판정(통합 라우터·무발화·지시 판정)이 GPU 서버로 보낸 호출이다. Bedrock 으로 넘어간 판정은 bedrock 에 든다.
-export const SERVICE_MAP = { vlm: 'vlm', judge: 'judge', asr: 'asr', tts: 'tts', embed: 'embed', bedrock: 'bedrock', other: 'other' };
+// ocr 은 슬라이드 전사 OCR(SEEON_SLIDE_TEXT_BACKEND=ocr)이 임베딩 서비스의 /ocr 로 보낸 호출이다.
+export const SERVICE_MAP = { vlm: 'vlm', judge: 'judge', asr: 'asr', tts: 'tts', embed: 'embed', ocr: 'ocr', bedrock: 'bedrock', other: 'other' };
 
 const BEDROCK_HOST_PATTERN = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
 const BEDROCK_MODEL_PATH_PATTERN = /\/model\/([^/]+)\/converse/;
@@ -30,10 +31,11 @@ export function classifyServiceUrl({ url, pipelineConfig }) {
   const originPath = `${target.origin}${target.pathname}`;
   // 제품 기본 판정 주소는 VLM(8801)과 따로 띄운 판정 LLM(8805)이라 주소만으로 갈린다. SEEON_JUDGE_GPU_URL 을 VLM 과 같게 두면
   // VLM 이 먼저 맞고, 그 경우는 classifyServiceRequest 가 몸통으로 다시 가른다.
+  // OCR 기본 주소는 임베딩 주소의 origin + /ocr(제품 config.js resolveOcrUrl)이라 임베딩과 origin 은 같고 경로로 갈린다.
   const serviceUrlList = [
     [pipelineConfig.vlmUrl, SERVICE_MAP.vlm], [pipelineConfig.judgeGpuUrl, SERVICE_MAP.judge], [pipelineConfig.asrUrl, SERVICE_MAP.asr],
     [pipelineConfig.ttsUrl, SERVICE_MAP.tts], [pipelineConfig.ttsLongUrl, SERVICE_MAP.tts],
-    [pipelineConfig.embedUrl, SERVICE_MAP.embed],
+    [pipelineConfig.embedUrl, SERVICE_MAP.embed], [pipelineConfig.ocrUrl, SERVICE_MAP.ocr],
   ];
   const matched = serviceUrlList.find(([serviceUrl]) => serviceUrl && toOriginPath(serviceUrl) === originPath);
   if (matched) {

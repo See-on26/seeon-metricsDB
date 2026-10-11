@@ -1,27 +1,33 @@
 import {
-  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, CANDIDATE_SOURCE_MAP, SCREEN_DEPENDENCY_REASON_MAP,
-  wallToVideoTimeMs, computeContextHoldMs, resolveBeforeAnchorTs, judgeScreenDependency,
+  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, CANDIDATE_SOURCE_MAP, SUBMIT_RESULT_MAP, SCREEN_DEPENDENCY_REASON_MAP,
+  wallToVideoTimeMs, resolveBeforeAnchorTs, judgeScreenDependency,
 } from '../product/core-modules.mjs';
 import { narrowToPointingRegion } from '../media/frame-source.mjs';
 import { DEIXIS_FALLBACK_BEFORE_MS, DEIXIS_FALLBACK_AFTER_MS } from './renderer-constants.mjs';
 
-// main.js:996-999
+// main.js:940-944
+const SUBMIT_RESULT_LABEL_MAP = {
+  [SUBMIT_RESULT_MAP.started]: 'look-ahead 대기',
+  [SUBMIT_RESULT_MAP.absorbed]: 'look-ahead 중인 후보에 합침',
+  [SUBMIT_RESULT_MAP.merged]: '판단 전 보류 중인 결정에 합침',
+};
+
+// main.js:1016-1019
 const SCREEN_DEPENDENCY_LABEL_MAP = {
   [SCREEN_DEPENDENCY_REASON_MAP.speechTrigger]: '발화 지시가 트리거',
   [SCREEN_DEPENDENCY_REASON_MAP.unsupportedSource]: '발화가 아닌 출처 — 트리거로 쓰지 않는다',
 };
 
-// main.js 의 deixisDetector onDeixis(927-941)·runDeixisDecision(1001-1092).
+// main.js 의 deixisDetector onDeixis(947-961)·runDeixisDecision(1021-1112).
 // 지시 후보는 main 트리거가 뽑은 후보 구(candidateList)를 실어 오고, 공백(O/X)은 main 의 판단 LLM 이 후보마다 가린다.
 export function createDeixisGlue({ ctx }) {
   const { clock, bridge, state, core } = ctx;
 
   function handleDeixis({ text, trigger, candidateList, captureTs, eventWallTs }) {
     const { region, pointingOrderHint } = ctx.getPointingSequence();
-    ctx.log.log(`[deixis] 발화 지시 "${trigger}" → look-ahead 대기`);
     const nowVideoTimeMs = ctx.videoTimeMs();
     const nowTs = clock.nowPerf();
-    core.candidateScheduler.submit({
+    const submitResult = core.candidateScheduler.submit({
       source: CANDIDATE_SOURCE_MAP.speech, utterance: text, trigger, candidateList, region, pointingOrderHint,
       captureTs: nowTs, videoTimeMs: nowVideoTimeMs,
       // wallToVideoTimeMs 의 기본 nowWallTs 는 실제 Date.now() 라 가상 벽시계를 넘긴다.
@@ -29,28 +35,35 @@ export function createDeixisGlue({ ctx }) {
       leadText: core.transcriptWindow.getOpenSentenceLead({ nowTs, sinceTs: state.lastDeixisDecidedAt }),
       chunkEndWallTs: captureTs,
     });
+    ctx.log.log(`[deixis] 발화 지시 "${trigger}" → ${SUBMIT_RESULT_LABEL_MAP[submitResult] || submitResult}`);
   }
 
-  async function runDeixisDecision({ source, utterance, triggerList, candidateList = [], region, pointingOrderHint, captureTs,
-    eventVideoTimeMs = null, triggerUtterance = utterance, leadText = '', followText = '', isSentenceWaited = false }) {
+  // 화면은 판정이 난 지금 뜨고(포인팅 영역이 있으면 여백을 둔 그 부분만, main.js:625-637), 판단 LLM 에는 보류(균형 2.5초)가 끝난
+  // 결정(whenSealed)을 보낸다. 보류 중에 들어온 뒤 조각과 그 후보도 이 결정에 합쳐져 함께 판단을 받는다. 세션을 멈춰 후보
+  // 스케줄러가 reset 되면 결정은 null 로 온다.
+  async function runDeixisDecision(firedDecision) {
     state.lastDeixisDecidedAt = clock.nowPerf();
+    const sessionSeq = state.experimentSeq;
+    const firedRegion = firedDecision.region;
+    const [buffer, decision] = await Promise.all([
+      ctx.captureFrameJpeg({ normRect: firedRegion ? narrowToPointingRegion({ sub: firedRegion }) : null }),
+      firedDecision.whenSealed ?? firedDecision,
+    ]);
+    if (!buffer || !decision) return;
+    if (!state.isSessionActive || sessionSeq !== state.experimentSeq) return;
+    const {
+      source, utterance, triggerList, candidateList = [], region, pointingOrderHint, captureTs, eventVideoTimeMs = null,
+      triggerUtterance = utterance, leadText = '', followText = '', isSentenceWaited = false, mergedChunkCount = 0,
+    } = decision;
     const label = triggerList.join(', ') || '-';
     if (leadText || followText) {
       ctx.markDebug({
         stage: DEBUG_STAGE_MAP.asr, verdict: DEBUG_VERDICT_MAP.info, reason: '조각을 문장 단위로 이어 붙임',
-        detail: `트리거 조각="${triggerUtterance}" → 문장="${utterance}" (앞="${leadText || '-'}" · 뒤="${followText || '-'}" · 문장 끝 추가 대기=${isSentenceWaited ? 'Y' : 'N'})`,
+        detail: `트리거 조각="${triggerUtterance}" → 문장="${utterance}" (앞="${leadText || '-'}" · 뒤="${followText || '-'}" · 문장 끝 추가 대기=${isSentenceWaited ? 'Y' : 'N'}`
+          + `${mergedChunkCount > 0 ? ` · 판단 전 보류 중 합친 뒤 조각 ${mergedChunkCount}개` : ''})`,
       });
     }
     const { beforeMs, afterMs } = ctx.policy;
-    // 판정 시점 화면을 뜬다. 포인팅 영역이 있으면 여백을 둔 그 부분만(main.js:1016, 612-624).
-    const buffer = await ctx.captureFrameJpeg({ normRect: region ? narrowToPointingRegion({ sub: region }) : null });
-    if (!buffer) return;
-    const holdMs = computeContextHoldMs({ mode: ctx.mode });
-    if (holdMs > 0) {
-      const sessionSeq = state.experimentSeq;
-      await ctx.waitVirtual(holdMs);
-      if (!state.isSessionActive || sessionSeq !== state.experimentSeq) return;
-    }
     const anchorTs = resolveBeforeAnchorTs({ mode: ctx.mode, screenTransitionTs: state.lastScreenTransitionAt });
     const { before, after, tokenCount, droppedCount } = core.transcriptWindow.getContext({
       triggerTs: captureTs, beforeMs: beforeMs ?? DEIXIS_FALLBACK_BEFORE_MS, afterMs: afterMs ?? DEIXIS_FALLBACK_AFTER_MS, anchorTs,
@@ -77,7 +90,7 @@ export function createDeixisGlue({ ctx }) {
       hasPointingRegion: Boolean(region), pointingOrderHint, slideLabel: core.slideRegistry.currentLabel(), wordBudgetMap, eventVideoTimeMs,
       triggerCandidateList: candidateList,
     }).catch(() => null);
-    // saveDeixisFrame(main.js:1083-1087)은 화면 확인용 저장이라 공장은 하지 않는다.
+    // saveDeixisFrame(main.js:1103-1107)은 화면 확인용 저장이라 공장은 하지 않는다.
   }
 
   ctx.hooks.onDeixis = handleDeixis;
