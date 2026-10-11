@@ -5,6 +5,9 @@ import { startPlaybackChain } from '../src/session/playback-chain.mjs';
 import { createOutputGlue } from '../src/session/output-glue.mjs';
 import { createTestContext } from './helpers/session-fakes.mjs';
 import { createToneWav } from './helpers/mock-services.mjs';
+import {
+  isAudioGapActive, buildInsertionGapList, resolveInsertionTargetMs, GAP_CANDIDATE_SOURCE_MAP,
+} from '../seeon-meet/src/renderer/core/audio-renderer/audio-gap-candidates.js';
 
 // 캡션에는 소리가 없다. 렌더러가 재생 차례가 가까운 해설만 pipeline-tts 로 합성한다. 대역 TTS 는 캡션 문장마다 정해 둔 길이의
 // wav 를 돌려주고(같은 문장은 같은 버퍼), 실패로 정해 둔 문장은 제품 핸들러처럼 { isOk: false, message } 로 답한다.
@@ -487,4 +490,18 @@ test('연결 코드가 삼킨 비동기 작업 오류는 경고와 함께 이름
   await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 17000 && harness.ctx.getTaskCount() === 0 });
   assert.deepEqual(harness.ctx.getSwallowedErrorCountMap(), { caption: 2 });
   assert.equal(harness.warnList.length, 2);
+});
+
+// 공장 resolveInsertionTimeMs 는 ASR 후보 저장소를 바로 읽고 고른 자리를 그대로 쓴다. 제품 main.js 의 collectInsertionGapList·
+// snapInsertionToSilence 가 틈 후보 출처 asr 에서 그와 같다는 것(후보 목록·목표 자리를 그대로 돌려줌)을 제품 함수로 묶는다.
+test('틈 후보 출처 asr 면 제품의 틈 후보 고르기·넣기 직전 맞추기가 ASR 후보·목표 자리를 그대로 돌려준다(공장이 옮기지 않아도 같다)', () => {
+  assert.equal(isAudioGapActive({ gapSource: GAP_CANDIDATE_SOURCE_MAP.asr, hasDelayBuffer: true, delayMs: 10000 }), false);
+  assert.equal(isAudioGapActive({ gapSource: GAP_CANDIDATE_SOURCE_MAP.audio, hasDelayBuffer: true, delayMs: 10000 }), true, 'audio 는 균형 모드에서 켜진다(공장 미지원)');
+  const asrList = [{ videoTimeMs: 4200, kind: 'complete', silenceMs: 800, offsetMs: -1000 }];
+  const spanList = [{ startMs: 5000, endMs: 6000 }];
+  assert.equal(buildInsertionGapList({
+    isActive: false, asrList, spanList, segmentList: [], isTranscribedAt: () => true, isMeasuredAt: () => true,
+    triggerVideoTimeMs: 5200, fromVideoTimeMs: 0, toVideoTimeMs: 10000,
+  }), asrList);
+  assert.deepEqual(resolveInsertionTargetMs({ isActive: false, targetMs: 5200, playheadMs: 3000, liveMs: 13000, spanList }), { insertMs: 5200, reason: null });
 });
