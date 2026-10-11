@@ -55,7 +55,8 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
   const featureToggleStore = buildFeatureToggleStore({ isPageTransitionIncluded: options.isPageTransitionIncluded });
   let fatalError = null;
   const frameAccess = createFrameAccess({
-    clock, frameReader: prep.frameReader, filePath: video.filePath, mediaDurationMs, ffmpegPath: options.ffmpegPath,
+    clock, frameReader: prep.frameReader, filePath: video.filePath, mediaDurationMs,
+    frameWidth: video.probe.width, frameHeight: video.probe.height, ffmpegPath: options.ffmpegPath,
     timeoutMs: options.frameIoTimeoutMs ?? FRAME_IO_TIMEOUT_MS, log,
     onFatal: (error) => { fatalError ??= error; },
   });

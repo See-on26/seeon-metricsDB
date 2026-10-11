@@ -47,3 +47,4 @@ export { SlideEmbeddingRegistry } from '../../seeon-meet/src/renderer/core/trigg
 export { SlideDwellGate, DWELL_STATE_MAP } from '../../seeon-meet/src/renderer/core/trigger/slide-dwell-gate.js';
 export { computeGridEmbedding } from '../../seeon-meet/src/renderer/core/trigger/frame-embedding.js';
 export { wallToVideoTimeMs, resolveSpeechEndWallTs } from '../../seeon-meet/src/renderer/core/capture/video-time.js';
+export { fitWithinLongEdge, MAX_FRAME_LONG_EDGE_PX } from '../../seeon-meet/src/renderer/core/capture/frame-scale.js';

@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleepReal } from 'node:timers/promises';
 import { openSampleFrameReader, narrowToPointingRegion } from '../src/media/frame-source.mjs';
-import { captureJpeg, toMjpegQscale } from '../src/media/jpeg-capture.mjs';
+import { captureJpeg, toMjpegQscale, resolveCaptureSize, buildJpegCaptureArgList } from '../src/media/jpeg-capture.mjs';
 import { resolveFfmpegPaths, runBinary } from '../src/media/ffmpeg.mjs';
-import { SlideHistogramGate, PointingLocator } from '../src/product/core-modules.mjs';
+import { SlideHistogramGate, PointingLocator, fitWithinLongEdge, MAX_FRAME_LONG_EDGE_PX } from '../src/product/core-modules.mjs';
 import { POINTING_LOCATOR_OPTION_MAP } from '../src/session/renderer-constants.mjs';
 import { createTestClip, readJpegSize } from './helpers/media-fixtures.mjs';
 
@@ -99,7 +99,7 @@ test('JPEG 캡처: 전체 프레임·crop 크기, 영상 끝 뒤 시각은 마�
   assert.deepEqual(readJpegSize(full), { width: 320, height: 180 });
   const cropped = await captureJpeg({ filePath: deckPath, timeMs: 1200, durationMs: 4000, normRect: { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, ffmpegPath });
   assert.deepEqual(readJpegSize(cropped), { width: 160, height: 90 });
-  // 제품 canvas 크기는 Math.max(2, Math.round(영역 화소))다(main.js:596-597). 4:2:0 영상이어도 홀수 크기를 그대로 낸다.
+  // 긴 변 1280 안의 영역은 제품 canvas 크기가 Math.max(2, Math.round(영역 화소))다(frame-scale.js fitWithinLongEdge). 4:2:0 영상이어도 홀수 크기를 그대로 낸다.
   const oddCropped = await captureJpeg({ filePath: deckPath, timeMs: 1200, durationMs: 4000, normRect: { x: 0.11, y: 0.11, w: 0.36, h: 0.35 }, ffmpegPath });
   assert.deepEqual(readJpegSize(oddCropped), { width: Math.round(320 * 0.36), height: Math.round(180 * 0.35) });
   const late = await captureJpeg({ filePath: deckPath, timeMs: 99_000, durationMs: 4000, ffmpegPath });
@@ -181,6 +181,44 @@ test('프레임이 드문 영상(1fps)도 그 시각에 보이는 프레임을 �
   assert.ok(tail, '마지막 프레임 구간(3~4s) 캡처');
   const [r2, , b2] = await readJpegColor(tail);
   assert.ok(b2 > 200 && r2 < 80, `3.5s JPEG 파랑: ${r2},${b2}`);
+});
+
+test('JPEG 크기: 영역 화소의 긴 변이 1280 을 넘으면 제품 fitWithinLongEdge 크기로 줄이고, 그 안이면 줄이지 않는다', () => {
+  assert.equal(MAX_FRAME_LONG_EDGE_PX, 1280);
+  const caseList = [
+    [{ frameWidth: 1920, frameHeight: 1080 }, { width: 1920, height: 1080 }, { width: 1280, height: 720 }],
+    [{ frameWidth: 1080, frameHeight: 1920 }, { width: 1080, height: 1920 }, { width: 720, height: 1280 }],
+    [{ frameWidth: 1920, frameHeight: 1080, normRect: { x: 0, y: 0, w: 0.5, h: 0.5 } }, { width: 960, height: 540 }, { width: 960, height: 540 }],
+    [{ frameWidth: 1920, frameHeight: 1080, normRect: { x: 0.05, y: 0.1, w: 0.9, h: 0.6 } }, { width: 1728, height: 648 }, { width: 1280, height: 480 }],
+    [{ frameWidth: 321, frameHeight: 181, normRect: { x: 0, y: 0.38, w: 0.37, h: 0.62 } }, { width: 119, height: 112 }, { width: 119, height: 112 }],
+  ];
+  for (const [input, crop, output] of caseList) {
+    const size = resolveCaptureSize(input);
+    assert.deepEqual(size, { crop, output }, JSON.stringify(input));
+    const regionWidth = input.frameWidth * (input.normRect?.w ?? 1);
+    const regionHeight = input.frameHeight * (input.normRect?.h ?? 1);
+    assert.deepEqual(size.output, fitWithinLongEdge({ width: regionWidth, height: regionHeight }), '제품 함수로 정한 크기');
+  }
+  const argText = (option) => buildJpegCaptureArgList({ filePath: 'v.mp4', timeMs: 0, qscale: 2, ...option }).join(' ');
+  assert.match(argText({ frameWidth: 1920, frameHeight: 1080 }), /round=up,scale=w=1280:h=720:flags=bilinear /);
+  assert.doesNotMatch(argText({ frameWidth: 1280, frameHeight: 720 }), /scale=/, '상한 안이면 예전과 같은 인자');
+  assert.doesNotMatch(argText({}), /scale=/, '원본 크기를 모르면 줄이지 않는다');
+});
+
+test('JPEG 캡처: 원본 크기를 주면 긴 변 1280 상한으로 줄여 굽는다(crop 뒤 줄임)', async () => {
+  const filePath = await createTestClip({ dirPath, fileName: 'wide.mp4', width: 1600, height: 900, colorTimeline: [['red', 1]], hasAudio: false });
+  const sizeOption = { frameWidth: 1600, frameHeight: 900 };
+  const full = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption });
+  assert.deepEqual(readJpegSize(full), { width: 1280, height: 720 });
+  const [r, , b] = await readJpegColor(full);
+  assert.ok(r > 200 && b < 80, `줄인 JPEG 도 빨강: ${r},${b}`);
+  const half = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption, normRect: { x: 0, y: 0, w: 0.5, h: 0.5 } });
+  assert.deepEqual(readJpegSize(half), { width: 800, height: 450 }, '상한 안의 crop 은 줄이지 않는다');
+  const wide = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath, ...sizeOption, normRect: { x: 0.05, y: 0.1, w: 0.9, h: 0.6 } });
+  assert.deepEqual(readJpegSize(wide), resolveCaptureSize({ ...sizeOption, normRect: { w: 0.9, h: 0.6 } }).output);
+  assert.deepEqual(readJpegSize(wide), { width: 1280, height: 480 });
+  const unknownSize = await captureJpeg({ filePath, timeMs: 400, durationMs: 1000, ffmpegPath });
+  assert.deepEqual(readJpegSize(unknownSize), { width: 1600, height: 900 });
 });
 
 test('홀수 해상도도 480×270 으로 샘플링하고 JPEG 는 원본 화소 기준으로 자른다', async () => {
