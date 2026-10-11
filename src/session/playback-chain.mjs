@@ -67,7 +67,7 @@ export function startPlaybackChain({
 
   return {
     ...chain,
-    // stopExperiment(main.js:1950-2011) 의 내레이션 출력기 → 해설 보류 게이트(+ 미리 만들기 비움) → 지연 버퍼(stopDelayBuffer 400-411)
+    // stopExperiment(main.js:1954-2015) 의 내레이션 출력기 → 해설 보류 게이트(+ 미리 만들기 비움) → 지연 버퍼(stopDelayBuffer 400-411)
     // 순서로 정리한다. 재생하지 못한 해설(소리 나기 전 해설·대기 줄·보류·삽입 대기)은 제품처럼 모두 stopped 로 알린다.
     stop() {
       chain.narrator.stop();

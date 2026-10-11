@@ -1,8 +1,9 @@
 import {
   DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, FEATURE_KEY_MAP, classifyUtteranceEnding, buildSegmentBoundaryList, resolveSpeechEndWallTs,
+  attachCandidateEventVideoTime,
 } from '../product/core-modules.mjs';
 
-// main.js 의 AsrSegmenter onSegment(905-916)·collectGapCandidateList(1114-1128)·handleAsrTranscript(1130-1169).
+// main.js 의 AsrSegmenter onSegment(905-916)·collectGapCandidateList(1114-1128)·handleAsrTranscript(1130-1173).
 export function createAsrGlue({ ctx, segmentList, segmentBufferMap }) {
   const { clock, bridge, state, core, featureToggleStore } = ctx;
   const voicedList = segmentList.filter((segment) => segment.isVoiced);
@@ -55,13 +56,19 @@ export function createAsrGlue({ ctx, segmentList, segmentBufferMap }) {
       ctx.markDebug({ stage: DEBUG_STAGE_MAP.asr, verdict: DEBUG_VERDICT_MAP.pass, reason: '전사 도착', detail: `"${trimmed}"` });
       // 전사 창 시각은 도착 시각(performance.now)이다.
       core.transcriptWindow.push({ text: trimmed, ts: clock.nowPerf() });
+      // 후보 구마다 그 말을 끝낸 영상 시각(eventVideoTimeMs)을 붙인다. main 은 해설이 다루는 구 가운데 가장 늦게 말한 시각에 해설을 두고,
+      // 이 값이 없으면 조용히 결정의 첫 후보 시각으로 돌아간다. nowWallTs 의 기본값은 실제 Date.now() 라 가상 벽시계를 넘긴다.
+      const timedCandidateList = attachCandidateEventVideoTime({
+        candidateList: triggerCandidateList, text, chunkStartTs: ts, chunkEndTs: endTs, segmentList: asrSegmentList,
+        nowWallTs: clock.nowWall(), nowVideoTimeMs: ctx.videoTimeMs(),
+      });
       // 대기·보류 중인 지시 후보가 있으면 이 조각과 그 후보를 그 결정에 먼저 붙인다. 이 조각으로 판정이 났으면 새 후보의 트리거로 쓰지 않는다.
       // 결정의 발화에 들어간 조각은 다음 후보의 앞 조각(lead)으로 다시 쓰지 않게 그 시각을 기억한다.
-      const { isAppended, isDecided } = core.candidateScheduler.appendTranscript({ text: trimmed, endTs, candidateList: triggerCandidateList });
+      const { isAppended, isDecided } = core.candidateScheduler.appendTranscript({ text: trimmed, endTs, candidateList: timedCandidateList });
       if (isAppended) state.lastDeixisDecidedAt = clock.nowPerf();
       if (!isDecided) {
         core.deixisDetector.handleTranscript({
-          text: trimmed, candidateList: triggerCandidateList, captureTs: endTs,
+          text: trimmed, candidateList: timedCandidateList, captureTs: endTs,
           resolveEventWallTs: ({ trigger }) => resolveSpeechEndWallTs({ chunkStartTs: ts, chunkEndTs: endTs, segmentList: asrSegmentList, trigger }),
         });
       }

@@ -1,5 +1,5 @@
 // main.js·코어 클래스 안의 비공개 상수. 원본과 같은지는 test/renderer-constants.test.mjs 가 원본 글자를 읽어 확인한다.
-// 행 번호는 seeon-meet origin/production 990e7a3 기준.
+// 행 번호는 seeon-meet origin/production fb093c1 기준.
 export const POINTING_SAMPLE_MS = 400;              // main.js:536
 export const POINTING_SAMPLE_WIDTH = 480;           // main.js:537
 export const POINTING_SAMPLE_HEIGHT = 270;          // main.js:538
@@ -10,9 +10,9 @@ export const LOCAL_EMBED_MATCH_THRESHOLD = 0.02;    // main.js:554
 export const AUDIO_SPEAK_THRESHOLD = 0.02;          // main.js:920 (레벨 > 임계)
 export const NARRATION_ECHO_TAIL_MS = 500;          // main.js:921
 export const ANNOTATION_SNAPSHOT_MIN_INTERVAL_MS = 2000; // main.js:988
-export const CAPTION_SOURCE_TRANSITION = 'page-transition'; // main.js:1171
-export const GAP_SAFETY_MS = 2000;                  // main.js:1481
-export const SILENCE_TICK_MS = 100;                 // main.js:1747
+export const CAPTION_SOURCE_TRANSITION = 'page-transition'; // main.js:1175
+export const GAP_SAFETY_MS = 2000;                  // main.js:1485
+export const SILENCE_TICK_MS = 100;                 // main.js:1751
 export const DEIXIS_FALLBACK_BEFORE_MS = 60000;     // main.js:1050
 export const DEIXIS_FALLBACK_AFTER_MS = 2000;       // main.js:1050
 export const VAD_SAMPLE_MS = 100;                   // core/trigger/asr-segmenter.js:4

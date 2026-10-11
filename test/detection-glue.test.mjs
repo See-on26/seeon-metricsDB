@@ -6,6 +6,10 @@ import { createSilenceGlue } from '../src/session/silence-glue.mjs';
 import { buildFeatureToggleStore, EVAL_PRESET_MAP } from '../src/session/feature-preset.mjs';
 import { FEATURE_KEY_MAP, NARRATION_CLASS_MAP, listDisabledNarrationClass } from '../src/product/core-modules.mjs';
 import { createTestContext, levelListFrom } from './helpers/session-fakes.mjs';
+import { createRequire } from 'node:module';
+import { resolveProductPath } from '../src/product/product-paths.mjs';
+
+const { resolveNarrationEventVideoTimeMs } = createRequire(import.meta.url)(resolveProductPath('src/main/caption-pipeline/router/unified-router.js'));
 
 function setupDetection(options = {}) {
   const harness = createTestContext(options);
@@ -20,6 +24,8 @@ const deliverAt = ({ clock, asrGlue, ctx }, atMs, { text, startMs, endMs, segmen
   () => asrGlue.handleAsrTranscript({ text, ts: ctx.toWallTs(startMs), endTs: ctx.toWallTs(endMs), segmentList, triggerCandidateList }), atMs);
 const GRAPH_CANDIDATE = { type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 };
 const RISE_CANDIDATE = { type: 'change', phrase: '늘었습니다', start: 0, end: 5 };
+// 연결 코드가 후보마다 붙이는 그 말을 끝낸 영상 시각(제품 attachCandidateEventVideoTime). main 은 해설이 다루는 구 가운데 가장 늦은 이 시각에 해설을 둔다.
+const timed = (candidate, eventVideoTimeMs) => ({ ...candidate, eventVideoTimeMs });
 
 test('평가 프리셋은 페이지 전환·화자·요약을 끄고, 페이지 전환 포함이면 페이지 전환만 켠다', () => {
   assert.deepEqual(EVAL_PRESET_MAP, { page_transition: false, speaker_identity: false, meeting_summary: false });
@@ -70,7 +76,8 @@ test('트리거 후보가 실린 조각이 오면 lookahead 2.5초 뒤 판정, �
   assert.deepEqual(Object.keys(call.payload.wordBudgetMap).sort(), ['deixis', 'interpretation', 'visual_description']);
   assert.equal(call.payload.wordBudgetMap.deixis.isDroppable, false);
   assert.equal(call.payload.ts, harness.ctx.toWallTs(6800 + 5000));
-  assert.deepEqual(call.payload.triggerCandidateList, [GRAPH_CANDIDATE]);
+  // 후보 구가 든 세그먼트 끝(조각 시작 3000 + 2.4초). 가상 벽시계로 바꿔야 이 값이 된다(실제 Date.now 로 바꾸면 수십만 초 어긋난다).
+  assert.deepEqual(call.payload.triggerCandidateList, [timed(GRAPH_CANDIDATE, 3000 + 2400)]);
   assert.ok(harness.bridge.sendList.some(({ payload }) => payload.reason === '발화 지시가 트리거' && payload.detail === '근거="이 그래프"'),
     '화면 의존성 근거는 후보 구에서 읽는다');
   assert.deepEqual(harness.warnList, []);
@@ -87,7 +94,8 @@ test('앞의 끝나지 않은 조각은 lead 로, lookahead 중 온 조각은 fo
   assert.equal(payload.utterance, '그래서 다음 자료로 이 그래프를 보시면 매출이 늘었습니다.');
   assert.equal(payload.afterTranscript, '매출이 늘었습니다.');
   assert.equal(payload.beforeTranscript, '그래서 다음 자료로 이 그래프를 보시면');
-  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE, RISE_CANDIDATE], 'lookahead 중 온 뒤 조각의 후보도 같은 판단에 합친다');
+  // 세그먼트가 없으면 후보 시각은 그 조각 끝이다.
+  assert.deepEqual(payload.triggerCandidateList, [timed(GRAPH_CANDIDATE, 6000), timed(RISE_CANDIDATE, 9000)], 'lookahead 중 온 뒤 조각의 후보도 같은 판단에 합친다');
   await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 30000 });
   assert.equal(harness.bridge.invokeList.filter((item) => item.channel === 'pipeline-deixis').length, 1, '합친 조각으로 새 판단을 따로 만들지 않는다');
   assert.deepEqual(harness.warnList, []);
@@ -109,7 +117,7 @@ test('판정 뒤 균형 보류(2.5초) 중에 온 뒤 조각의 후보는 같은
   assert.deepEqual(harness.captureList, [{ videoTimeMs: 6800 + 2500, normRect: null }], '화면은 판정이 난 때 한 번만 뜬다');
   const { payload } = deixisCallList[0];
   assert.equal(payload.utterance, '이 그래프를 보시면 상반기에는 비슷하다가 하반기에 크게 늘었습니다.');
-  assert.deepEqual(payload.triggerCandidateList, [GRAPH_CANDIDATE, RISE_CANDIDATE]);
+  assert.deepEqual(payload.triggerCandidateList, [timed(GRAPH_CANDIDATE, 6000), timed(RISE_CANDIDATE, 10500)], '합친 뒤 조각의 후보는 제 말 끝 시각을 가진다');
   assert.equal(payload.eventVideoTimeMs, 6000, '해설 자리는 첫 후보 시각 그대로다');
   const [joinDebug] = findDebug(harness, '조각을 문장 단위로 이어 붙임');
   assert.match(joinDebug.payload.detail, /판단 전 보류 중 합친 뒤 조각 1개\)$/);
@@ -124,8 +132,8 @@ test('보류가 끝난 뒤 온 후보는 앞 판정과 4초 안이어도 버리�
   await harness.clock.runUntil({ isDone: () => false, deadlineElapsedMs: 30000 });
   const deixisCallList = harness.bridge.invokeList.filter((item) => item.channel === 'pipeline-deixis');
   assert.deepEqual(deixisCallList.map((call) => [call.atElapsedMs, call.payload.triggerCandidateList]), [
-    [6800 + 2500 + 2500, [GRAPH_CANDIDATE]],
-    [12000 + 2500 + 2500, [RISE_CANDIDATE]],
+    [6800 + 2500 + 2500, [timed(GRAPH_CANDIDATE, 6000)]],
+    [12000 + 2500 + 2500, [timed(RISE_CANDIDATE, 9500)]],
   ]);
   assert.deepEqual(harness.warnList, []);
 });
@@ -141,6 +149,26 @@ test('보류 중에 세션을 멈춰 후보 스케줄러를 비우면 그 결정
   assert.equal(harness.captureList.length, 1, '판정 때 화면은 떴다');
   assert.equal(harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis'), false);
   assert.equal(harness.ctx.getTaskCount(), 0);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('후보 시각은 글자 위치로 고른 세그먼트 끝을 가상 시계로 바꾼 영상 시각이고, 늦게 도착해도 말한 시각을 가리킨다', async () => {
+  const harness = setupDetection();
+  // 같은 조각에 세그먼트 두 개. "이 그래프" 는 첫 세그먼트(0~1.2초), "늘었습니다" 는 둘째(1.6~2.9초). ASR 이 1.9초 늦게 도착한다.
+  const text = '이 그래프를 보시면 매출이 늘었습니다.';
+  const segmentList = [{ startSec: 0, endSec: 1.2, text: '이 그래프를 보시면' }, { startSec: 1.6, endSec: 2.9, text: '매출이 늘었습니다.' }];
+  const graph = { ...GRAPH_CANDIDATE, start: 0, end: 5 };
+  const rise = { ...RISE_CANDIDATE, start: text.indexOf('늘었습니다'), end: text.indexOf('늘었습니다') + 5 };
+  deliverAt(harness, 7900, { text, startMs: 3000, endMs: 6000, segmentList, triggerCandidateList: [graph, rise] });
+  await harness.clock.runUntil({ isDone: () => harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis') });
+  const { payload } = harness.bridge.invokeList.find((item) => item.channel === 'pipeline-deixis');
+  assert.deepEqual(payload.triggerCandidateList.map((candidate) => [candidate.phrase, candidate.eventVideoTimeMs]), [['이 그래프', 4200], ['늘었습니다', 5900]]);
+  assert.equal(payload.eventVideoTimeMs, 4200, '결정 시각은 여전히 첫 후보 구가 든 세그먼트 끝');
+  // main 은 판단 결과(후보 + isGap)에서 해설이 다루는 구의 eventVideoTimeMs 를 읽는다. 연결 코드가 붙인 이름·값 그대로 해설 자리가 옮겨지는지 본다.
+  const judgeList = payload.triggerCandidateList.map((candidate) => ({ ...candidate, isGap: true }));
+  assert.equal(resolveNarrationEventVideoTimeMs({
+    judgeList, selectedCandidate: { anchor: '이 그래프', mergedAnchorList: ['늘었습니다'] }, fallbackMs: payload.eventVideoTimeMs,
+  }), 5900, '해설이 다루는 구 가운데 가장 늦게 말한 시각');
   assert.deepEqual(harness.warnList, []);
 });
 

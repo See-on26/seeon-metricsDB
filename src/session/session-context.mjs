@@ -56,7 +56,7 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     }),
     delaySource: null, delayBuffer: null, narrationScheduler: null, narrator: null, narrationGate: null, narrationAudio: null,
   };
-  // attemptStartExperiment(main.js:1856-1861) 의 모드별 lookahead·문장 대기·판단 전 보류.
+  // attemptStartExperiment(main.js:1860-1865) 의 모드별 lookahead·문장 대기·판단 전 보류.
   core.candidateScheduler.setLookaheadMs({ lookaheadMs: computeLookaheadMs({ mode }) });
   core.candidateScheduler.setSentenceWaitMs({ sentenceWaitMs: computeSentenceWaitMs({ mode }) });
   core.candidateScheduler.setHoldMs({ holdMs: computeContextHoldMs({ mode }) });

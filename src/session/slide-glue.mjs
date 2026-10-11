@@ -207,7 +207,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   }
 
   return {
-    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1915).
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1919).
     start() {
       isStopped = false;
       samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);
