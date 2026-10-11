@@ -551,7 +551,7 @@ test('HTTP 점검: 상태 코드와 상관없이 HTTP 로 답하면 살아 있�
   }
 });
 
-test('시작 전 점검: 슬라이드 전사 백엔드가 ocr 이면 OCR 주소(기본 임베딩 origin + /ocr)가 전사하는지 보고, vlm 이면 보지 않는다', async () => {
+test('시작 전 점검: 슬라이드 전사 백엔드가 ocr 이면 OCR 주소(기본 임베딩 origin + /ocr)가 전사하는지 보고, 닿지 않으면 터널 대상·닿았지만 실패면 바로 점검 실패, vlm 이면 보지 않는다', async () => {
   const runWith = async (env, checkOcrService) => {
     const checkedOcrList = [];
     const { downServiceList, problemList } = await runPreflight({
@@ -564,12 +564,19 @@ test('시작 전 점검: 슬라이드 전사 백엔드가 ocr 이면 OCR 주소(
   };
   const vlm = await runWith({}, () => assert.fail('vlm 백엔드는 OCR 을 부르지 않는다'));
   assert.deepEqual([vlm.checkedOcrList, vlm.downServiceList], [[], []]);
-  const healthy = await runWith({ SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, () => ({ isUp: true, detail: 'HTTP 200' }));
-  assert.deepEqual([healthy.checkedOcrList, healthy.downServiceList], [['http://127.0.0.1:8804/ocr'], []]);
-  const broken = await runWith({ SEEON_SLIDE_TEXT_BACKEND: 'ocr', SEEON_OCR_URL: 'http://127.0.0.1:18806/ocr' }, () => ({ isUp: false, detail: 'HTTP 503 — OCR 엔진이 없다' }));
+  const healthy = await runWith({ SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, () => ({ isUp: true, isReachable: true, detail: 'HTTP 200' }));
+  assert.deepEqual([healthy.checkedOcrList, healthy.downServiceList, healthy.problemList], [['http://127.0.0.1:8804/ocr'], [], []]);
+  const broken = await runWith(
+    { SEEON_SLIDE_TEXT_BACKEND: 'ocr', SEEON_OCR_URL: 'http://127.0.0.1:18806/ocr' },
+    () => ({ isUp: false, isReachable: true, detail: 'HTTP 503 — OCR 엔진이 없다' }),
+  );
   assert.deepEqual(broken.checkedOcrList, ['http://127.0.0.1:18806/ocr']);
-  assert.deepEqual(broken.downServiceList, ['OCR 127.0.0.1:18806 HTTP 503 — OCR 엔진이 없다']);
-  assert.deepEqual(broken.problemList, []);
+  assert.deepEqual(broken.downServiceList, [], '닿았지만 실패한 OCR 은 터널로 고칠 수 없어 터널 대상이 아니다');
+  assert.deepEqual(broken.problemList, [
+    'OCR 127.0.0.1:18806 에 닿았지만 실패했다(HTTP 503 — OCR 엔진이 없다) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 SEEON_SLIDE_TEXT_BACKEND 를 지운다',
+  ]);
+  const unreachable = await runWith({ SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, () => ({ isUp: false, isReachable: false, detail: '연결 거부(ECONNREFUSED)' }));
+  assert.deepEqual([unreachable.downServiceList, unreachable.problemList], [['OCR 127.0.0.1:8804 연결 거부(ECONNREFUSED)'], []]);
 });
 
 test('시작 전 점검: 틈 후보 출처가 asr 가 아니면(SEEON_GAP_SOURCE=audio, 공장 미지원) 분명한 이유로 막는다', async () => {
@@ -611,18 +618,18 @@ test('OCR 점검: 작은 JPEG 를 POST 해 2xx 와 제품이 읽는 응답 모�
   const closedUrl = `http://127.0.0.1:${closedServer.address().port}/ocr`;
   await new Promise((resolve) => { closedServer.close(resolve); });
   try {
-    assert.deepEqual(await probeOcrService({ url: `${origin}/ok`, timeoutMs: 1000 }), { isUp: true, detail: 'HTTP 200' });
+    assert.deepEqual(await probeOcrService({ url: `${origin}/ok`, timeoutMs: 1000 }), { isUp: true, isReachable: true, detail: 'HTTP 200' });
     const { method, contentType, body } = receivedList[0];
     assert.deepEqual([method, contentType], ['POST', 'image/jpeg']);
     assert.deepEqual([body[0], body[1], body.at(-2), body.at(-1)], [0xff, 0xd8, 0xff, 0xd9], 'JPEG 한 장을 보낸다');
     assert.deepEqual(await probeOcrService({ url: `${origin}/no-engine`, timeoutMs: 1000 }), {
-      isUp: false, detail: 'HTTP 503 — OCR 엔진이 없다(GPU 서버 setup-embed.sh·fetch-ocr-models.sh) — OCR 엔진 없음: FileNotFoundError: OCR 모델 없음',
+      isUp: false, isReachable: true, detail: 'HTTP 503 — OCR 엔진이 없다(GPU 서버 setup-embed.sh·fetch-ocr-models.sh) — OCR 엔진 없음: FileNotFoundError: OCR 모델 없음',
     });
     assert.deepEqual(await probeOcrService({ url: `${origin}/missing`, timeoutMs: 1000 }), {
-      isUp: false, detail: 'HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버) — Not Found',
+      isUp: false, isReachable: true, detail: 'HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버) — Not Found',
     });
-    assert.deepEqual(await probeOcrService({ url: `${origin}/odd`, timeoutMs: 1000 }), { isUp: false, detail: 'HTTP 200 이지만 OCR 응답 모양이 아니다' });
-    assert.deepEqual(await probeOcrService({ url: closedUrl, timeoutMs: 1000 }), { isUp: false, detail: '연결 거부(ECONNREFUSED)' });
+    assert.deepEqual(await probeOcrService({ url: `${origin}/odd`, timeoutMs: 1000 }), { isUp: false, isReachable: true, detail: 'HTTP 200 이지만 OCR 응답 모양이 아니다' });
+    assert.deepEqual(await probeOcrService({ url: closedUrl, timeoutMs: 1000 }), { isUp: false, isReachable: false, detail: '연결 거부(ECONNREFUSED)' });
   } finally {
     await new Promise((resolve) => { server.close(resolve); });
   }

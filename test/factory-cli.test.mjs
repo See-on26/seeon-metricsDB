@@ -166,7 +166,7 @@ test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이�
   assert.equal(fs.existsSync(outDir), false, '점검에 실패하면 출력 폴더를 만들지 않는다');
 });
 
-test('CLI: 틈 후보 출처 audio(공장 미지원)나 답하지 않는 OCR(백엔드 ocr)은 시작 전 점검에서 막고 워커 없이 종료 코드 1', async () => {
+test('CLI: 틈 후보 출처 audio(공장 미지원)·닿았지만 실패한 OCR 은 터널 없이 시작 전 점검에서 막고, 닿지 않는 OCR 은 터널을 연 뒤 다시 본다', async () => {
   const audio = createLogCollector();
   const audioOutDir = path.join(makeDir('gap-audio'), 'run');
   assert.equal(await runFactoryCli({
@@ -176,21 +176,38 @@ test('CLI: 틈 후보 출처 audio(공장 미지원)나 답하지 않는 OCR(백
   assert.ok(audio.lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: SEEON_GAP_SOURCE=audio 는 공장이 아직 지원하지 않는다')), audio.lineList.join('\n'));
   assert.equal(fs.existsSync(audioOutDir), false);
 
+  // OCR 이 HTTP 로 답했지만 실패(404)하면 터널로 고칠 수 없어 터널을 열지 않고 바로 점검 실패다(PASSING_PREFLIGHT 의 startTunnel 은 부르면 실패).
   const ocr = createLogCollector();
   const checkedOcrList = [];
   assert.equal(await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('ocr-down'), 'run')], env: { ...BASE_ENV, SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, log: ocr.log,
     workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
-    checkOcrService: async ({ url }) => { checkedOcrList.push(url); return { isUp: false, detail: 'HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)' }; },
-    startTunnel: async () => null,
+    checkOcrService: async ({ url }) => {
+      checkedOcrList.push(url);
+      return { isUp: false, isReachable: true, detail: 'HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)' };
+    },
   }), 1);
   assert.deepEqual(checkedOcrList, ['http://127.0.0.1:9/ocr']);
-  assert.ok(ocr.lineList.includes('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: OCR 127.0.0.1:9 HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)'), ocr.lineList.join('\n'));
+  assert.ok(ocr.lineList.includes('[factory] 시작 전 점검 실패: OCR 127.0.0.1:9 에 닿았지만 실패했다(HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 SEEON_SLIDE_TEXT_BACKEND 를 지운다'), ocr.lineList.join('\n'));
+  assert.equal(ocr.lineList.some((line) => line.includes('터널 모듈로 연결을 시도한다') || line.includes('닿지 못했다')), false, ocr.lineList.join('\n'));
+
+  // OCR 에 닿지 않으면(연결 거부) 터널 대상이다. 터널을 연 뒤 다시 보고 통과하면 돈다.
+  let isTunnelOpen = false;
+  let stopCount = 0;
+  const unreachable = createLogCollector();
+  assert.equal(await runFactoryCli({
+    argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('ocr-unreachable'), 'run')], env: { ...BASE_ENV, SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, log: unreachable.log,
+    workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    checkOcrService: async () => (isTunnelOpen ? { isUp: true, isReachable: true, detail: 'HTTP 200' } : { isUp: false, isReachable: false, detail: '연결 거부(ECONNREFUSED)' }),
+    startTunnel: async () => { isTunnelOpen = true; return { stop: async () => { stopCount += 1; } }; },
+  }), 0);
+  assert.ok(unreachable.lineList.includes('[factory] GPU 서비스 응답 없음(OCR 127.0.0.1:9 연결 거부(ECONNREFUSED)) — 제품 터널 모듈로 연결을 시도한다'), unreachable.lineList.join('\n'));
+  assert.equal(stopCount, 1);
 
   const okOutDir = path.join(makeDir('ocr-up'), 'run');
   assert.equal(await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', okOutDir], env: { ...BASE_ENV, SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, log: createLogCollector().log,
-    workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT, checkOcrService: async () => ({ isUp: true, detail: 'HTTP 200' }),
+    workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT, checkOcrService: async () => ({ isUp: true, isReachable: true, detail: 'HTTP 200' }),
   }), 0);
   assert.equal(readJson(path.join(okOutDir, 'manifest.json')).resultConfig.slideTextBackend, 'ocr');
 });

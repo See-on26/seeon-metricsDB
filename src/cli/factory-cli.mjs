@@ -7,7 +7,7 @@ import { parseFactoryArgs } from './parse-args.mjs';
 import { listInputVideos } from '../input/video-list.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../runner/worker-pool.mjs';
 import { inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord, formatJobLabel } from '../runner/manifest.mjs';
-import { runPreflight, listDownServices, startProductTunnel, buildMemoryWarning } from '../runner/preflight.mjs';
+import { runPreflight, inspectGpuServices, startProductTunnel, buildMemoryWarning } from '../runner/preflight.mjs';
 import { buildOutputPathMap } from '../runner/output-paths.mjs';
 import { acquireRunLock } from '../runner/run-lock.mjs';
 import { assertRemovableWorkDir, removeWorkDir } from '../runner/work-dir.mjs';
@@ -30,7 +30,8 @@ function loadFactoryEnv() {
   if (fs.existsSync(envPath)) process.loadEnvFile(envPath);
 }
 
-// GPU 서비스가 HTTP 로 답하지 않으면 제품 터널로 연 뒤 다시 점검한다. 연 터널은 돌려줘 실행이 끝날 때 닫는다.
+// GPU 서비스(OCR 포함)가 HTTP 로 답하지 않으면 제품 터널로 연 뒤 다시 점검한다. 연 터널은 돌려줘 실행이 끝날 때 닫는다.
+// OCR 이 닿았지만 실패한 것은 터널 대상이 아니다(시작 전 점검이 점검 실패로 넣는다). 다시 볼 때는 새로 생긴 실패만 더한다.
 async function openGpuAccess({ preflight, env, pipelineConfig, checkService, checkOcrService, startTunnel, log }) {
   if (!preflight.downServiceList.length) return null;
   log.log(`[factory] GPU 서비스 응답 없음(${preflight.downServiceList.join(', ')}) — 제품 터널 모듈로 연결을 시도한다`);
@@ -42,7 +43,11 @@ async function openGpuAccess({ preflight, env, pipelineConfig, checkService, che
     preflight.problemList.push(error.message);
   }
   // 터널이 열려도 원격 주소를 쓰는 서비스는 터널로 넘기지 않고, 터널 뒤 서비스가 죽었을 수도 있으므로 다시 본다.
-  const downServiceList = tunnel ? await listDownServices({ pipelineConfig, checkService, checkOcrService }) : preflight.downServiceList;
+  const recheck = tunnel ? await inspectGpuServices({ pipelineConfig, checkService, checkOcrService }) : null;
+  for (const problem of recheck?.problemList ?? []) {
+    if (!preflight.problemList.includes(problem)) preflight.problemList.push(problem);
+  }
+  const downServiceList = recheck ? recheck.downServiceList : preflight.downServiceList;
   if (downServiceList.length) preflight.problemList.push(`GPU 서비스에 닿지 못했다: ${downServiceList.join(', ')}`);
   return tunnel;
 }
