@@ -9,7 +9,7 @@ import { setTimeout as sleepReal } from 'node:timers/promises';
 import { listInputVideos } from '../src/input/video-list.mjs';
 import { parseFactoryArgs } from '../src/cli/parse-args.mjs';
 import { runWorkerPool, forkVideoWorker, buildVideoTimeout } from '../src/runner/worker-pool.mjs';
-import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
+import { isVideoDone, inspectVideoResult, readManifest, buildManifest, formatSummary, formatCallBrief, formatRunStamp, writeRunRecord } from '../src/runner/manifest.mjs';
 import { buildResultConfig } from '../src/runner/result-identity.mjs';
 import { buildReportConfig } from '../src/runner/run-video-job.mjs';
 import { buildAdReport } from '../src/output/ad-report.mjs';
@@ -340,6 +340,27 @@ test('manifest: 건너뛴 영상은 이전 기록(AD 수)을 살리고, 이전 �
   assert.match(summary, /seeon-meet -/);
   assert.match(summary, /old: AD 3개 \(이전 실행\)/);
   assert.match(summary, /lost: AD -개 \(이전 실행\)/);
+});
+
+test('summary: 완료 영상 아래에 서비스별 호출 수(OCR 포함)와 슬라이드 전사 출처·넘긴 이유를 한 줄 더 적는다', () => {
+  const slideText = {
+    count: 3, statusCountMap: { ready: 3 }, sourceCountMap: { ocr: 2, vlm: 1 },
+    fallbackReasonCountMap: { low_score: 1, vertical_text: 0, ocr_error: 0, ocr_bypass: 0 },
+  };
+  const manifest = buildManifest({
+    previousManifest: null, runOptions: {}, seeonMeet: { commit: 'abc', isDirty: false },
+    jobList: [{ videoId: 'a', outStem: 'a' }, { videoId: 'b', outStem: 'b' }],
+    resultList: [
+      { videoId: 'a', outStem: 'a', status: 'done', adCount: 2, serviceCountMap: { other: 1, embed: 8, ocr: 3, vlm: 6, asr: 18, judge: 0 }, slideText },
+      { videoId: 'b', outStem: 'b', status: 'done', adCount: 1 },
+    ],
+    skippedJobList: [], startedAt: 's', endedAt: 'e',
+  });
+  const lineList = formatSummary(manifest).split('\n');
+  const aIndex = lineList.indexOf('  ✔ a: AD 2개');
+  assert.equal(lineList[aIndex + 1], '      호출 asr 18 · vlm 6 · ocr 3 · embed 8 · other 1 / 슬라이드 전사 ocr 2 · vlm 1(VLM 으로 넘김 low_score 1)');
+  assert.equal(lineList[aIndex + 2], '  ✔ b: AD 1개', '호출 기록이 없는 결과는 줄을 더하지 않는다');
+  assert.equal(formatCallBrief({ serviceCountMap: { vlm: 4 }, slideText: { ...slideText, count: 0 } }), '호출 vlm 4');
 });
 
 test('manifest: 건너뛴 영상에 이전 실행의 실패 기록(이유)을 섞지 않는다', () => {

@@ -132,9 +132,12 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   if (incompleteReasonList.length) {
     throw new Error(`결과가 불완전하다 — ${incompleteReasonList.map(describeIncompleteReason).join(' · ')} (mp3·JSON 은 남겼고 JSON 은 isComplete=false)`);
   }
+  // serviceCountMap·slideText 는 summary 의 호출 줄에 쓴다(서비스별 호출 수, 슬라이드 전사 출처). 자세한 값은 JSON stats 에 있다.
   return {
     videoId: job.videoId, outStem: job.outStem, status: 'done', durationMs: probe.durationMs, processingMs: Math.round(processingMs),
     adCount: finalReport.adList.length, droppedCount: finalReport.droppedList.length, warningList,
+    serviceCountMap: Object.fromEntries(Object.entries(finalReport.stats.serviceMap).map(([service, stat]) => [service, stat.count])),
+    slideText: finalReport.stats.slideText,
     outputPathMap: { mp3: path.basename(pathMap.mp3Path), json: path.basename(pathMap.jsonPath) },
   };
 }

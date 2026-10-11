@@ -117,6 +117,19 @@ test('URL 로 서비스와 Bedrock 모델·VLM 폴백 여부를 가린다', () =
   }).isVlmFallback, false);
 });
 
+test('슬라이드 전사 OCR(/ocr)은 임베딩과 origin 이 같아도 경로로 갈라 ocr 로 센다', () => {
+  const { readPipelineConfig } = require(resolveProductPath('src/main/caption-pipeline/config.js'));
+  const productConfig = readPipelineConfig({ SEEON_SLIDE_TEXT_BACKEND: 'ocr' });
+  assert.equal(productConfig.ocrUrl, 'http://127.0.0.1:8804/ocr', '제품 기본 OCR 주소는 임베딩 origin + /ocr');
+  assert.equal(classifyServiceUrl({ url: productConfig.ocrUrl, pipelineConfig: productConfig }).service, 'ocr');
+  assert.equal(classifyServiceUrl({ url: productConfig.embedUrl, pipelineConfig: productConfig }).service, 'embed');
+  const splitConfig = readPipelineConfig({ SEEON_OCR_URL: 'http://127.0.0.1:8806/ocr' });
+  assert.equal(classifyServiceUrl({ url: 'http://127.0.0.1:8806/ocr', pipelineConfig: splitConfig }).service, 'ocr', 'SEEON_OCR_URL 로 나눈 주소');
+  assert.equal(classifyServiceUrl({ url: 'http://127.0.0.1:8804/ocr', pipelineConfig: splitConfig }).service, 'other', '설정과 다른 주소는 OCR 로 세지 않는다');
+  const { serviceMap } = computeServiceStats({ callLog: [{ service: 'ocr', elapsedMs: 300, status: 200 }, { service: 'ocr', elapsedMs: 500, status: 422 }] });
+  assert.deepEqual(serviceMap.ocr, { count: 2, errorCount: 1, p50Ms: 300, p95Ms: 500, maxMs: 500 });
+});
+
 test('호출 동안 진행 중 수가 1 이고, 몸통까지 받은 뒤 0 이 되며 요청 문맥에 기록이 붙는다', async () => {
   const clock = createVirtualClock();
   const requestContextStorage = createRequestContextStorage();

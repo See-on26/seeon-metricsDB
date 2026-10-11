@@ -23,9 +23,12 @@ const listSettledTtsRequest = (captionRecordList = []) => captionRecordList.map(
 // 단기 토큰 만료·권한 없음. 한 번 나면 그 뒤 Bedrock 호출(틈 추론·판정 대체·VLM 폴백)이 모두 실패한다.
 const BEDROCK_AUTH_STATUS_LIST = [401, 403];
 const JUDGE_BACKEND_GPU = 'gpu';
-const SERVICE_ORDER_LIST = [SERVICE_MAP.asr, SERVICE_MAP.vlm, SERVICE_MAP.judge, SERVICE_MAP.tts, SERVICE_MAP.embed, SERVICE_MAP.bedrock, SERVICE_MAP.other];
+// 경고·summary 의 서비스 순서. OCR 은 VLM 대신 슬라이드를 전사하므로 VLM 바로 뒤에 둔다.
+export const SERVICE_ORDER_LIST = [
+  SERVICE_MAP.asr, SERVICE_MAP.vlm, SERVICE_MAP.ocr, SERVICE_MAP.judge, SERVICE_MAP.tts, SERVICE_MAP.embed, SERVICE_MAP.bedrock, SERVICE_MAP.other,
+];
 const SERVICE_LABEL_MAP = {
-  [SERVICE_MAP.asr]: 'ASR', [SERVICE_MAP.vlm]: 'VLM', [SERVICE_MAP.judge]: '탐지 판정 GPU', [SERVICE_MAP.tts]: 'TTS',
+  [SERVICE_MAP.asr]: 'ASR', [SERVICE_MAP.vlm]: 'VLM', [SERVICE_MAP.ocr]: 'OCR', [SERVICE_MAP.judge]: '탐지 판정 GPU', [SERVICE_MAP.tts]: 'TTS',
   [SERVICE_MAP.embed]: '임베딩', [SERVICE_MAP.bedrock]: 'Bedrock', [SERVICE_MAP.other]: '기타 서비스',
 };
 export const WARNING_CODE_MAP = {

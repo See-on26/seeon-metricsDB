@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveOutputAudioFormat, buildPieceFilter, buildRenderChunkList } from '../src/output/render-plan.mjs';
 import { renderOutputMp3 } from '../src/output/render-mp3.mjs';
-import { REPORT_MODEL_CONFIG_KEY_LIST, buildAdReport, readPipelineRecordList } from '../src/output/ad-report.mjs';
+import {
+  REPORT_MODEL_CONFIG_KEY_LIST, buildAdReport, readPipelineRecordList, summarizeSlideTextRecordList,
+  SLIDE_TEXT_SOURCE_LIST, SLIDE_TEXT_FALLBACK_REASON_LIST,
+} from '../src/output/ad-report.mjs';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolveProductPath } from '../src/product/product-paths.mjs';
@@ -333,6 +336,61 @@ test('AD 기록: 모델 설정은 허용 목록의 이름만 남겨 제품이 �
   assert.equal(JSON.stringify(report).includes('secret'), false);
   // 제품 설정에 새 필드가 생기면 여기서 알린다. 비밀이 아니면 허용 목록에 더하고, 비밀이면 아래 목록에 더한다.
   assert.deepEqual(Object.keys(productConfig).filter((key) => !REPORT_MODEL_CONFIG_KEY_LIST.includes(key)), ['bedrockApiKey']);
+});
+
+// 제품 index.js 의 slide-text-store onSettled 가 남기는 디버그 줄과 같은 모양으로 만든다(아래 원본 글자 대조 시험이 모양을 묶는다).
+function buildSlideTextRecord({ slideLabel, status, textLength = 0, source = null, fallbackReason = null, lineCount = 0, elapsedMs = 0, errorMessage = '' }) {
+  return {
+    kind: 'debug', stage: 'value_check', verdict: status === 'failed' ? 'fail' : 'info', reason: `슬라이드 텍스트 전사 ${status}`,
+    detail: `슬라이드=${slideLabel} 글자수=${textLength} 출처=${source || '-'}`
+      + `${fallbackReason ? ` 넘김=${fallbackReason}` : ''} 줄=${lineCount} ${elapsedMs}ms`
+      + `${errorMessage ? ` · ${errorMessage}` : ''}`,
+    ts: 1,
+  };
+}
+
+test('AD 기록: 슬라이드 전사 출처(ocr·vlm)와 VLM 으로 넘긴 이유를 제품 기록에서 센다', () => {
+  const pipelineRecordList = [
+    buildSlideTextRecord({ slideLabel: '1', status: 'ready', textLength: 40, source: 'ocr', lineCount: 3, elapsedMs: 280 }),
+    buildSlideTextRecord({ slideLabel: '2', status: 'none', source: 'ocr', elapsedMs: 120 }),
+    buildSlideTextRecord({ slideLabel: '3', status: 'ready', textLength: 12, source: 'vlm', fallbackReason: 'low_score', elapsedMs: 3100 }),
+    buildSlideTextRecord({ slideLabel: '4', status: 'ready', textLength: 9, source: 'vlm', fallbackReason: 'vertical_text', elapsedMs: 2900 }),
+    buildSlideTextRecord({ slideLabel: '5', status: 'ready', textLength: 30, source: 'vlm', fallbackReason: 'ocr_error:OCR 연결 실패: fetch failed 줄=9', elapsedMs: 5200 }),
+    buildSlideTextRecord({ slideLabel: '6', status: 'ready', textLength: 30, source: 'vlm', fallbackReason: 'ocr_bypass', elapsedMs: 2500 }),
+    buildSlideTextRecord({ slideLabel: '7', status: 'failed', elapsedMs: 20000, errorMessage: 'VLM 시간 초과' }),
+    { kind: 'debug', stage: 'value_check', reason: '값 검사 통과', detail: '출처=vlm 줄=1 1ms' },
+    { kind: 'narration', ts: 2 },
+  ];
+  assert.deepEqual(summarizeSlideTextRecordList({ pipelineRecordList }), {
+    count: 7, statusCountMap: { ready: 5, none: 1, failed: 1 }, sourceCountMap: { ocr: 2, vlm: 4 },
+    fallbackReasonCountMap: { low_score: 1, vertical_text: 1, ocr_error: 1, ocr_bypass: 1 },
+  });
+  assert.deepEqual(summarizeSlideTextRecordList({ pipelineRecordList: [] }), {
+    count: 0, statusCountMap: {}, sourceCountMap: { ocr: 0, vlm: 0 }, fallbackReasonCountMap: { low_score: 0, vertical_text: 0, ocr_error: 0, ocr_bypass: 0 },
+  });
+  const report = buildAdReport({
+    video: { videoId: 'v1', file: '/v1.mp4', durationMs: 1000, width: 320, height: 180, language: 'ko' },
+    seeonMeet: { commit: 'c0ebca0', isDirty: false }, config: { mode: 'delayed' },
+    sessionStartWallMs: 0, pieceList: [{ kind: 'source', outStartMs: 0, outEndMs: 1000, srcStartMs: 0, srcEndMs: 1000 }],
+    captionRecordList: [], adPlayList: [], dropRecordList: [], pipelineRecordList, callLog: [],
+    adFileByRef: new Map(), outputFileName: 'v1_SEEON_AD.mp3', renderedDurationMs: 1000, processingMs: 100,
+  });
+  assert.equal(report.stats.slideText.count, 7);
+});
+
+test('슬라이드 전사 기록의 모양·출처·넘김 이유가 제품 원본과 같다', () => {
+  const require = createRequire(import.meta.url);
+  const indexText = fs.readFileSync(resolveProductPath('src/main/caption-pipeline/index.js'), 'utf8');
+  for (const piece of [
+    'stage: DEBUG_STAGE_MAP.valueCheck,', 'reason: `슬라이드 텍스트 전사 ${status}`,', '출처=${source || \'-\'}`',
+    '`${fallbackReason ? ` 넘김=${fallbackReason}` : \'\'} 줄=${lineCount} ${elapsedMs}ms`',
+  ]) assert.ok(indexText.includes(piece), `제품 index.js 의 슬라이드 전사 기록 모양이 바뀌었다 — ad-report summarizeSlideTextRecordList 를 함께 고친다: ${piece}`);
+  const { DEBUG_STAGE_MAP } = require(resolveProductPath('src/main/caption-pipeline/contracts/debug-events.js'));
+  assert.equal(DEBUG_STAGE_MAP.valueCheck, 'value_check');
+  const { SLIDE_TEXT_SOURCE_MAP, OCR_FALLBACK_REASON_MAP } = require(resolveProductPath('src/main/caption-pipeline/agents/slide-text-agent.js'));
+  assert.deepEqual(Object.values(SLIDE_TEXT_SOURCE_MAP).sort(), [...SLIDE_TEXT_SOURCE_LIST].sort());
+  assert.deepEqual([...Object.values(OCR_FALLBACK_REASON_MAP), 'ocr_error'].sort(), [...SLIDE_TEXT_FALLBACK_REASON_LIST].sort());
+  assert.ok(fs.readFileSync(resolveProductPath('src/main/caption-pipeline/agents/slide-text-agent.js'), 'utf8').includes('fallbackReason: `ocr_error:${error.message}`'));
 });
 
 test('AD 기록: 모델 설정이 없는 기록은 그대로 둔다', () => {

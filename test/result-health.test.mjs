@@ -107,6 +107,19 @@ test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedroc
   assert.equal(formatWarningBrief([]), '');
 });
 
+test('경고: OCR 호출 시간 초과·실패는 VLM 뒤에 OCR 경고로 센다(그 장은 제품이 VLM 으로 넘겨 전사한다)', () => {
+  const warningList = buildWarningList({
+    callLog: [call('vlm'), timeoutCall('vlm'), call('ocr'), timeoutCall('ocr'), call('ocr', { status: 422 }), call('judge')],
+    judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: OK_SESSION,
+    swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],
+  });
+  assert.deepEqual(warningList, [
+    { code: 'vlm_timeout', count: 1, message: 'VLM 호출 시간 초과 1/2건' },
+    { code: 'ocr_timeout', count: 1, message: 'OCR 호출 시간 초과 1/3건' },
+    { code: 'ocr_error', count: 1, message: 'OCR 호출 실패 1/3건 — HTTP 422' },
+  ]);
+});
+
 test('경고: 건강한 결과는 비고, 불완전 사유와 겹치는 ASR 실패·Bedrock 인증 실패는 경고로 다시 세지 않으며, Bedrock 판정 백엔드면 Bedrock 판정은 대체가 아니다', () => {
   assert.deepEqual(buildWarningList({
     callLog: [call('asr'), call('vlm'), call('tts')], judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP,

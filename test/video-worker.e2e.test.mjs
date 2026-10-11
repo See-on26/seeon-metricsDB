@@ -22,11 +22,11 @@ const WORKER_ENV = { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.url
 const RUN_CONCURRENCY = 2;
 
 // Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock 판정 LLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
-function runWorker({ job, outDir }) {
+function runWorker({ job, outDir, extraEnv = {} }) {
   return new Promise((resolve, reject) => {
     const child = fork(WORKER_PATH, [], {
       execArgv: ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON'],
-      env: WORKER_ENV,
+      env: { ...WORKER_ENV, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     let result = null;
@@ -87,6 +87,14 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(report.stats.triggerAnalyzerCountMap.kiwi >= 1, JSON.stringify(report.stats.triggerAnalyzerCountMap));
   assert.equal(report.stats.triggerAnalyzerCountMap.rule, undefined, '세션 전에 Kiwi 준비를 기다려 대체 규칙을 쓰지 않는다');
   assert.ok(modelConfig.judgeModelId, 'GPU 가 실패하면 넘어갈 Bedrock 판정 모델');
+  // 슬라이드 전사는 기본 VLM 이다. 제품 기록에서 센 출처가 VLM 이고 OCR 호출은 없다.
+  assert.deepEqual([report.config.resultConfig.slideTextBackend, report.config.resultConfig.gapSource], ['vlm', 'asr']);
+  assert.ok(report.stats.slideText.count >= 1, JSON.stringify(report.stats.slideText));
+  assert.deepEqual(report.stats.slideText.sourceCountMap, { ocr: 0, vlm: report.stats.slideText.count });
+  assert.equal(serviceMap.ocr, undefined);
+  assert.equal(countAfter.ocr, countBefore.ocr);
+  assert.deepEqual(result.slideText, report.stats.slideText, '워커 결과(summary 용)에도 싣는다');
+  assert.equal(result.serviceCountMap.vlm, serviceMap.vlm.count);
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
   assert.ok(report.droppedList.filter((drop) => drop.type === 'page_transition').every((drop) => drop.reason === 'feature_off'), '평가 프리셋: 전환 고지는 생성만');
   assert.deepEqual(report.stats.swallowedErrorCountMap, { task: {}, ipc: {} }, '실제 제품 응답에서 연결 코드가 삼킨 오류가 없다');
@@ -98,6 +106,62 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
     inspectVideoResult({ outDir, outStem: 'deck', videoId: 'deck', filePath, language: 'ko', isPageTransitionIncluded: false, identity }),
     { status: 'done', mismatchList: [] }, '실제 워커가 남긴 코드 버전·결과 설정을 CLI 가 지금과 같은 것으로 본다',
   );
+});
+
+test('슬라이드 전사 백엔드 ocr: /ocr 호출을 임베딩이 아닌 ocr 로 세고, 전사 출처를 ocr 로 남기며, 백엔드를 바꾸면 다시 만든다', { timeout: 180000 }, async () => {
+  const dirPath = makeTempDir('factory-e2e-ocr-');
+  const filePath = await createTestClip({
+    dirPath, fileName: 'deck.mp4', width: 640, height: 360,
+    colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
+  });
+  const outDir = path.join(dirPath, 'out');
+  const countBefore = { ...mock.state.callCountMap };
+  const extraEnv = { SEEON_SLIDE_TEXT_BACKEND: 'ocr' };
+  const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir, extraEnv });
+  assert.equal(result.status, 'done', result.logText.slice(-2000));
+  const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
+  assert.equal(report.isComplete, true);
+  assert.equal(report.config.resultConfig.slideTextBackend, 'ocr');
+  assert.equal(report.config.modelConfig.ocrUrl, mock.urlEnv.SEEON_EMBED_URL.replace(/\/embed$/, '/ocr'));
+  const { serviceMap, slideText } = report.stats;
+  const ocrCallCount = mock.state.callCountMap.ocr - countBefore.ocr;
+  assert.ok(ocrCallCount >= 1);
+  assert.equal(serviceMap.ocr.count, ocrCallCount, 'OCR 호출은 임베딩이 아니라 ocr 로 센다');
+  assert.equal(serviceMap.embed.count, mock.state.callCountMap.embed - countBefore.embed);
+  assert.equal(slideText.count, ocrCallCount, JSON.stringify(slideText));
+  assert.deepEqual(slideText.sourceCountMap, { ocr: slideText.count, vlm: 0 });
+  assert.deepEqual(slideText.fallbackReasonCountMap, { low_score: 0, vertical_text: 0, ocr_error: 0, ocr_bypass: 0 });
+  assert.deepEqual(report.warningList, []);
+  assert.equal(result.serviceCountMap.ocr, ocrCallCount);
+  const inspectWith = (env) => inspectVideoResult({
+    outDir, outStem: 'deck', videoId: 'deck', filePath, language: 'ko', isPageTransitionIncluded: false,
+    identity: readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(env) }),
+  });
+  assert.equal(inspectWith({ ...WORKER_ENV, ...extraEnv }).status, 'done');
+  assert.deepEqual(inspectWith(WORKER_ENV), { status: 'mismatch', mismatchList: ['결과 설정 slideTextBackend ocr → vlm'] }, '백엔드를 바꿔 같은 --out 으로 돌리면 다시 만든다');
+});
+
+test('슬라이드 전사 백엔드 ocr: OCR 평균 점수가 낮은 장은 제품이 VLM 으로 다시 전사하고, 출처 vlm·이유 low_score 로 남는다', { timeout: 180000 }, async () => {
+  const dirPath = makeTempDir('factory-e2e-ocr-low-');
+  const filePath = await createTestClip({
+    dirPath, fileName: 'deck.mp4', width: 640, height: 360,
+    colorTimeline: [['0x3050a0', 12], ['0xa05030', 12]], audioExpr: '0.4*sin(2*PI*220*t)*lt(mod(t,8),6)',
+  });
+  const outDir = path.join(dirPath, 'out');
+  mock.setOcrMeanScoreList([0.4]);
+  try {
+    const result = await runWorker({
+      job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir, extraEnv: { SEEON_SLIDE_TEXT_BACKEND: 'ocr' },
+    });
+    assert.equal(result.status, 'done', result.logText.slice(-2000));
+    const { slideText, serviceMap } = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8')).stats;
+    assert.ok(slideText.count >= 1);
+    assert.equal(serviceMap.ocr.count, slideText.count);
+    assert.deepEqual(slideText.sourceCountMap, { ocr: 0, vlm: slideText.count });
+    assert.deepEqual(slideText.fallbackReasonCountMap, { low_score: slideText.count, vertical_text: 0, ocr_error: 0, ocr_bypass: 0 });
+  } finally {
+    mock.setOcrMeanScoreList([0.95]);
+  }
 });
 
 test('오디오 트랙 없는 영상도 끝까지 돌고 AD 0개로 끝난다', { timeout: 120000 }, async () => {
