@@ -166,6 +166,35 @@ test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이�
   assert.equal(fs.existsSync(outDir), false, '점검에 실패하면 출력 폴더를 만들지 않는다');
 });
 
+test('CLI: 틈 후보 출처 audio(공장 미지원)나 답하지 않는 OCR(백엔드 ocr)은 시작 전 점검에서 막고 워커 없이 종료 코드 1', async () => {
+  const audio = createLogCollector();
+  const audioOutDir = path.join(makeDir('gap-audio'), 'run');
+  assert.equal(await runFactoryCli({
+    argList: ['--input', makeInputDir(['a.mp4']), '--out', audioOutDir], env: { ...BASE_ENV, SEEON_GAP_SOURCE: 'audio' }, log: audio.log,
+    workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 1);
+  assert.ok(audio.lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: SEEON_GAP_SOURCE=audio 는 공장이 아직 지원하지 않는다')), audio.lineList.join('\n'));
+  assert.equal(fs.existsSync(audioOutDir), false);
+
+  const ocr = createLogCollector();
+  const checkedOcrList = [];
+  assert.equal(await runFactoryCli({
+    argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('ocr-down'), 'run')], env: { ...BASE_ENV, SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, log: ocr.log,
+    workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+    checkOcrService: async ({ url }) => { checkedOcrList.push(url); return { isUp: false, detail: 'HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)' }; },
+    startTunnel: async () => null,
+  }), 1);
+  assert.deepEqual(checkedOcrList, ['http://127.0.0.1:9/ocr']);
+  assert.ok(ocr.lineList.includes('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: OCR 127.0.0.1:9 HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)'), ocr.lineList.join('\n'));
+
+  const okOutDir = path.join(makeDir('ocr-up'), 'run');
+  assert.equal(await runFactoryCli({
+    argList: ['--input', makeInputDir(['a.mp4']), '--out', okOutDir], env: { ...BASE_ENV, SEEON_SLIDE_TEXT_BACKEND: 'ocr' }, log: createLogCollector().log,
+    workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT, checkOcrService: async () => ({ isUp: true, detail: 'HTTP 200' }),
+  }), 0);
+  assert.equal(readJson(path.join(okOutDir, 'manifest.json')).resultConfig.slideTextBackend, 'ocr');
+});
+
 test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍는다', async () => {
   const { lineList, log } = createLogCollector();
   const exitCode = await runFactoryCli({

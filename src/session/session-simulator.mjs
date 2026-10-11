@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {
-  MODE_MAP, DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_QUEUE_TTL_MS, listDisabledNarrationClass, computeLookaheadMs, computeContextHoldMs,
+  MODE_MAP, DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_QUEUE_TTL_MS, GAP_CANDIDATE_SOURCE_MAP, listDisabledNarrationClass,
+  computeLookaheadMs, computeContextHoldMs,
 } from '../product/core-modules.mjs';
 import { POINTING_SAMPLE_MS } from './renderer-constants.mjs';
 import { createSessionContext } from './session-context.mjs';
@@ -148,6 +149,12 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
       channel: 'pipeline-session-start', payload: { mode: ctx.mode, asrLanguage: video.language }, limitMs: SESSION_START_LIMIT_MS,
     });
     if (!sessionResult?.sessionId) throw new Error(`제품 파이프라인 세션을 시작하지 못했다: ${sessionResult?.message || '세션 ID 없음'}`);
+    // 제품 렌더러는 세션 시작 결과의 gapSource 로 틈 후보 출처를 정한다(main.js:1853-1854). 공장은 ASR 끝 시각 후보(asr)만 옮겼으므로
+    // 다른 출처면 멈춘다. CLI 는 시작 전 점검에서 막고, 여기서는 워커를 따로 띄운 경우에도 audio 로 적힌 결과가 asr 로 돌지 않게 한다.
+    const gapSource = sessionResult.gapSource ?? GAP_CANDIDATE_SOURCE_MAP.asr;
+    if (gapSource !== GAP_CANDIDATE_SOURCE_MAP.asr) {
+      throw new Error(`틈 후보 출처 ${gapSource}(SEEON_GAP_SOURCE)는 공장이 아직 지원하지 않는다 — 지우거나 asr 로 둔다`);
+    }
     state.currentSessionId = sessionResult.sessionId;
     state.recordPath = sessionResult.recordPath || null;
     state.lastScreenTransitionAt = clock.nowPerf();
@@ -158,7 +165,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
         + ` · 앞 맥락 ${describeBeforeWindow({ policy, anchorTs: state.lastScreenTransitionAt, nowPerf: clock.nowPerf() })}`
         + ` · 뒤 맥락 ${Math.round((policy?.afterMs ?? 0) / 1000)}초`
         + ` (ASR 청크 ${policy?.asrSegmentMs}ms(무음 절단 ${policy?.asrMinSegmentMs}ms 이후)`
-        + ` + look-ahead ${computeLookaheadMs({ mode: ctx.mode })}ms + 보류 ${computeContextHoldMs({ mode: ctx.mode })}ms)`,
+        + ` + look-ahead ${computeLookaheadMs({ mode: ctx.mode })}ms + 보류 ${computeContextHoldMs({ mode: ctx.mode })}ms) · 틈 후보=${gapSource}`,
     });
     ctx.markSessionStart();
     startElapsedMs = clock.elapsedMs();

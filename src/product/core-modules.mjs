@@ -14,6 +14,7 @@ export {
 export { DelayBuffer, isCaptionDroppable, EXCESS_DROP_MS } from '../../seeon-meet/src/renderer/core/audio-renderer/delay-buffer.js';
 export { NarrationScheduler } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-scheduler.js';
 export { GapCandidateStore, resolveGapSearchFromMs } from '../../seeon-meet/src/renderer/core/audio-renderer/gap-candidate-store.js';
+export { GAP_CANDIDATE_SOURCE_MAP } from '../../seeon-meet/src/renderer/core/audio-renderer/audio-gap-candidates.js';
 export {
   isImmediateCaption, isAnchoredCaption, NarrationHoldGate,
 } from '../../seeon-meet/src/renderer/core/audio-renderer/narration-entry.js';
