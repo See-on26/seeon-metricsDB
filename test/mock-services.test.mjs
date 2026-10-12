@@ -43,11 +43,14 @@ test('mock 판단 LLM 이 X 로 답하면 라우터는 해설 후보를 내지 �
   mock.setRouterGapVerdict('X');
   t.after(() => mock.setRouterGapVerdict('O'));
   const before = snapshotCount();
-  const routed = await createUnifiedRouter({ config }).route({ utterance: '이 그래프를 보시면', before: '', after: '', candidateList });
+  const routed = await createUnifiedRouter({ config }).route({ utterance: '이 그래프를 보시면', before: '', after: '', candidateList: candidateList.slice(0, 1) });
   assert.deepEqual([routed.candidateList, routed.blockedReason], [[], 'no_gap']);
+  // 제품은 변화·수치 후보의 X 를 옮겨 적은 근거가 문맥에서 확인될 때만 믿는다. mock 은 근거를 주지 않으므로 O 로 바뀐다.
+  const unverified = await createUnifiedRouter({ config }).route({ utterance: '이 그래프를 보시면 매출이 크게 늘었습니다.', before: '', after: '', candidateList });
+  assert.deepEqual(unverified.candidateList.map((candidate) => candidate.type), ['interpretation']);
   const empty = await createUnifiedRouter({ config }).route({ utterance: '감사합니다.', candidateList: [] });
   assert.deepEqual([empty.source, empty.blockedReason], ['none', 'no_candidate']);
-  assert.equal(snapshotCount().judge - before.judge, 1);
+  assert.equal(snapshotCount().judge - before.judge, 2);
 });
 
 test('판정 주소를 VLM 주소로 둔 설정도 mock VLM 이 몸통으로 갈라 판정으로 답한다', async () => {
