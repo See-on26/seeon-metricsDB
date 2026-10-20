@@ -152,7 +152,7 @@ export function buildWarningList({
   const warningList = buildServiceWarningList({ callLog, incompleteReasonList });
   // 제품 탐지 판정은 판정 백엔드(gpu·bedrock) 하나만 부르고 실패해도 다른 쪽으로 넘기지 않는다(judge-llm.js). 그래서 판정 집계에서
   // 볼 것은 실패(error)뿐이다. 실패하면 판단 LLM 은 그 묶음의 후보를 판단 실패로 막고(router/unified-router.js), 무발화 판정은 단서 없음으로
-  // 본다(silence-judge.js). 지시 판정(라우터 모드 judge 에서만 씀)은 실패하면 통과시킨다(deixis-judge.js).
+  // 본다(silence-judge.js). 지시 판정(라우터 모드가 unified 가 아닐 때만 씀, index.js)은 실패하면 통과시킨다(deixis-judge.js).
   const judgeErrorCountMap = pickJudgeSourceCountMap({ judgeSourceCountMap, source: 'error' });
   if (sumCountMap(judgeErrorCountMap)) {
     warningList.push({
