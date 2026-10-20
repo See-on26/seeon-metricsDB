@@ -2,7 +2,7 @@ import {
   NARRATION_TYPE_MAP, getModePolicy, computeWordBudget, computeLookaheadMs, computeSentenceWaitMs, computeContextHoldMs,
   TranscriptWindow, GapCandidateStore, UtteranceBoundaryDetector, SilenceTrigger, PointingLocator, SlideHistogramGate,
   SlideEmbeddingRegistry, TransitionOrderGate, PendingTransitionTracker, DeixisCandidateScheduler, DeixisDetector, SlideDwellGate,
-  resolveLastSpeechWallTs, describeDirection,
+  resolveLastSpeechWallTs, describeDirection, createRecentPointingMemory, createPointingMotionTracker,
 } from '../product/core-modules.mjs';
 import { POINTING_LOCATOR_OPTION_MAP } from './renderer-constants.mjs';
 
@@ -42,6 +42,9 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     boundaryDetector: new UtteranceBoundaryDetector({ onBoundary: noop }),
     silenceTrigger: new SilenceTrigger(),
     pointingLocator: new PointingLocator(POINTING_LOCATOR_OPTION_MAP),
+    // 최근 가리킴 기억·움직임 판별. 시각을 인자로 받아 시계를 주입하지 않는다.
+    recentPointingMemory: createRecentPointingMemory(),
+    pointingMotionTracker: createPointingMotionTracker(),
     histogramGate: new SlideHistogramGate({}),
     slideRegistry: new SlideEmbeddingRegistry({}),
     transitionOrderGate: new TransitionOrderGate(),

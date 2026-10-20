@@ -128,6 +128,27 @@ test('작은 영역 움직임은 대기 중인 발화 후보에 포인팅 영역
   assert.deepEqual(harness.warnList, []);
 });
 
+// 400ms 표본마다 45px 씩 오른쪽으로 가는 점(펜·레이저)과, 같은 자리에서 나타났다 사라지는 깜빡임.
+const POINTER_SIZE = 30;
+const movingPointerAt = (timeMs) => solidFrame([200, 200, 200], { x: 30 + (timeMs / 400) * 45, y: 120, w: POINTER_SIZE, h: POINTER_SIZE });
+const blinkingPointerAt = (timeMs) => solidFrame([200, 200, 200], (timeMs / 400) % 2 ? { x: 120, y: 120, w: POINTER_SIZE, h: POINTER_SIZE } : null);
+
+test('점이 여러 칸을 지나며 움직이면 그 영역을 지금 슬라이드·가상 벽시계 시각과 함께 기억하고, 같은 자리 깜빡임은 기억하지 않는다', async () => {
+  for (const [frameAt, isMoving] of [[movingPointerAt, true], [blinkingPointerAt, false]]) {
+    const harness = setupSlides({ frameAt });
+    harness.slideGlue.start();
+    await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 2000 });
+    harness.slideGlue.stop();
+    const { recentPointingMemory, slideRegistry } = harness.ctx.core;
+    assert.equal(slideRegistry.currentLabel(), '1');
+    // 지시 발화 끝(가상 벽시계로 찍힌 조각 끝)과 견주므로 기억 시각도 가상 벽시계여야 꺼낼 수 있다.
+    const recalled = recentPointingMemory.recall({ eventWallTs: harness.clock.nowWall(), slideLabel: '1' });
+    assert.equal(Boolean(recalled?.region), isMoving, `움직임=${isMoving} 기억=${JSON.stringify(recalled)}`);
+    assert.equal(recentPointingMemory.recall({ eventWallTs: harness.clock.nowWall(), slideLabel: '2' }), null, '다른 슬라이드로는 꺼내지 않는다');
+    assert.deepEqual(harness.warnList, []);
+  }
+});
+
 test('돌아온 슬라이드는 재방문으로 고지하고 글자 전사·base 프레임은 다시 하지 않는다', async () => {
   const embeddingAt = (timeMs) => (timeMs < 4000 || timeMs >= 8000 ? [1, 0, 0] : [0, 1, 0]);
   const harness = setupSlides({

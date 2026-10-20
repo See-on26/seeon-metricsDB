@@ -45,6 +45,8 @@ export {
 } from '../../seeon-meet/src/renderer/core/trigger/deixis-candidate-scheduler.js';
 export { judgeScreenDependency, SCREEN_DEPENDENCY_REASON_MAP } from '../../seeon-meet/src/renderer/core/trigger/screen-dependency.js';
 export { PointingLocator, describeDirection } from '../../seeon-meet/src/renderer/core/trigger/pointing-locator.js';
+export { createRecentPointingMemory } from '../../seeon-meet/src/renderer/core/trigger/recent-pointing.js';
+export { createPointingMotionTracker } from '../../seeon-meet/src/renderer/core/trigger/pointing-motion-tracker.js';
 export { SlideHistogramGate } from '../../seeon-meet/src/renderer/core/trigger/slide-histogram-gate.js';
 export { SlideEmbeddingRegistry } from '../../seeon-meet/src/renderer/core/trigger/slide-embedding-registry.js';
 export { SlideDwellGate, DWELL_STATE_MAP } from '../../seeon-meet/src/renderer/core/trigger/slide-dwell-gate.js';

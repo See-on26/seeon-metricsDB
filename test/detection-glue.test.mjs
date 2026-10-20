@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createAsrGlue } from '../src/session/asr-glue.mjs';
 import { createDeixisGlue } from '../src/session/deixis-glue.mjs';
 import { createSilenceGlue } from '../src/session/silence-glue.mjs';
+import { narrowToPointingRegion } from '../src/media/frame-source.mjs';
 import { buildFeatureToggleStore, EVAL_PRESET_MAP } from '../src/session/feature-preset.mjs';
 import { FEATURE_KEY_MAP, NARRATION_CLASS_MAP, listDisabledNarrationClass } from '../src/product/core-modules.mjs';
 import { createTestContext, levelListFrom } from './helpers/session-fakes.mjs';
@@ -170,6 +171,39 @@ test('후보 시각은 글자 위치로 고른 세그먼트 끝을 가상 시계
     judgeList, selectedCandidate: { anchor: '이 그래프', mergedAnchorList: ['늘었습니다'] }, fallbackMs: payload.eventVideoTimeMs,
   }), 5900, '해설이 다루는 구 가운데 가장 늦게 말한 시각');
   assert.deepEqual(harness.warnList, []);
+});
+
+const REMEMBERED_REGION = { x: 0.1, y: 0.2, w: 0.1, h: 0.1 };
+
+// 슬라이드 1 에서 rememberAtMs 에 움직이며 가리킨 영역이 기억되고, 6~9초 조각("이 그래프" 는 조각 안 2.4초 = 영상 8.4초에 끝남)이
+// 9.8초에 도착한다. 트리거 발화 끝에서 6초 앞(2.4초)까지 가리킨 것이 그 발화의 가리킴이다.
+async function runRememberedPointing({ rememberAtMs, slideLabel }) {
+  const harness = setupDetection();
+  harness.ctx.core.slideRegistry.handleCandidate({ embedding: [1, 0, 0] });
+  harness.clock.setTimeout(() => harness.ctx.core.recentPointingMemory.remember({
+    region: REMEMBERED_REGION, pointingOrderHint: '', wallTs: harness.clock.nowWall(), slideLabel,
+  }), rememberAtMs);
+  const text = '이 그래프를 보시면 매출이 늘었습니다.';
+  deliverAt(harness, 9800, { text, startMs: 6000, endMs: 9000, segmentList: [{ startSec: 0, endSec: 2.4, text }], triggerCandidateList: [GRAPH_CANDIDATE] });
+  await harness.clock.runUntil({ isDone: () => harness.bridge.invokeList.some((call) => call.channel === 'pipeline-deixis') });
+  return { harness, call: harness.bridge.invokeList.find((item) => item.channel === 'pipeline-deixis') };
+}
+
+test('직전 창에 포인팅 영역이 없으면, 트리거 발화 끝 6초 안에 같은 슬라이드에서 움직이며 가리킨 영역을 지시 후보에 붙인다', async () => {
+  const { harness, call } = await runRememberedPointing({ rememberAtMs: 3000, slideLabel: '1' });
+  assert.equal(call.payload.hasPointingRegion, true);
+  assert.deepEqual(harness.captureList.map(({ normRect }) => normRect), [narrowToPointingRegion({ sub: REMEMBERED_REGION })], '화면은 기억한 영역 둘레만 뜬다');
+  assert.deepEqual(findDebug(harness, '발화 전에 움직이며 가리킨 영역을 붙임').map(({ payload }) => payload.detail), ['트리거="이 그래프" 슬라이드=1']);
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('기억한 가리킴이 다른 슬라이드이거나 트리거 발화 끝보다 6초 넘게 앞서면 붙이지 않는다', async () => {
+  for (const option of [{ rememberAtMs: 3000, slideLabel: '2' }, { rememberAtMs: 2000, slideLabel: '1' }]) {
+    const { harness, call } = await runRememberedPointing(option);
+    assert.equal(call.payload.hasPointingRegion, false, JSON.stringify(option));
+    assert.deepEqual(harness.captureList.map(({ normRect }) => normRect), [null]);
+    assert.deepEqual(findDebug(harness, '발화 전에 움직이며 가리킨 영역을 붙임'), []);
+  }
 });
 
 test('트리거 후보가 없는 조각은 지시 후보가 되지 않는다(지시 판단은 main 트리거가 정한다)', async () => {
