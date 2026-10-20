@@ -23,18 +23,16 @@ export const ASR_FAILURE_RATIO_LIMIT = 0.1;
 const listSettledTtsRequest = (captionRecordList = []) => captionRecordList.map((record) => record.tts).filter((tts) => tts && !tts.isPendingAtStop);
 // 단기 토큰 만료·권한 없음. 한 번 나면 그 뒤 Bedrock 호출(판정 백엔드가 bedrock 이면 탐지 판정)이 모두 실패한다.
 const BEDROCK_AUTH_STATUS_LIST = [401, 403];
-const JUDGE_BACKEND_GPU = 'gpu';
 // 경고·summary 의 서비스 순서. OCR 은 VLM 대신 슬라이드를 전사하므로 VLM 바로 뒤에 둔다.
 export const SERVICE_ORDER_LIST = [
   SERVICE_MAP.asr, SERVICE_MAP.vlm, SERVICE_MAP.ocr, SERVICE_MAP.judge, SERVICE_MAP.tts, SERVICE_MAP.embed, SERVICE_MAP.bedrock, SERVICE_MAP.other,
 ];
 const SERVICE_LABEL_MAP = {
-  [SERVICE_MAP.asr]: 'ASR', [SERVICE_MAP.vlm]: 'VLM', [SERVICE_MAP.ocr]: 'OCR', [SERVICE_MAP.judge]: '탐지 판정 GPU', [SERVICE_MAP.tts]: 'TTS',
+  [SERVICE_MAP.asr]: 'ASR', [SERVICE_MAP.vlm]: 'VLM', [SERVICE_MAP.ocr]: 'OCR', [SERVICE_MAP.judge]: 'GPU 판정 LLM', [SERVICE_MAP.tts]: 'TTS',
   [SERVICE_MAP.embed]: '임베딩', [SERVICE_MAP.bedrock]: 'Bedrock', [SERVICE_MAP.other]: '기타 서비스',
 };
 export const WARNING_CODE_MAP = {
-  judgeFallback: 'judge_fallback', judgeError: 'judge_error', ocrFallback: 'ocr_fallback', drainTimeout: 'drain_timeout',
-  swallowedError: 'swallowed_error',
+  judgeError: 'judge_error', ocrFallback: 'ocr_fallback', drainTimeout: 'drain_timeout', swallowedError: 'swallowed_error',
 };
 
 const isFailedCall = (record) => Boolean(record.errorMessage) || (Number.isFinite(record.status) && record.status >= 400);
@@ -149,22 +147,18 @@ function buildServiceWarningList({ callLog, incompleteReasonList }) {
 // 결과를 실패로 만들지 않는 품질 저하. 동시 처리로 GPU 가 포화되면 정상적으로도 생기므로(실측: 동시 3 에서 영상마다 VLM 시간 초과 4건)
 // 불완전으로 치면 재실행이 끝없이 같은 영상을 다시 돈다. 대신 JSON warningList 와 터미널·summary 의 ⚠ 로 드러낸다.
 export function buildWarningList({
-  callLog, judgeSourceCountMap, judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList, slideTextBackend = null, slideText = null,
+  callLog, judgeSourceCountMap, sessionResult, swallowedErrorCountMap, incompleteReasonList, slideTextBackend = null, slideText = null,
 }) {
   const warningList = buildServiceWarningList({ callLog, incompleteReasonList });
-  // gpu 판정 백엔드에서 Bedrock 이 답했다면 GPU 판정이 실패해 넘어간 것이다.
-  const fallbackCountMap = judgeBackend === JUDGE_BACKEND_GPU ? pickJudgeSourceCountMap({ judgeSourceCountMap, source: 'bedrock' }) : {};
-  if (sumCountMap(fallbackCountMap)) {
-    warningList.push({
-      code: WARNING_CODE_MAP.judgeFallback, count: sumCountMap(fallbackCountMap),
-      message: `탐지 판정을 GPU 대신 Bedrock 이 판정 ${sumCountMap(fallbackCountMap)}건(${describeCountMap(fallbackCountMap)})`,
-    });
-  }
+  // 제품 탐지 판정은 판정 백엔드(gpu·bedrock) 하나만 부르고 실패해도 다른 쪽으로 넘기지 않는다(judge-llm.js). 그래서 판정 집계에서
+  // 볼 것은 실패(error)뿐이다. 실패하면 판단 LLM 은 그 묶음의 후보를 판단 실패로 막고(router/unified-router.js), 무발화 판정은 단서 없음으로
+  // 본다(silence-judge.js). 지시 판정(라우터 모드 judge 에서만 씀)은 실패하면 통과시킨다(deixis-judge.js).
   const judgeErrorCountMap = pickJudgeSourceCountMap({ judgeSourceCountMap, source: 'error' });
   if (sumCountMap(judgeErrorCountMap)) {
     warningList.push({
       code: WARNING_CODE_MAP.judgeError, count: sumCountMap(judgeErrorCountMap),
-      message: `탐지 판정 실패(GPU·Bedrock 모두) ${sumCountMap(judgeErrorCountMap)}건(${describeCountMap(judgeErrorCountMap)}) — 라우터·무발화 판정은 해설을 내지 않는다`,
+      message: `탐지 판정 호출 실패 ${sumCountMap(judgeErrorCountMap)}건(${describeCountMap(judgeErrorCountMap)})`
+        + ' — 판단 LLM(router)은 그 묶음의 후보를, 무발화 판정은 그 해설을 내지 않는다. 지시 판정은 통과시킨다',
     });
   }
   // ocr 백엔드에서 OCR 서비스 실패로 일부 장을 VLM 으로 넘겼다(모두 넘겼으면 불완전 ocr_unavailable 로 이미 셌다).

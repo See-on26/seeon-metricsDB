@@ -66,16 +66,16 @@ test('불완전: 렌더러가 해설 소리를 요청(pipeline-tts)했는데 하
   assert.deepEqual(buildIncompleteReasonList({ sessionResult: { ...OK_SESSION, captionRecordList: [caption(ttsFailed()), caption(pendingAtStop)] }, callLog: [] }),
     [{ code: 'tts_unavailable', narrationCount: 2, count: 1, total: 1, message: 'TTS HTTP 500' }], '확정된 합성만 센다');
   assert.deepEqual(buildWarningList({
-    callLog: partialLog, judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: partialSession,
+    callLog: partialLog, judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: partialSession,
     swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],
   }), [{ code: 'tts_error', count: 2, message: 'TTS 호출 실패 2/3건 — HTTP 500' }]);
   assert.deepEqual(buildWarningList({
-    callLog: ttsDownLog, judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: ttsDownSession,
+    callLog: ttsDownLog, judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: ttsDownSession,
     swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: reasonList,
   }), [], '불완전 사유로 센 TTS 실패는 경고로 다시 세지 않는다');
 });
 
-test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedrock 대체·배수 상한·삼킨 오류는 실패로 만들지 않고 코드별 수로 남긴다', () => {
+test('경고: 부하로 생기는 시간 초과·서비스 오류·탐지 판정 실패·배수 상한·삼킨 오류는 실패로 만들지 않고 코드별 수로 남긴다', () => {
   const callLog = [
     ...repeat(10, () => call('asr')), timeoutCall('asr'),
     ...repeat(12, () => call('vlm')), ...repeat(4, () => timeoutCall('vlm')),
@@ -83,9 +83,10 @@ test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedroc
     ...repeat(2, () => call('tts')), call('tts', { status: 500 }),
     ...repeat(3, () => call('bedrock')), call('bedrock', { status: 429, errorMessage: null }),
   ];
+  // 판정 백엔드 하나만 쓰고 실패해도 다른 쪽으로 넘기지 않으므로(제품 judge-llm.js) 판정 집계에서 경고로 남기는 것은 실패(error)뿐이다.
   const warningList = buildWarningList({
-    callLog, judgeBackend: 'gpu',
-    judgeSourceCountMap: { ...EMPTY_JUDGE_MAP, router: { gpu: 4, bedrock: 1, error: 0 }, silence: { gpu: 1, bedrock: 0, error: 1 } },
+    callLog,
+    judgeSourceCountMap: { ...EMPTY_JUDGE_MAP, router: { gpu: 4, bedrock: 0, error: 1 }, silence: { gpu: 1, bedrock: 0, error: 1 } },
     sessionResult: { ...OK_SESSION, isDrainTimedOut: true, drainLimitMs: 33000, remainingTaskCount: 2, inFlightCallCount: 1 },
     swallowedErrorCountMap: { task: { caption: 1 }, ipc: { 'pipeline-event': 2 } },
     incompleteReasonList: [],
@@ -93,15 +94,17 @@ test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedroc
   assert.deepEqual(warningList, [
     { code: 'asr_timeout', count: 1, message: 'ASR 호출 시간 초과 1/11건' },
     { code: 'vlm_timeout', count: 4, message: 'VLM 호출 시간 초과 4/16건' },
-    { code: 'judge_timeout', count: 1, message: '탐지 판정 GPU 호출 시간 초과 1/6건' },
+    { code: 'judge_timeout', count: 1, message: 'GPU 판정 LLM 호출 시간 초과 1/6건' },
     { code: 'tts_error', count: 1, message: 'TTS 호출 실패 1/3건 — HTTP 500' },
     { code: 'bedrock_error', count: 1, message: 'Bedrock 호출 실패 1/4건 — HTTP 429' },
-    { code: 'judge_fallback', count: 1, message: '탐지 판정을 GPU 대신 Bedrock 이 판정 1건(router 1)' },
-    { code: 'judge_error', count: 1, message: '탐지 판정 실패(GPU·Bedrock 모두) 1건(silence 1) — 라우터·무발화 판정은 해설을 내지 않는다' },
+    {
+      code: 'judge_error', count: 2,
+      message: '탐지 판정 호출 실패 2건(router 1 · silence 1) — 판단 LLM(router)은 그 묶음의 후보를, 무발화 판정은 그 해설을 내지 않는다. 지시 판정은 통과시킨다',
+    },
     { code: 'drain_timeout', count: 1, message: '배수 상한(영상 끝 + 33초)에 닿아 멈춤 — 남은 작업 2 · 진행 중 호출 1' },
     { code: 'swallowed_error', count: 3, message: '연결 코드가 삼킨 오류 3건(caption 1 · ipc:pipeline-event 2)' },
   ]);
-  assert.equal(formatWarningBrief(warningList), '⚠ asr_timeout 1 · vlm_timeout 4 · judge_timeout 1 · tts_error 1 · bedrock_error 1 · judge_fallback 1 · judge_error 1 · drain_timeout 1 · swallowed_error 3');
+  assert.equal(formatWarningBrief(warningList), '⚠ asr_timeout 1 · vlm_timeout 4 · judge_timeout 1 · tts_error 1 · bedrock_error 1 · judge_error 2 · drain_timeout 1 · swallowed_error 3');
   assert.equal(formatWarningBrief([]), '');
 });
 
@@ -109,7 +112,7 @@ const slideTextOf = ({ ocr = 0, vlm = 0, lowScore = 0, verticalText = 0, ocrErro
   count: ocr + vlm, statusCountMap: { ready: ocr + vlm }, sourceCountMap: { ocr, vlm },
   fallbackReasonCountMap: { low_score: lowScore, vertical_text: verticalText, ocr_error: ocrError, ocr_bypass: ocrBypass },
 });
-const HEALTHY_WARNING_INPUT = { judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: OK_SESSION, swallowedErrorCountMap: { task: {}, ipc: {} } };
+const HEALTHY_WARNING_INPUT = { judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: OK_SESSION, swallowedErrorCountMap: { task: {}, ipc: {} } };
 
 test('불완전·경고: ocr 백엔드에서 OCR 이 죽어 OCR 로 읽은 장이 없으면 불완전(ocr_unavailable), 일부만 넘겼으면 경고(ocr_fallback)다', () => {
   const ocrDownLog = [call('ocr', { status: 503 }), call('vlm'), call('vlm'), call('vlm')];
@@ -146,7 +149,7 @@ test('불완전·경고: ocr 백엔드에서 OCR 이 죽어 OCR 로 읽은 장�
 test('경고: OCR 호출 시간 초과·실패는 VLM 뒤에 OCR 경고로 센다(그 장은 제품이 VLM 으로 넘겨 전사한다)', () => {
   const warningList = buildWarningList({
     callLog: [call('vlm'), timeoutCall('vlm'), call('ocr'), timeoutCall('ocr'), call('ocr', { status: 422 }), call('judge')],
-    judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: OK_SESSION,
+    judgeSourceCountMap: EMPTY_JUDGE_MAP, sessionResult: OK_SESSION,
     swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],
   });
   assert.deepEqual(warningList, [
@@ -156,16 +159,17 @@ test('경고: OCR 호출 시간 초과·실패는 VLM 뒤에 OCR 경고로 센�
   ]);
 });
 
-test('경고: 건강한 결과는 비고, 불완전 사유와 겹치는 ASR 실패·Bedrock 인증 실패는 경고로 다시 세지 않으며, Bedrock 판정 백엔드면 Bedrock 판정은 대체가 아니다', () => {
+test('경고: 건강한 결과는 비고, 불완전 사유와 겹치는 ASR 실패·Bedrock 인증 실패는 경고로 다시 세지 않으며, Bedrock 이 답한 판정 수는 경고가 아니다', () => {
   assert.deepEqual(buildWarningList({
-    callLog: [call('asr'), call('vlm'), call('tts')], judgeBackend: 'gpu', judgeSourceCountMap: EMPTY_JUDGE_MAP,
+    callLog: [call('asr'), call('vlm'), call('tts')], judgeSourceCountMap: EMPTY_JUDGE_MAP,
     sessionResult: OK_SESSION, swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList: [],
   }), []);
   const callLog = [...repeat(3, () => refusedCall('asr')), call('bedrock', { status: 403 }), call('bedrock', { status: 403 })];
   const incompleteReasonList = buildIncompleteReasonList({ sessionResult: OK_SESSION, callLog });
   assert.deepEqual(incompleteReasonList.map((reason) => reason.code), ['asr_failure', 'bedrock_auth_failed']);
+  // 판정 백엔드가 bedrock 이면 판정은 Bedrock 이 답한다. 대체가 아니라 고른 백엔드의 정상 답이다.
   assert.deepEqual(buildWarningList({
-    callLog, judgeBackend: 'bedrock', judgeSourceCountMap: { ...EMPTY_JUDGE_MAP, router: { gpu: 0, bedrock: 3, error: 0 } },
+    callLog, judgeSourceCountMap: { ...EMPTY_JUDGE_MAP, router: { gpu: 0, bedrock: 3, error: 0 } },
     sessionResult: OK_SESSION, swallowedErrorCountMap: { task: {}, ipc: {} }, incompleteReasonList,
   }), []);
 });

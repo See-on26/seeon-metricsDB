@@ -165,7 +165,8 @@ export function buildAdReport({
     },
     adList, droppedList,
     timeline: pieceList.map((piece) => ({ ...piece, outStartMs: Math.round(piece.outStartMs), outEndMs: Math.round(piece.outEndMs) })),
-    // judgeSourceCountMap: 탐지 판정기(router·silence·deixis)마다 답한 곳(gpu·bedrock)·실패(error) 수. GPU 판정 호출의 지연은 serviceMap.judge 에 있다.
+    // judgeSourceCountMap: 탐지 판정기(router·silence·deixis)마다 판정 호출을 답한 곳(gpu·bedrock)·실패(error) 수(router 는 판단 묶음마다 부른 호출의 합).
+    // GPU 판정 LLM 호출(탐지 판정·삽입 위치 추론)의 수·지연은 serviceMap.judge 에 있다.
     // triggerAnalyzerCountMap: main 트리거가 전사마다 쓴 분석기(kiwi·english, 한국어를 Kiwi 없이 뽑으면 rule) 수.
     // slideText: 슬라이드 전사 출처(ocr·vlm)와 VLM 으로 넘긴 이유 수(summarizeSlideTextRecordList).
     stats: {

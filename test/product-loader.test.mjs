@@ -98,7 +98,7 @@ test('가상 시계가 실제 시간으로 흐른 뒤에도 범위 Date.now 는 
   }
 });
 
-test('탐지 판정 LLM 호출을 판정기·답한 곳(gpu·bedrock)·실패로 센다', async () => {
+test('탐지 판정 LLM 호출을 판정기·답한 곳(gpu·bedrock)·실패로 센다 — 라우터가 판단 묶음(지시 대상·발화 기반)마다 부른 호출은 router 로 센다', async () => {
   const productRequire = createRequire(import.meta.url);
   const { createUnifiedRouter } = productRequire(resolveProductPath('src/main/caption-pipeline/router/unified-router.js'));
   const { createSilenceJudge } = productRequire(resolveProductPath('src/main/caption-pipeline/router/silence-judge.js'));
@@ -117,14 +117,16 @@ test('탐지 판정 LLM 호출을 판정기·답한 곳(gpu·bedrock)·실패로
     }
   }
   const answerFetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"caption":true,"reason":"visual_referent"}' } }] }));
-  const candidateList = [{ type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 }];
-  assert.equal((await runWithFetch(answerFetch, () => createUnifiedRouter({ config }).route({ utterance: '이 그래프', candidateList }))).source, 'gpu');
+  // 지시대명사는 '지시 대상 판단', 변화는 '발화 기반 판단' 묶음이라 한 번의 판단에 판정 LLM 을 두 번 부른다.
+  const candidateList = [{ type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 }, { type: 'change', phrase: '크게 늘었습니다', start: 15, end: 23 }];
+  assert.equal((await runWithFetch(answerFetch, () => createUnifiedRouter({ config }).route({ utterance: '이 그래프를 보시면 매출이 크게 늘었습니다', candidateList }))).source, 'gpu');
   assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '여기 이 부분' }))).source, 'gpu');
   assert.equal((await runWithFetch(answerFetch, () => createDeixisJudgeClient({ config }).judge({ utterance: '이 표' }))).source, 'gpu');
-  // GPU 가 실패하고 Bedrock 키가 없어 넘기지 못한다. 무발화 판정기는 실패를 error 로 돌려준다(로그를 찍지 않는다).
+  // GPU 판정이 실패해도 Bedrock 으로 넘기지 않는다. 무발화 판정기는 실패를 error 로 돌려주고(로그를 찍지 않는다), 라우터는 그 묶음 후보를 판단 실패로 막는다.
   const failFetch = async () => { throw new Error('GPU 꺼짐'); };
   assert.equal((await runWithFetch(failFetch, () => createSilenceJudge({ config }).judge({ transcript: '이 화면을 보시죠', silenceMs: 6000 }))).source, 'error');
+  assert.equal((await runWithFetch(failFetch, () => createUnifiedRouter({ config }).route({ utterance: '매출이 크게 늘었습니다', candidateList: candidateList.slice(1) }))).source, 'error');
   assert.deepEqual(getJudgeSourceCountMap(), {
-    router: { ...zeroCountMap, gpu: 1 }, silence: { ...zeroCountMap, error: 1 }, deixis: { ...zeroCountMap, gpu: 2 },
+    router: { ...zeroCountMap, gpu: 2, error: 1 }, silence: { ...zeroCountMap, error: 1 }, deixis: { ...zeroCountMap, gpu: 2 },
   });
 });

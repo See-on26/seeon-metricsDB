@@ -126,7 +126,7 @@ export function formatCallBrief({ serviceCountMap = null, slideText = null }) {
   return partList.join(' / ');
 }
 
-// 완료 영상 중 경고(부하로 생긴 시간 초과·판정 대체 등)가 있는 것은 수와 ⚠ 로 드러낸다. 자세한 내용은 영상 JSON 의 warningList 에 있다.
+// 완료 영상 중 경고(부하로 생긴 시간 초과·판정 실패 등)가 있는 것은 수와 ⚠ 로 드러낸다. 자세한 내용은 영상 JSON 의 warningList 에 있다.
 // --repeat N(N > 1)이면 수는 작업(영상 × 회차) 단위라 머리줄에 작업 수와 영상 수 × 반복 수를 적고, 반복 요약을 주면 끝에 영상별 반복 줄을 붙인다.
 export function formatSummary(manifest, repeatSummary = null) {
   const remainingCount = manifest.counts.total - manifest.counts.done - manifest.counts.failed;
