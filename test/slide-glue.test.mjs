@@ -105,6 +105,21 @@ test('전환을 확정하면 고지가 정해질 때까지 진행 중으로 두�
   assert.deepEqual(harness.warnList, []);
 });
 
+test('확정 중에 온 첫 장 표시는 버리지 않고 기억했다가, 확정이 끝난 뒤 다음 표본에서 지금 화면을 첫 장으로 확정한다', async () => {
+  const harness = setupSlides({ frameAt: () => RED });
+  const verdictList = [{ isTransition: false, isFirst: true }, { isTransition: false, isFirst: false }];
+  harness.ctx.core.histogramGate.sample = () => verdictList.shift();
+  harness.ctx.state.isConfirmingSlide = true;
+  harness.slideGlue.detectSlideTransition({ imageData: RED, ts: harness.clock.nowPerf() });
+  assert.equal(callsOf(harness.bridge, 'embed-frame').length, 0, '확정 중에는 새로 확정하지 않는다');
+  harness.ctx.state.isConfirmingSlide = false;
+  harness.slideGlue.detectSlideTransition({ imageData: RED, ts: harness.clock.nowPerf() + 400 });
+  await harness.clock.runUntil({ isDone: () => harness.ctx.core.slideRegistry.currentLabel() !== null, deadlineElapsedMs: 1000 });
+  assert.equal(harness.ctx.core.slideRegistry.currentLabel(), '1');
+  assert.ok(harness.bridge.sendList.some(({ payload }) => payload.reason === '첫 슬라이드 확정'));
+  assert.deepEqual(harness.warnList, []);
+});
+
 test('GPU 임베딩이 실패하면 로컬 그리드 임베딩(임계 0.02)으로 이어 간다', async () => {
   const harness = setupSlides({ frameAt: () => RED, embedHandler: async () => ({ isOk: false, message: 'EMBED HTTP 502' }) });
   harness.slideGlue.start();

@@ -48,6 +48,7 @@ export { PointingLocator, describeDirection } from '../../seeon-meet/src/rendere
 export { createRecentPointingMemory } from '../../seeon-meet/src/renderer/core/trigger/recent-pointing.js';
 export { createPointingMotionTracker } from '../../seeon-meet/src/renderer/core/trigger/pointing-motion-tracker.js';
 export { SlideHistogramGate } from '../../seeon-meet/src/renderer/core/trigger/slide-histogram-gate.js';
+export { createSlideCandidateGate } from '../../seeon-meet/src/renderer/core/trigger/slide-candidate-gate.js';
 export { SlideEmbeddingRegistry } from '../../seeon-meet/src/renderer/core/trigger/slide-embedding-registry.js';
 export { SlideDwellGate, DWELL_STATE_MAP } from '../../seeon-meet/src/renderer/core/trigger/slide-dwell-gate.js';
 export { computeGridEmbedding } from '../../seeon-meet/src/renderer/core/trigger/frame-embedding.js';

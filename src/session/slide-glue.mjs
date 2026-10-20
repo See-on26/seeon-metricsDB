@@ -118,13 +118,14 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     core.slideDwellGate.enter({ label: decision.label, isRevisit });
   }
 
-  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:705-726)는 없다.
+  // 확정 중에 온 첫 장 표시는 후보 게이트가 기억했다가 확정이 끝난 뒤 다음 표본에서 첫 장으로 확정한다.
+  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:705-726)는 없다. 억제 끝 시각은 제품 초기값 0 그대로다.
   function detectSlideTransition({ imageData, ts }) {
     const verdict = core.histogramGate.sample({ imageData, ts });
-    if (!verdict.isTransition && !verdict.isFirst) return;
-    if (state.isConfirmingSlide) return;
+    const candidate = core.slideCandidateGate.decide({ verdict, ts, suppressUntil: 0, isConfirming: state.isConfirmingSlide });
+    if (!candidate.shouldConfirm) return;
     state.isConfirmingSlide = true;
-    ctx.trackTask(confirmSlideCandidate({ isFirst: verdict.isFirst, imageData }).finally(() => { state.isConfirmingSlide = false; }), 'slide-confirm');
+    ctx.trackTask(confirmSlideCandidate({ isFirst: candidate.isFirst, imageData }).finally(() => { state.isConfirmingSlide = false; }), 'slide-confirm');
   }
 
   // saveAnnotationSnapshot 의 동기 부분(레지스트리 필기 번호·간격 기준 시각)만 따른다. 필기 이미지는 AD 에 영향이 없어 저장하지 않는다.

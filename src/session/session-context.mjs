@@ -2,7 +2,7 @@ import {
   NARRATION_TYPE_MAP, getModePolicy, computeWordBudget, computeLookaheadMs, computeSentenceWaitMs, computeContextHoldMs,
   TranscriptWindow, GapCandidateStore, UtteranceBoundaryDetector, SilenceTrigger, PointingLocator, SlideHistogramGate,
   SlideEmbeddingRegistry, TransitionOrderGate, PendingTransitionTracker, DeixisCandidateScheduler, DeixisDetector, SlideDwellGate,
-  resolveLastSpeechWallTs, describeDirection, createRecentPointingMemory, createPointingMotionTracker,
+  resolveLastSpeechWallTs, describeDirection, createRecentPointingMemory, createPointingMotionTracker, createSlideCandidateGate,
 } from '../product/core-modules.mjs';
 import { POINTING_LOCATOR_OPTION_MAP } from './renderer-constants.mjs';
 
@@ -46,6 +46,7 @@ export function createSessionContext({ clock, bridge, mode, featureToggleStore, 
     recentPointingMemory: createRecentPointingMemory(),
     pointingMotionTracker: createPointingMotionTracker(),
     histogramGate: new SlideHistogramGate({}),
+    slideCandidateGate: createSlideCandidateGate(),
     slideRegistry: new SlideEmbeddingRegistry({}),
     transitionOrderGate: new TransitionOrderGate(),
     // main.js:564 pendingTransitions. 제품은 기본값(실제 setTimeout)으로 만들지만 공장은 10초 상한 타이머를 가상 시계에 건다.
