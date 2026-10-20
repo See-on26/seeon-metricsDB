@@ -1,11 +1,11 @@
 // src/product/core-modules.mjs
 // 공장이 그대로 쓰는 제품 렌더러 코어 모듈. 경로는 서브모듈 seeon-meet 이다.
 export {
-  NARRATION_TYPE_MAP, NARRATION_CLASS_MAP, PAGE_TRANSITION_KIND_MAP, VISUAL_DESCRIPTION_KIND_MAP,
+  NARRATION_TYPE_MAP, NARRATION_CLASS_MAP, PAGE_TRANSITION_KIND_MAP,
   DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, CROP_JPEG_QUALITY,
 } from '../../seeon-meet/src/renderer/core/constants.js';
 export {
-  MODE_MAP, getModePolicy, computeWordBudget, computeLookaheadMs, computeSentenceWaitMs,
+  MODE_MAP, getModePolicy, computeWordBudget, computeSilenceWordBudget, computeLookaheadMs, computeSentenceWaitMs,
   computeContextHoldMs, resolveBeforeAnchorTs, getCatchupRateRange,
 } from '../../seeon-meet/src/renderer/core/mode/mode-policy.js';
 export {

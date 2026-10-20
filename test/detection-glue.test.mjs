@@ -221,7 +221,8 @@ test('말소리가 끊기고 5초가 지나면 직전 15초 전사·슬라이드
   assert.equal(call.payload.slideLabel, '1');
   assert.equal(call.payload.recentTranscript, '이 사진들을 한번 보시죠.');
   assert.equal(call.payload.eventVideoTimeMs, 7000);
-  assert.equal(call.payload.wordBudget.isDroppable, false);
+  // 무발화 해설은 반응 묘사 범위가 아니라 무발화 전용 범위(5~14어절)를 균형 모드 시간으로 줄인 예산이다.
+  assert.deepEqual(call.payload.wordBudget, { minWordCount: 5, maxWordCount: 13, isDroppable: false });
   silenceGlue.stop();
   assert.equal(harness.clock.pendingTimerCount, 0, 'stop 은 100ms tick 을 멈춘다');
   assert.deepEqual(harness.warnList, []);

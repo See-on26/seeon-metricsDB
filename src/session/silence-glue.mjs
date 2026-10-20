@@ -1,11 +1,13 @@
 import {
-  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, VISUAL_DESCRIPTION_KIND_MAP,
+  DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, computeSilenceWordBudget,
   evaluateSilencePrecondition, SILENCE_TRANSCRIPT_WINDOW_MS, SILENCE_SKIP_LABEL_MAP,
 } from '../product/core-modules.mjs';
 import { readLevelAt } from '../media/audio-levels.mjs';
 import { AUDIO_SPEAK_THRESHOLD, NARRATION_ECHO_TAIL_MS, SILENCE_TICK_MS } from './renderer-constants.mjs';
 
-// main.js 의 isNarrationEchoWindow(1727-1734)·100ms 침묵 tick(1736-1751)·handleSilenceTrigger(1753-1788).
+// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
+// main.js 의 isNarrationEchoWindow(1932-1939)·100ms 침묵 tick(1941-1956)·handleSilenceTrigger(1958-1991).
+// tick 의 silenceSpanTracker(소리 기반 틈 후보)는 공장이 ASR 끝 시각 틈 후보만 옮겨 없고, 질문 마이크가 없어 멈춤(isSuspended)도 없다.
 export function createSilenceGlue({ ctx }) {
   const { clock, bridge, state, core } = ctx;
   let timer = null;
@@ -23,7 +25,8 @@ export function createSilenceGlue({ ctx }) {
     const sessionSeq = state.experimentSeq;
     const slideLabel = core.slideRegistry.currentLabel();
     const recentTranscript = core.transcriptWindow.getBefore({ nowTs: clock.nowPerf(), windowMs: SILENCE_TRANSCRIPT_WINDOW_MS });
-    const wordBudget = ctx.buildWordBudget({ narrationType: NARRATION_TYPE_MAP.visualDescription, subKind: VISUAL_DESCRIPTION_KIND_MAP.reaction });
+    // 제품처럼 currentDelayMs 는 넘기지 않는다(0).
+    const wordBudget = computeSilenceWordBudget({ mode: ctx.mode });
     const precondition = evaluateSilencePrecondition({ slideLabel, recentTranscript, wordBudget });
     const silenceLog = `무음 ${Math.round(silenceMs / 1000)}초 · 슬라이드=${slideLabel || '-'} · 모드=${ctx.mode}`;
     if (!precondition.isReady) {
@@ -59,7 +62,7 @@ export function createSilenceGlue({ ctx }) {
   }
 
   return {
-    // attemptStartExperiment(main.js:1894) 의 silenceTrigger.reset 과 100ms tick 시작.
+    // attemptStartExperiment(main.js:2097) 의 silenceTrigger.reset 과 100ms tick 시작.
     start() {
       core.silenceTrigger.reset({ nowPerf: clock.nowPerf() });
       timer = clock.setInterval(tick, SILENCE_TICK_MS);
