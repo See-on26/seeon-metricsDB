@@ -170,7 +170,7 @@ export function createOutputGlue({ ctx }) {
   // 틈 후보 출처가 asr 이면 둘 다 ASR 후보 목록·목표 자리를 그대로 돌려준다(audio-gap-candidates.js isAudioGapActive).
   // 공장은 asr 만 옮겼다(audio 는 세션 시작 전에 막는다). 그래서 여기서는 ASR 후보 저장소를 바로 읽고 고른 자리를 그대로 쓴다.
   // 제품은 정지 때 지연 버퍼를 비워(main.js:400-411) 그 뒤 캡션은 틈 추론 없이 트리거 자리로 돌아간다.
-  // 공장은 멈춘 버퍼 객체가 남으므로 정지 여부(isEnded)로 같은 길을 타 어차피 버릴 캡션에 Bedrock 을 부르지 않는다.
+  // 공장은 멈춘 버퍼 객체가 남으므로 정지 여부(isEnded)로 같은 길을 타 어차피 버릴 캡션에 판정 LLM(삽입 위치 추론)을 부르지 않는다.
   async function resolveInsertionTimeMs({ payload, captionCaptureMs, record }) {
     const { delayBuffer } = core;
     if (isEnded || !delayBuffer || !Number.isFinite(captionCaptureMs)) return captionCaptureMs;

@@ -278,7 +278,7 @@ async function readModelIdList({ url, fetchModelIdList }) {
 }
 
 // GPU 서버가 설정한 모델 이름(VLM·판정)을 서빙하는지 본다. HTTP 로 답하는지만 보면 .env 에 옛 이름이 남아도 통과하고,
-// 실제 요청이 404 로 실패해 AD 가 빠지거나 Bedrock 으로 넘어간다. 같은 호스트·포트는 목록을 한 번만 받아 두 이름을 함께 본다.
+// 실제 요청이 404 로 실패해 AD 가 빠진다. 같은 호스트·포트는 목록을 한 번만 받아 두 이름을 함께 본다.
 // 목록을 받지 못한 자리는 건너뛴다 — 닿지 않는 것은 listDownServices 가 잡는다.
 export async function listModelNameProblems({ pipelineConfig, fetchModelIdList = fetchServedModelIdList }) {
   const modelIdListByHostPortMap = new Map();
