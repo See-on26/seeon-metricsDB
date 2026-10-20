@@ -113,6 +113,22 @@ test('꺼진 분류(화자 식별)는 대기 줄에서 feature_off 로 버리고
   assert.equal(report.payload.text, '발표자 홍길동');
 });
 
+test('재생 차례가 온 자동 해설이 트리거에서 10초 넘게 지났으면 듣고 있는 지연 재생 위치로 재어 stale 로 버리고 main 에 알린다', async () => {
+  const harness = setupOutput();
+  // 지연 모드는 10초 늦게 듣는다. 22초에 도착한 두 해설은 자리가 이미 지나 바로 차례가 오고, 그때 재생 위치는 약 12초다.
+  // 트리거 1초는 11초 지나 버리고, 트리거 3초는 9초라 튼다(라이브 위치 22초로 재면 둘 다 10초를 넘는다).
+  deliverAt(harness, 22000, { text: '트리거 11초 지난 해설', eventVideoTimeMs: 1000, narrationClass: 'silence_based', source: 'visual_description' });
+  deliverAt(harness, 22000, { text: '트리거 9초 지난 해설', eventVideoTimeMs: 3000, narrationClass: 'silence_based', source: 'visual_description' });
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length + harness.outputGlue.getDropRecordList().length === 2 });
+  assert.deepEqual(listDrop(harness), [['트리거 11초 지난 해설', 'stale', null]]);
+  assert.deepEqual(dropReportList(harness).map(({ text, reason }) => [text, reason]), [['트리거 11초 지난 해설', 'stale']]);
+  const [adPlay] = harness.outputGlue.getAdPlayList();
+  const recordByText = new Map(harness.outputGlue.getCaptionRecordList().map((record) => [record.text, record]));
+  assert.equal(adPlay.captionSeq, recordByText.get('트리거 9초 지난 해설').captionSeq);
+  assert.ok(harness.bridge.sendList.some(({ channel, payload }) => channel === 'pipeline-debug' && payload.reason === '트리거 뒤 10초 지남 — 지나간 내용이라 버림'));
+  assert.deepEqual(harness.warnList, []);
+});
+
 test('TTS 가 실패하면 재생기가 소리 없이 건너뛰고 tts_failed 로 main 에 알리며, 멈췄던 지연 재생은 다시 흐른다', async () => {
   const harness = setupOutput();
   deliverAt(harness, 15000, { text: '소리 없는 해설', eventVideoTimeMs: 14000, hasWav: false });
