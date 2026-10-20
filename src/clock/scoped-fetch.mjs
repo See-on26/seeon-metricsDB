@@ -1,6 +1,6 @@
 import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 
-// judge 는 탐지 단계 경량 LLM 판정(통합 라우터·무발화·지시 판정)이 GPU 서버로 보낸 호출이다. Bedrock 으로 넘어간 판정은 bedrock 에 든다.
+// judge 는 탐지 단계 LLM 판정(통합 라우터·무발화·지시 판정)이 GPU 서버로 보낸 호출이다. Bedrock 으로 넘어간 판정은 bedrock 에 든다.
 // ocr 은 슬라이드 전사 OCR(SEEON_SLIDE_TEXT_BACKEND=ocr)이 임베딩 서비스의 /ocr 로 보낸 호출이다.
 export const SERVICE_MAP = { vlm: 'vlm', judge: 'judge', asr: 'asr', tts: 'tts', embed: 'embed', ocr: 'ocr', bedrock: 'bedrock', other: 'other' };
 
