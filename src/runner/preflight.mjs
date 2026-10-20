@@ -199,20 +199,126 @@ async function inspectOcrBackend({ pipelineConfig, checkOcrService }) {
   };
 }
 
-// GPU 서비스와 (ocr 백엔드면) OCR 을 함께 본다. 시작 전 점검과 터널을 연 뒤 다시 볼 때 같이 쓴다.
-// downServiceList 는 닿지 않는 것(터널 대상), problemList 는 닿았지만 OCR 이 실패한 것이다.
-export async function inspectGpuServices({ pipelineConfig, checkService = probeHttpService, checkOcrService = probeOcrService }) {
+const MODEL_NAME_ENV_HINT = '.env 의 SEEON_VLM_MODEL·SEEON_JUDGE_GPU_MODEL 을 확인한다';
+
+// 서비스 주소의 /v1/ 앞부분(앞에 붙인 프록시 경로 포함)에 /v1/models 를 붙인다. /v1/ 이 없으면 origin 바로 아래로 본다.
+// 사용자 정보(user:pass@)는 그대로 둬 같은 서버에 같은 자격으로 묻는다.
+function buildModelListUrl(url) {
+  const target = new URL(url);
+  const v1Index = target.pathname.indexOf('/v1/');
+  target.pathname = `${v1Index >= 0 ? target.pathname.slice(0, v1Index) : ''}/v1/models`;
+  target.search = '';
+  target.hash = '';
+  return target;
+}
+
+// OpenAI 호환 서버(vLLM 등)가 서빙하는 모델 이름 목록(/v1/models 의 data[].id)을 받는다.
+// 닿지 않거나(연결 거부·끊김·응답 없음) 2xx 가 아니거나 JSON·data 배열이 아니면 던진다.
+export function fetchServedModelIdList({ url, timeoutMs = PROBE_TIMEOUT_MS }) {
+  return new Promise((resolve, reject) => {
+    const target = buildModelListUrl(url);
+    const httpModule = HTTP_MODULE_BY_PROTOCOL_MAP[target.protocol];
+    if (!httpModule) {
+      reject(new Error(`HTTP 주소가 아니다(${target.protocol})`));
+      return;
+    }
+    let isSettled = false;
+    const request = httpModule.request(target, { method: 'GET', timeout: timeoutMs, agent: false }, (response) => {
+      const chunkList = [];
+      response.on('data', (chunk) => chunkList.push(chunk));
+      response.on('end', () => {
+        const { statusCode } = response;
+        if (statusCode < 200 || statusCode >= 300) {
+          finish({ error: new Error(`HTTP ${statusCode}`) });
+          return;
+        }
+        let body = null;
+        try {
+          body = JSON.parse(Buffer.concat(chunkList).toString('utf8'));
+        } catch {
+          body = null;
+        }
+        if (!Array.isArray(body?.data)) {
+          finish({ error: new Error(`HTTP ${statusCode} 이지만 모델 목록 모양이 아니다`) });
+          return;
+        }
+        finish({ modelIdList: body.data.map((model) => model?.id).filter((id) => typeof id === 'string') });
+      });
+      response.on('error', (error) => finish({ error: new Error(describeProbeError(error)) }));
+    });
+    function finish({ error = null, modelIdList = null }) {
+      if (isSettled) return;
+      isSettled = true;
+      request.destroy();
+      if (error) reject(error);
+      else resolve(modelIdList);
+    }
+    request.on('timeout', () => finish({ error: new Error(`응답 없음(${timeoutMs / 1000}초)`) }));
+    request.on('error', (error) => finish({ error: new Error(describeProbeError(error)) }));
+    request.end();
+  });
+}
+
+// 이름을 볼 자리. 판정 주소는 listServiceUrlKeyList 처럼 판정 백엔드가 gpu 이고 주소가 있을 때만 쓴다. 주소·이름이 빈 자리는 볼 수 없어 뺀다.
+function listModelNameTargetList({ pipelineConfig }) {
+  const { vlmUrl, vlmModel, judgeBackend, judgeGpuUrl, judgeGpuModel } = pipelineConfig;
+  const targetList = [{ label: 'VLM', url: vlmUrl, modelName: vlmModel }];
+  if (judgeBackend === JUDGE_BACKEND_MAP.gpu && judgeGpuUrl) targetList.push({ label: '판정', url: judgeGpuUrl, modelName: judgeGpuModel });
+  return targetList.filter(({ url, modelName }) => url && modelName);
+}
+
+// 받지 못한 목록(던짐·배열 아님)은 null 로 돌려 그 자리를 건너뛰게 한다.
+async function readModelIdList({ url, fetchModelIdList }) {
+  try {
+    const modelIdList = await fetchModelIdList({ url });
+    return Array.isArray(modelIdList) ? modelIdList : null;
+  } catch {
+    return null;
+  }
+}
+
+// GPU 서버가 설정한 모델 이름(VLM·판정)을 서빙하는지 본다. HTTP 로 답하는지만 보면 .env 에 옛 이름이 남아도 통과하고,
+// 실제 요청이 404 로 실패해 AD 가 빠지거나 Bedrock 으로 넘어간다. 같은 호스트·포트는 목록을 한 번만 받아 두 이름을 함께 본다.
+// 목록을 받지 못한 자리는 건너뛴다 — 닿지 않는 것은 listDownServices 가 잡는다.
+export async function listModelNameProblems({ pipelineConfig, fetchModelIdList = fetchServedModelIdList }) {
+  const modelIdListByHostPortMap = new Map();
+  const problemList = [];
+  for (const { label, url, modelName } of listModelNameTargetList({ pipelineConfig })) {
+    const { hostname, portNumber } = readHostPort(url);
+    const hostPort = `${hostname}:${portNumber}`;
+    if (!modelIdListByHostPortMap.has(hostPort)) modelIdListByHostPortMap.set(hostPort, await readModelIdList({ url, fetchModelIdList }));
+    const modelIdList = modelIdListByHostPortMap.get(hostPort);
+    if (!modelIdList || modelIdList.includes(modelName)) continue;
+    problemList.push(`${label} ${hostPort} 에 모델 ${modelName} 이 없다(서버: ${modelIdList.join(', ') || '없음'}) — ${MODEL_NAME_ENV_HINT}`);
+  }
+  return problemList;
+}
+
+// 이름 확인의 기본은 실제 목록 받기다. 다만 GPU 서비스 점검(checkService)을 바꿔 끼운 호출(시험·대역)은 이름 확인도 서버에 보내지 않는다 —
+// 그대로 두면 대역으로 돌린 점검이 열린 터널 너머 실제 GPU 서버에 묻고, 그 서버가 서빙하는 이름에 따라 결과가 바뀐다.
+const pickDefaultModelIdListFetcher = (checkService) => (checkService === probeHttpService ? fetchServedModelIdList : null);
+
+// GPU 서비스와 (ocr 백엔드면) OCR, 서빙 모델 이름을 함께 본다. 시작 전 점검과 터널을 연 뒤 다시 볼 때 같이 쓴다.
+// downServiceList 는 닿지 않는 것(터널 대상), problemList 는 닿았지만 OCR 이 실패했거나 설정한 모델 이름을 서빙하지 않는 것이다.
+// 터널을 열기 전에 닿지 않던 서버의 이름은 터널을 연 뒤 다시 볼 때 확인된다.
+export async function inspectGpuServices({
+  pipelineConfig, checkService = probeHttpService, checkOcrService = probeOcrService,
+  fetchModelIdList = pickDefaultModelIdListFetcher(checkService),
+}) {
   const downServiceList = await listDownServices({ pipelineConfig, checkService });
   const ocr = await inspectOcrBackend({ pipelineConfig, checkOcrService });
-  return { downServiceList: [...downServiceList, ...ocr.downServiceList], problemList: ocr.problemList };
+  const modelNameProblemList = fetchModelIdList ? await listModelNameProblems({ pipelineConfig, fetchModelIdList }) : [];
+  return { downServiceList: [...downServiceList, ...ocr.downServiceList], problemList: [...ocr.problemList, ...modelNameProblemList] };
 }
 
 // Bedrock 은 호출마다 돈이 들어 점검하지 않는다(토큰이 있는지만 본다). 토큰 만료는 영상 결과의 불완전 사유(bedrock_auth_failed)로 잡힌다.
 // 한국어 트리거 형태소 분석기(Kiwi)의 의존성·모델이 seeon-meet 에 있는지도 본다(checkTriggerAnalyzer, 테스트는 대역).
 // 틈 후보를 잰 무음에서 고르는 audio(SEEON_GAP_SOURCE=audio)는 공장이 아직 옮기지 않았다. 그대로 돌리면 결과 설정에 audio 라고
 // 적힌 채 ASR 끝 시각 후보로 돌므로 시작 전에 멈춘다.
+// GPU 서버가 설정한 모델 이름(SEEON_VLM_MODEL·SEEON_JUDGE_GPU_MODEL)을 서빙하지 않아도 멈춘다(inspectGpuServices, fetchModelIdList 는 시험이 바꿔 끼운다).
 export async function runPreflight({
   pipelineConfig, ffmpegPath, ffprobePath, checkService = probeHttpService, checkOcrService = probeOcrService,
+  fetchModelIdList = pickDefaultModelIdListFetcher(checkService),
   runVersion = (binaryPath) => runBinary({ binaryPath, argList: ['-version'] }), checkTriggerAnalyzer = checkKiwiSetup,
 }) {
   const problemList = [];
@@ -228,7 +334,7 @@ export async function runPreflight({
     }
   }
   problemList.push(...await checkTriggerAnalyzer());
-  const { downServiceList, problemList: serviceProblemList } = await inspectGpuServices({ pipelineConfig, checkService, checkOcrService });
+  const { downServiceList, problemList: serviceProblemList } = await inspectGpuServices({ pipelineConfig, checkService, checkOcrService, fetchModelIdList });
   problemList.push(...serviceProblemList);
   if (!pipelineConfig.bedrockApiKey) {
     // 백엔드가 없는 설정은 제품 judge-llm.js 처럼 Bedrock 판정으로 본다.
