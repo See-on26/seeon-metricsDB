@@ -156,7 +156,7 @@ function readHostPort(url) {
   return { hostname, portNumber: Number(port) || DEFAULT_PORT_BY_PROTOCOL_MAP[protocol] };
 }
 
-// 제품 기본 판정 GPU 주소는 VLM(8801)과 따로 띄운 판정 LLM(Qwen3.5-9B, 127.0.0.1:8805)이라 판정 백엔드가 gpu 면 그 주소(JUDGE)도 본다.
+// 제품 기본 판정 GPU 주소는 VLM(8801)과 따로 띄운 판정 LLM(127.0.0.1:8805)이라 판정 백엔드가 gpu 면 그 주소(JUDGE)도 본다.
 // SEEON_JUDGE_GPU_URL 로 VLM 과 같은 호스트·포트를 주면 VLM 점검이 판정도 덮는다. 제품 터널은 판정 주소도 넘긴다(tunnel-config.js).
 function listServiceUrlKeyList({ pipelineConfig }) {
   const { judgeBackend, judgeGpuUrl, vlmUrl } = pipelineConfig;
