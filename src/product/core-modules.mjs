@@ -28,7 +28,9 @@ export { CaptionNarrator } from '../../seeon-meet/src/renderer/core/audio-render
 export {
   TransitionOrderGate, LEADER_STATUS_MAP, resolveFollowerInsertMs, PendingTransitionTracker, resolveAfterTransitionInsertMs,
 } from '../../seeon-meet/src/renderer/core/audio-renderer/transition-order-gate.js';
-export { isSegmentVoiced, isSegmentCutReady } from '../../seeon-meet/src/renderer/core/trigger/asr-segmenter.js';
+export {
+  isSegmentVoiced, shouldCutSegment, DEFAULT_MAX_EXTEND_MS, DEFAULT_EXTEND_SILENCE_CUT_MS,
+} from '../../seeon-meet/src/renderer/core/trigger/asr-segmenter.js';
 export {
   UtteranceBoundaryDetector, classifyUtteranceEnding, buildSegmentBoundaryList,
 } from '../../seeon-meet/src/renderer/core/trigger/utterance-boundary-detector.js';

@@ -48,10 +48,21 @@ test('나눠 넣어도 한 번에 계산한 레벨 목록과 같다', () => {
   assert.equal(readLevelAt({ levelList: expected, timeMs: 0, tickMs: 100 }), 0, 'tick 0 은 없다');
 });
 
-test('계속 말하면 3초마다 타이머로 자른다', () => {
+test('쉼 없이 계속 말하면 조각 길이(3초)에서 자르지 않고 늘린 상한(+1.5초)에서 타이머로 자른다', () => {
   const segmentList = planAsrSegmentList({ levelList: levelListFrom([[9000, 0.1]]), durationMs: 9000, segmentMs: 3000, minSegmentMs: 2500 });
   assert.deepEqual(segmentList.map(({ startMs, endMs, isVoiced }) => [startMs, endMs, isVoiced]),
-    [[0, 3000, true], [3000, 6000, true], [6000, 9000, true]]);
+    [[0, 4500, true], [4500, 9000, true]]);
+});
+
+test('조각 길이가 찼을 때 말하는 중이면 기다렸다가 낱말 사이 쉼 200ms 가 쌓인 tick 에서 자른다', () => {
+  // 3.3~3.5초 쉼: 3초에 자르지 않고 쉼 200ms 가 찬 3.5초에 자른다(무음 400ms 절단은 아직 아니다).
+  const segmentList = planAsrSegmentList({ levelList: levelListFrom([[3300, 0.1], [200, 0], [3000, 0.1]]), durationMs: 6500, segmentMs: 3000, minSegmentMs: 2500 });
+  assert.deepEqual(segmentList.map(({ startMs, endMs }) => [startMs, endMs]), [[0, 3500], [3500, 6500]]);
+});
+
+test('조각 길이가 찰 때까지 말이 200ms 에 못 미치면 늘리지 않고 그 뒤 첫 무음 tick 에서 자른다', () => {
+  const segmentList = planAsrSegmentList({ levelList: levelListFrom([[2900, 0], [100, 0.1], [3000, 0]]), durationMs: 6000, segmentMs: 3000, minSegmentMs: 2500 });
+  assert.deepEqual(segmentList.map(({ startMs, endMs, voicedMs }) => [startMs, endMs, voicedMs]), [[0, 3100, 100], [3100, 6000, 0]]);
 });
 
 test('2.5초가 지난 뒤 끝 무음 400ms 가 쌓인 tick 에서 자르고, 무성 조각은 isVoiced=false, 영상 끝은 마지막 조각', () => {
