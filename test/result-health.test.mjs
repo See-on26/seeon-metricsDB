@@ -4,7 +4,7 @@ import {
   buildIncompleteReasonList, buildWarningList, describeIncompleteReason, formatWarningBrief, ASR_FAILURE_RATIO_LIMIT,
 } from '../src/runner/result-health.mjs';
 
-const call = (service, extra = {}) => ({ service, status: 200, errorMessage: null, errorName: null, errorCode: null, isVlmFallback: false, ...extra });
+const call = (service, extra = {}) => ({ service, status: 200, errorMessage: null, errorName: null, errorCode: null, ...extra });
 const timeoutCall = (service) => call(service, { status: null, errorMessage: 'The operation was aborted due to timeout', errorName: 'TimeoutError' });
 const REFUSED_MESSAGE = 'fetch failed (ECONNREFUSED: connect ECONNREFUSED 127.0.0.1:18802)';
 const refusedCall = (service) => call(service, { status: null, errorMessage: REFUSED_MESSAGE, errorName: 'TypeError', errorCode: 'ECONNREFUSED' });
@@ -75,14 +75,13 @@ test('불완전: 렌더러가 해설 소리를 요청(pipeline-tts)했는데 하
   }), [], '불완전 사유로 센 TTS 실패는 경고로 다시 세지 않는다');
 });
 
-test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedrock 대체·VLM 폴백·배수 상한·삼킨 오류는 실패로 만들지 않고 코드별 수로 남긴다', () => {
+test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedrock 대체·배수 상한·삼킨 오류는 실패로 만들지 않고 코드별 수로 남긴다', () => {
   const callLog = [
     ...repeat(10, () => call('asr')), timeoutCall('asr'),
     ...repeat(12, () => call('vlm')), ...repeat(4, () => timeoutCall('vlm')),
     ...repeat(5, () => call('judge')), timeoutCall('judge'),
     ...repeat(2, () => call('tts')), call('tts', { status: 500 }),
     ...repeat(3, () => call('bedrock')), call('bedrock', { status: 429, errorMessage: null }),
-    ...repeat(2, () => call('bedrock', { isVlmFallback: true })),
   ];
   const warningList = buildWarningList({
     callLog, judgeBackend: 'gpu',
@@ -96,14 +95,13 @@ test('경고: 부하로 생기는 시간 초과·서비스 오류·판정 Bedroc
     { code: 'vlm_timeout', count: 4, message: 'VLM 호출 시간 초과 4/16건' },
     { code: 'judge_timeout', count: 1, message: '탐지 판정 GPU 호출 시간 초과 1/6건' },
     { code: 'tts_error', count: 1, message: 'TTS 호출 실패 1/3건 — HTTP 500' },
-    { code: 'bedrock_error', count: 1, message: 'Bedrock 호출 실패 1/6건 — HTTP 429' },
+    { code: 'bedrock_error', count: 1, message: 'Bedrock 호출 실패 1/4건 — HTTP 429' },
     { code: 'judge_fallback', count: 1, message: '탐지 판정을 GPU 대신 Bedrock 이 판정 1건(router 1)' },
     { code: 'judge_error', count: 1, message: '탐지 판정 실패(GPU·Bedrock 모두) 1건(silence 1) — 라우터·무발화 판정은 해설을 내지 않는다' },
-    { code: 'vlm_fallback', count: 2, message: 'VLM 대신 Bedrock 폴백 2건' },
     { code: 'drain_timeout', count: 1, message: '배수 상한(영상 끝 + 33초)에 닿아 멈춤 — 남은 작업 2 · 진행 중 호출 1' },
     { code: 'swallowed_error', count: 3, message: '연결 코드가 삼킨 오류 3건(caption 1 · ipc:pipeline-event 2)' },
   ]);
-  assert.equal(formatWarningBrief(warningList), '⚠ asr_timeout 1 · vlm_timeout 4 · judge_timeout 1 · tts_error 1 · bedrock_error 1 · judge_fallback 1 · judge_error 1 · vlm_fallback 2 · drain_timeout 1 · swallowed_error 3');
+  assert.equal(formatWarningBrief(warningList), '⚠ asr_timeout 1 · vlm_timeout 4 · judge_timeout 1 · tts_error 1 · bedrock_error 1 · judge_fallback 1 · judge_error 1 · drain_timeout 1 · swallowed_error 3');
   assert.equal(formatWarningBrief([]), '');
 });
 

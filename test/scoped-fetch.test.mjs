@@ -21,9 +21,8 @@ const { createDeixisJudgeClient } = require(resolveProductPath('src/main/caption
 const pipelineConfig = {
   vlmUrl: 'http://127.0.0.1:8801/v1/chat/completions', vlmModel: 'qwen', asrUrl: 'http://127.0.0.1:8802/asr',
   ttsUrl: 'http://127.0.0.1:8803/tts', ttsLongUrl: 'http://127.0.0.1:8803/tts-long', embedUrl: 'http://127.0.0.1:8804/embed',
-  vlmFallbackModelId: 'anthropic.claude-haiku-4-5-20251001-v1:0',
 };
-// 제품 기본값처럼 판정 GPU 주소가 VLM 주소와 같다. 모델 이름만 달리 둬 어느 쪽으로 셌는지 가린다.
+// 판정 GPU 주소를 VLM 주소와 같게 둔 설정(SEEON_JUDGE_GPU_URL)이다. 모델 이름만 달리 둬 어느 쪽으로 셌는지 가린다.
 const sharedJudgeConfig = { ...pipelineConfig, judgeBackend: 'gpu', judgeGpuUrl: pipelineConfig.vlmUrl, judgeGpuModel: 'qwen-judge' };
 const FAKE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]);
 
@@ -61,9 +60,9 @@ test('판정 GPU 주소가 VLM 과 같으면 몸통으로 판정과 VLM 을 가�
   const [routerBody] = await captureJudgeBodyList();
   const textOnlyBody = JSON.stringify(buildVlmRequestBody({ vlmModel: 'qwen', prompt: '이 슬라이드에 라벨을 붙여라' }));
   assert.deepEqual(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: routerBody, pipelineConfig: sharedJudgeConfig }),
-    { service: 'judge', modelId: 'qwen-judge', isVlmFallback: false });
+    { service: 'judge', modelId: 'qwen-judge' });
   assert.deepEqual(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: textOnlyBody, pipelineConfig: sharedJudgeConfig }),
-    { service: 'vlm', modelId: 'qwen', isVlmFallback: false });
+    { service: 'vlm', modelId: 'qwen' });
   assert.equal(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: undefined, pipelineConfig: sharedJudgeConfig }).service, 'vlm');
   assert.equal(classifyServiceRequest({ url: pipelineConfig.vlmUrl, body: routerBody, pipelineConfig }).service, 'vlm', '판정 설정이 없는 제품');
   assert.equal(classifyServiceRequest({ url: pipelineConfig.asrUrl, body: routerBody, pipelineConfig: sharedJudgeConfig }).service, 'asr');
@@ -72,19 +71,21 @@ test('판정 GPU 주소가 VLM 과 같으면 몸통으로 판정과 VLM 을 가�
 test('제품 기본 설정은 판정 LLM(8805)을 VLM(8801)과 따로 두므로 주소만으로 가르고, VLM 주소로 간 글 요청은 VLM 이다', async () => {
   const { readPipelineConfig } = require(resolveProductPath('src/main/caption-pipeline/config.js'));
   const defaultConfig = readPipelineConfig({});
-  assert.deepEqual([defaultConfig.vlmUrl, defaultConfig.judgeGpuUrl, defaultConfig.judgeGpuModel],
-    ['http://127.0.0.1:8801/v1/chat/completions', 'http://127.0.0.1:8805/v1/chat/completions', 'qwen3.5-9b']);
+  assert.deepEqual([defaultConfig.vlmUrl, defaultConfig.judgeGpuUrl],
+    ['http://127.0.0.1:8801/v1/chat/completions', 'http://127.0.0.1:8805/v1/chat/completions']);
+  // 모델 이름은 제품 기본값을 그대로 쓴다(GPU 서버 모델을 바꿀 때마다 제품 기본값이 바뀐다).
+  assert.ok(defaultConfig.judgeGpuModel && defaultConfig.vlmModel);
   const [routerBody] = await captureJudgeBodyList();
   assert.deepEqual(classifyServiceRequest({ url: defaultConfig.judgeGpuUrl, body: routerBody, pipelineConfig: defaultConfig }),
-    { service: 'judge', modelId: 'qwen3.5-9b', isVlmFallback: false });
+    { service: 'judge', modelId: defaultConfig.judgeGpuModel });
   assert.deepEqual(classifyServiceRequest({ url: defaultConfig.vlmUrl, body: routerBody, pipelineConfig: defaultConfig }),
-    { service: 'vlm', modelId: defaultConfig.vlmModel, isVlmFallback: false }, '판정 주소가 따로면 VLM 주소의 몸통은 보지 않는다');
+    { service: 'vlm', modelId: defaultConfig.vlmModel }, '판정 주소가 따로면 VLM 주소의 몸통은 보지 않는다');
 });
 
 test('판정 GPU 주소가 따로 있으면 주소만으로 판정으로 센다', () => {
   const dedicatedJudgeConfig = { ...sharedJudgeConfig, judgeGpuUrl: 'http://127.0.0.1:18806/v1/chat/completions' };
   assert.deepEqual(classifyServiceUrl({ url: dedicatedJudgeConfig.judgeGpuUrl, pipelineConfig: dedicatedJudgeConfig }),
-    { service: 'judge', modelId: 'qwen-judge', isVlmFallback: false });
+    { service: 'judge', modelId: 'qwen-judge' });
   assert.equal(classifyServiceRequest({ url: dedicatedJudgeConfig.judgeGpuUrl, body: undefined, pipelineConfig: dedicatedJudgeConfig }).service, 'judge');
   assert.equal(classifyServiceUrl({ url: pipelineConfig.vlmUrl, pipelineConfig: dedicatedJudgeConfig }).service, 'vlm');
 });
@@ -105,16 +106,14 @@ test('같은 주소로 간 판정·VLM 호출은 서비스 통계에서 따로 �
   assert.equal(serviceMap.vlm.count, 1);
 });
 
-test('URL 로 서비스와 Bedrock 모델·VLM 폴백 여부를 가린다', () => {
+test('URL 로 서비스와 Bedrock 모델을 가린다', () => {
   assert.deepEqual(classifyServiceUrl({ url: 'http://127.0.0.1:8802/asr?startTs=1&language=ko', pipelineConfig }),
-    { service: 'asr', modelId: null, isVlmFallback: false });
+    { service: 'asr', modelId: null });
   assert.equal(classifyServiceUrl({ url: pipelineConfig.vlmUrl, pipelineConfig }).modelId, 'qwen');
   assert.deepEqual(classifyServiceUrl({
-    url: 'https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/converse', pipelineConfig,
-  }), { service: 'bedrock', modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', isVlmFallback: true });
-  assert.equal(classifyServiceUrl({
     url: 'https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-sonnet-5/converse', pipelineConfig,
-  }).isVlmFallback, false);
+  }), { service: 'bedrock', modelId: 'us.anthropic.claude-sonnet-5' });
+  assert.deepEqual(classifyServiceUrl({ url: 'http://127.0.0.1:9999/unknown', pipelineConfig }), { service: 'other', modelId: null });
 });
 
 test('슬라이드 전사 OCR(/ocr)은 임베딩과 origin 이 같아도 경로로 갈라 ocr 로 센다', () => {

@@ -21,7 +21,7 @@ export const ASR_FAILURE_RATIO_LIMIT = 0.1;
 // 완료로 두고 tts_timeout·tts_error 경고와 버린 사유 tts_failed 로 남긴다. 세션을 멈출 때 끝나지 않은 합성(isPendingAtStop)은
 // 성공도 실패도 아니라 판정에서 뺀다(stats.tts.pendingAtStopCount).
 const listSettledTtsRequest = (captionRecordList = []) => captionRecordList.map((record) => record.tts).filter((tts) => tts && !tts.isPendingAtStop);
-// 단기 토큰 만료·권한 없음. 한 번 나면 그 뒤 Bedrock 호출(틈 추론·판정 대체·VLM 폴백)이 모두 실패한다.
+// 단기 토큰 만료·권한 없음. 한 번 나면 그 뒤 Bedrock 호출(판정 백엔드가 bedrock 이면 탐지 판정)이 모두 실패한다.
 const BEDROCK_AUTH_STATUS_LIST = [401, 403];
 const JUDGE_BACKEND_GPU = 'gpu';
 // 경고·summary 의 서비스 순서. OCR 은 VLM 대신 슬라이드를 전사하므로 VLM 바로 뒤에 둔다.
@@ -33,7 +33,7 @@ const SERVICE_LABEL_MAP = {
   [SERVICE_MAP.embed]: '임베딩', [SERVICE_MAP.bedrock]: 'Bedrock', [SERVICE_MAP.other]: '기타 서비스',
 };
 export const WARNING_CODE_MAP = {
-  judgeFallback: 'judge_fallback', judgeError: 'judge_error', vlmFallback: 'vlm_fallback', ocrFallback: 'ocr_fallback', drainTimeout: 'drain_timeout',
+  judgeFallback: 'judge_fallback', judgeError: 'judge_error', ocrFallback: 'ocr_fallback', drainTimeout: 'drain_timeout',
   swallowedError: 'swallowed_error',
 };
 
@@ -177,8 +177,6 @@ export function buildWarningList({
       message: `OCR 오류·우회로 VLM 으로 넘긴 슬라이드 ${ocrFailedCount}/${slideText.count}장(${describeCountMap(failedCountMap)})`,
     });
   }
-  const vlmFallbackCount = callLog.filter((record) => record.isVlmFallback).length;
-  if (vlmFallbackCount) warningList.push({ code: WARNING_CODE_MAP.vlmFallback, count: vlmFallbackCount, message: `VLM 대신 Bedrock 폴백 ${vlmFallbackCount}건` });
   if (sessionResult.isDrainTimedOut) {
     warningList.push({
       code: WARNING_CODE_MAP.drainTimeout, count: 1,

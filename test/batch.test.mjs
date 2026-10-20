@@ -14,6 +14,7 @@ import { buildResultConfig } from '../src/runner/result-identity.mjs';
 import { buildReportConfig } from '../src/runner/run-video-job.mjs';
 import { buildAdReport } from '../src/output/ad-report.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
+import { MODE_MAP } from '../src/product/core-modules.mjs';
 import { runPreflight, probeHttpService, probeOcrService, startProductTunnel } from '../src/runner/preflight.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
@@ -764,12 +765,20 @@ test('결과 설정: 결과를 바꾸는 모델·판정 백엔드·라우터·�
     pipelineConfig: readPipelineConfig({ SEEON_VLM_MODEL: 'vlm-x', SEEON_JUDGE_BACKEND: 'bedrock', AWS_BEARER_TOKEN_BEDROCK: 'secret', SEEON_VLM_URL: 'http://127.0.0.1:9/v' }),
   });
   assert.deepEqual(Object.keys(resultConfig).sort(), [
-    'bedrockModelId', 'delayMs', 'gapModelId', 'gapSource', 'isScaleEnabled', 'isVlmFallbackEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
-    'mode', 'routerMode', 'slideTextBackend', 'vlmFallbackModelId', 'vlmModel',
+    'bedrockModelId', 'delayMs', 'gapModelId', 'gapSource', 'isScaleEnabled', 'isScreenTextGroundingEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
+    'mode', 'routerMode', 'slideTextBackend', 'vlmModel',
   ]);
   assert.deepEqual([resultConfig.mode, resultConfig.delayMs, resultConfig.vlmModel, resultConfig.judgeBackend], ['delayed', 10000, 'vlm-x', 'bedrock']);
   assert.equal(JSON.stringify(resultConfig).includes('secret'), false);
   assert.equal(JSON.stringify(resultConfig).includes('127.0.0.1'), false);
+});
+
+test('결과 설정: 틈 추론 모델은 판정 백엔드와 상관없이 GPU 판정 LLM 이고, 지연이 없어 삽입 위치 추론을 부르지 않는 모드는 null 이다', () => {
+  const { readPipelineConfig } = loadPipelineConfig();
+  const pipelineConfig = readPipelineConfig({ SEEON_JUDGE_GPU_MODEL: 'judge-x', SEEON_JUDGE_BACKEND: 'bedrock' });
+  const readGapModelId = (mode) => buildResultConfig({ pipelineConfig, mode }).gapModelId;
+  assert.deepEqual([MODE_MAP.listening, MODE_MAP.delayed].map(readGapModelId), ['judge-x', 'judge-x']);
+  assert.deepEqual([MODE_MAP.realtimeSic, MODE_MAP.realtimeMix].map(readGapModelId), [null, null]);
 });
 
 test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdReport)로 만든 JSON 을 견주면, 모델을 바꾸지 않은 다시 실행은 건너뛰고(허용 목록 밖 필드·주소·토큰이 달라도) 모델을 바꾸면 다시 돈다', () => {
@@ -794,28 +803,35 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
   assert.equal(JSON.stringify(recordedConfig).includes('secret'), false);
   // 견주는 모델 항목은 기록된 modelConfig(허용 목록 모양)에 있고 값도 같다.
   const comparedModelKeyList = [
-    'vlmModel', 'isVlmFallbackEnabled', 'vlmFallbackModelId', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled',
+    'vlmModel', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled', 'isScreenTextGroundingEnabled',
     'slideTextBackend', 'gapSource',
   ];
   for (const key of comparedModelKeyList) {
     assert.ok(Object.hasOwn(recordedConfig.modelConfig, key), `기록 허용 목록에 ${key} 가 없다`);
     assert.equal(recordedConfig.resultConfig[key], recordedConfig.modelConfig[key], key);
   }
-  assert.equal(recordedConfig.resultConfig.gapModelId, recordedConfig.modelConfig.gapModelByModeMap[recordedConfig.mode]);
+  assert.equal(recordedConfig.resultConfig.gapModelId, recordedConfig.modelConfig.judgeGpuModel, '균형 모드의 삽입 위치 추론은 GPU 판정 LLM 이 한다');
 
   // CLI 가 견줄 때의 설정: 같은 모델에 다른 주소(터널 대신 직접)·토큰이고 허용 목록 밖 필드는 없다.
   const inspectWith = (env) => inspectVideoResult({
     outDir, ...job, identity: { versionMap: IDENTITY.versionMap, resultConfig: buildResultConfig({ pipelineConfig: readPipelineConfig(env) }) },
   });
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] });
-  // 판정 LLM 은 VLM 과 따로 띄운 모델이라(제품 기본 qwen3.5-9b) VLM 모델을 바꿔도 판정 모델은 그대로다.
+  // 판정 LLM 모델은 VLM 모델과 따로 정하므로(SEEON_JUDGE_GPU_MODEL) VLM 모델을 바꿔도 판정 모델은 그대로다.
   const recordedVlmModel = recordedConfig.modelConfig.vlmModel;
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_MODEL: 'vlm-next' }), {
     status: 'mismatch', mismatchList: [`결과 설정 vlmModel ${recordedVlmModel} → vlm-next`],
   });
+  // 삽입 위치 추론도 판정 LLM 이 하므로 판정 모델을 바꾸면 틈 추론 모델도 함께 바뀐다.
+  const recordedJudgeGpuModel = recordedConfig.modelConfig.judgeGpuModel;
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_JUDGE_GPU_MODEL: 'judge-next' }), {
-    status: 'mismatch', mismatchList: [`결과 설정 judgeGpuModel ${recordedConfig.modelConfig.judgeGpuModel} → judge-next`],
+    status: 'mismatch',
+    mismatchList: [`결과 설정 judgeGpuModel ${recordedJudgeGpuModel} → judge-next`, `결과 설정 gapModelId ${recordedJudgeGpuModel} → judge-next`],
   });
+  // 수치 해설의 화면 글자 근거를 끄면 해설 내용이 달라지므로 다른 결과다.
+  assert.equal(recordedConfig.resultConfig.isScreenTextGroundingEnabled, true);
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_SCREEN_TEXT_GROUNDING: 'off' }).mismatchList,
+    ['결과 설정 isScreenTextGroundingEnabled true → false']);
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_JUDGE_GPU_URL: 'http://127.0.0.1:9/v1/chat/completions' }), { status: 'done', mismatchList: [] },
     '판정 주소만 바뀐 것은 같은 결과다');
   // 슬라이드 전사 백엔드를 바꾸면(A/B) 다른 결과로 보고 다시 돈다. OCR 주소만 바꾼 것은 같은 결과다.

@@ -478,7 +478,9 @@ test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모
   const manifest = readJson(path.join(outDir, 'manifest.json'));
   assert.match(manifest.factory.commit, /^[0-9a-f]{40}$/);
   assert.equal(typeof manifest.factory.isDirty, 'boolean');
-  assert.equal(manifest.resultConfig.vlmModel, 'qwen3.5-35b-a3b');
+  // BASE_ENV 는 모델 이름을 주지 않으므로 결과 설정의 VLM 모델은 제품 기본값이다.
+  const defaultVlmModel = loadPipelineConfig().readPipelineConfig({}).vlmModel;
+  assert.equal(manifest.resultConfig.vlmModel, defaultVlmModel);
   assert.equal(manifest.runOptions.concurrency, 1);
   assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), new RegExp(`공장 ${manifest.factory.commit.slice(0, 7)}`));
   const aReport = readJson(path.join(outDir, 'a_SEEON_AD.json'));
@@ -491,9 +493,9 @@ test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모
   assert.deepEqual(countStartPair(), [2, 1]);
 
   const modelEnv = { ...BASE_ENV, SEEON_VLM_MODEL: 'other-vlm' };
-  // 판정 LLM 은 VLM 과 따로 띄운 모델(제품 기본 qwen3.5-9b)이라 VLM 모델만 다르다.
+  // 판정 LLM 모델은 VLM 모델과 따로 정하므로(SEEON_JUDGE_GPU_MODEL) VLM 모델만 다르다.
   assert.deepEqual(await runOnce(modelEnv), ['a', 'b'].map((videoId) => `[factory] ↻ ${videoId} 이전 완료 결과와 달라 다시 만든다 — `
-    + '결과 설정 vlmModel qwen3.5-35b-a3b → other-vlm'));
+    + `결과 설정 vlmModel ${defaultVlmModel} → other-vlm`));
   assert.deepEqual(countStartPair(), [3, 2]);
   assert.deepEqual(await runOnce({ ...modelEnv, SEEON_ASR_URL: 'http://127.0.0.1:10/asr' }), [], '서비스 주소(터널·직접 연결)는 결과 설정이 아니다');
   assert.deepEqual(countStartPair(), [3, 2]);

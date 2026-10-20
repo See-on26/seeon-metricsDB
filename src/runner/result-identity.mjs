@@ -10,19 +10,22 @@ import { buildReportModelConfig } from '../output/ad-report.mjs';
 // 견주지 않는다. 그래서 모델 설정을 바꾸지 않은 재실행은 건너뛴다.
 export function buildResultConfig({ pipelineConfig, mode = MODE_MAP.delayed }) {
   const modelConfig = buildReportModelConfig({ modelConfig: pipelineConfig });
+  const { delayMs } = getModePolicy({ mode });
   return {
     mode,
-    delayMs: getModePolicy({ mode }).delayMs,
+    delayMs,
     vlmModel: modelConfig.vlmModel ?? null,
-    isVlmFallbackEnabled: modelConfig.isVlmFallbackEnabled ?? null,
-    vlmFallbackModelId: modelConfig.vlmFallbackModelId ?? null,
     judgeBackend: modelConfig.judgeBackend ?? null,
     judgeGpuModel: modelConfig.judgeGpuModel ?? null,
     judgeModelId: modelConfig.judgeModelId ?? null,
     bedrockModelId: modelConfig.bedrockModelId ?? null,
-    gapModelId: modelConfig.gapModelByModeMap?.[mode] ?? null,
+    // 삽입 위치 추론은 판정 백엔드와 상관없이 GPU 판정 LLM(judgeGpuModel)이 한다(제품 gap-inference-agent.js).
+    // 지연이 없는 모드(성능·동시)는 삽입 위치 추론을 부르지 않아 null 이다.
+    gapModelId: delayMs > 0 ? modelConfig.judgeGpuModel ?? null : null,
     routerMode: modelConfig.routerMode ?? null,
     isScaleEnabled: modelConfig.isScaleEnabled ?? null,
+    // 수치 해설에 요청 프레임의 OCR 글자를 근거로 넣는지. 켜고 끄면 해설 내용이 달라진다.
+    isScreenTextGroundingEnabled: modelConfig.isScreenTextGroundingEnabled ?? null,
     // 슬라이드 전사 백엔드(vlm·ocr)와 틈 후보 출처(asr·audio). 같은 --out 에서 백엔드를 바꿔 돌리면 다른 결과로 보고 다시 만든다.
     // OCR 주소(ocrUrl)는 다른 서비스 주소처럼 견주지 않는다.
     slideTextBackend: modelConfig.slideTextBackend ?? null,

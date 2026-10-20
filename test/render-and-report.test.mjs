@@ -203,8 +203,8 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
       { kind: 'source', outStartMs: 6500, outEndMs: 29000, srcStartMs: 5000, srcEndMs: 30000 },
     ],
     captionRecordList: [
-      { captionSeq: 1, ts: sessionStartWallMs + 4000, text: '막대 그래프 상승', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 3000, rationale: { utterance: '이 그래프를 보시면', summary: '근거 표현=이 그래프' }, insertVideoTimeMs: 5000, audioDurationMs: 1500, gap: { source: 'bedrock', reason: '문장 끝', gapIndex: 0, candidateCount: 2, callList: [] }, callList: [{ service: 'bedrock', modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', isVlmFallback: true, status: 200, elapsedMs: 900 }],
-        tts: { isOk: true, isOnDemand: true, requestedAtMs: 15000, elapsedMs: 480, message: null, callList: [{ service: 'tts', modelId: null, isVlmFallback: false, status: 200, elapsedMs: 470 }] }, ttsWaitMs: 480 },
+      { captionSeq: 1, ts: sessionStartWallMs + 4000, text: '막대 그래프 상승', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 3000, rationale: { utterance: '이 그래프를 보시면', summary: '근거 표현=이 그래프' }, insertVideoTimeMs: 5000, audioDurationMs: 1500, gap: { source: 'gpu', reason: '문장 끝', gapIndex: 0, candidateCount: 2, callList: [{ service: 'judge', modelId: 'gemma', status: 200, elapsedMs: 350 }] }, callList: [{ service: 'vlm', modelId: 'gemma', status: 200, elapsedMs: 900 }],
+        tts: { isOk: true, isOnDemand: true, requestedAtMs: 15000, elapsedMs: 480, message: null, callList: [{ service: 'tts', modelId: null, status: 200, elapsedMs: 470 }] }, ttsWaitMs: 480 },
       { captionSeq: 2, ts: sessionStartWallMs + 9000, text: '못 들은 해설', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 8000, rationale: null, insertVideoTimeMs: 8000, audioDurationMs: 1000, gap: null, callList: [],
         tts: { isOk: true, isOnDemand: false, requestedAtMs: 16000, elapsedMs: 300, message: null, callList: [] }, ttsWaitMs: null },
       { captionSeq: 3, ts: sessionStartWallMs + 20000, text: '정지 때 합성 중', source: 'deixis', narrationClass: 'deixis', slideLabel: '1', eventVideoTimeMs: 19000, rationale: null, insertVideoTimeMs: 19000, audioDurationMs: null, gap: null, callList: [],
@@ -227,11 +227,14 @@ test('AD 기록: 실험실 ad-timeline 이름 + 출력 시각·틈·호출 모�
   const [ad] = report.adList;
   assert.deepEqual([ad.id, ad.type, ad.aid, ad.eventMediaMs, ad.insertMediaMs, ad.playedMediaMs, ad.outputMs, ad.durationMs, ad.latencyMs], ['ad-001', 'deixis', 'A2', 3000, 5000, 5000, 5000, 1500, 2000]);
   assert.equal(ad.trigger.anchor, '이 그래프');
-  assert.equal(ad.isVlmFallback, true);
+  assert.equal(Object.hasOwn(ad, 'isVlmFallback'), false, '제품에 VLM 폴백이 없어 AD 항목에 폴백 여부를 남기지 않는다');
   assert.equal(ad.wavFile, 'v1/ad/ad-001.wav');
-  // 재생 차례가 와서 합성했고(미리 만들지 못함) 그동안 480ms 무음이었다. TTS 호출도 AD 의 서비스 호출에 든다.
+  // 재생 차례가 와서 합성했고(미리 만들지 못함) 그동안 480ms 무음이었다. 삽입 위치 추론(판정 LLM)·TTS 호출도 AD 의 서비스 호출에 든다.
   assert.deepEqual(ad.tts, { isPrefetched: false, synthMs: 480, waitMs: 480 });
-  assert.deepEqual(ad.serviceCallList.map((call) => call.service), ['bedrock', 'tts']);
+  assert.deepEqual(ad.serviceCallList, [
+    { service: 'vlm', modelId: 'gemma', status: 200, elapsedMs: 900 }, { service: 'judge', modelId: 'gemma', status: 200, elapsedMs: 350 },
+    { service: 'tts', modelId: null, status: 200, elapsedMs: 470 },
+  ]);
   assert.deepEqual(report.droppedList.map((drop) => [drop.text, drop.reason, drop.eventMediaMs]),
     [['못 들은 해설', 'not_played', 8000], ['간격 억제된 해설', 'rate-limited', 12000], ['정지 때 합성 중', 'stopped', 19000]]);
   // 세션을 멈출 때 끝나지 않은 합성은 성공·실패에 넣지 않고 따로 센다.
@@ -331,7 +334,7 @@ test('AD 기록: 모델 설정은 허용 목록의 이름만 남겨 제품이 �
   assert.deepEqual(Object.keys(reportedConfig).sort(), [...REPORT_MODEL_CONFIG_KEY_LIST].sort());
   assert.equal(reportedConfig.asrUrl, 'http://127.0.0.1:8802/asr');
   assert.equal(reportedConfig.vlmUrl, productConfig.vlmUrl, '사용자 정보가 없는 주소는 그대로');
-  assert.deepEqual(reportedConfig.gapModelByModeMap, productConfig.gapModelByModeMap);
+  assert.equal(reportedConfig.isScreenTextGroundingEnabled, true, '수치 해설의 화면 글자 근거(제품 기본 켬)는 AD 내용을 바꾸므로 남긴다');
   assert.equal(reportedConfig.hasBedrockCredentials, true);
   assert.equal(JSON.stringify(report).includes('secret'), false);
   // 제품 설정에 새 필드가 생기면 여기서 알린다. 비밀이 아니면 허용 목록에 더하고, 비밀이면 아래 목록에 더한다.
