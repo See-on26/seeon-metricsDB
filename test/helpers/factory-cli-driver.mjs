@@ -9,6 +9,7 @@ runFactoryCli({
   argList: process.argv.slice(2),
   workerPath: FAKE_WORKER_PATH,
   checkService: async () => ({ isUp: true, detail: 'HTTP 405' }),
+  checkOcrService: async () => ({ isUp: true, isReachable: true, detail: 'HTTP 200' }),
   runVersion: async () => Buffer.from('ok'),
   checkTriggerAnalyzer: async () => [],
   readFreeMemoryBytes: () => 64 * 1024 ** 3,
