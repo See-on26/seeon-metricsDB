@@ -42,7 +42,7 @@ function computeMockEmbedding(jpegBuffer) {
 }
 
 // 제품 판정기(router/*.js)가 parse 하는 모양 그대로의 답. 통합 라우터(판단 LLM)는 판단 묶음(지시 대상·발화 기반)마다 따로 묻고,
-// 답은 묶음과 상관없이 받은 후보마다 공백 O/X 다(기본 O). 무발화는 차단, 지시 판정(judge 모드에서만 씀)은 통과로 둔다.
+// 답은 묶음과 상관없이 받은 후보마다 공백 O/X 다(기본 O). 무발화는 차단, 지시 판정(라우터 모드가 unified 가 아닐 때 씀)은 통과로 둔다.
 const CANDIDATE_LINE_PATTERN = /^(\d+)\) \[/;
 // 삽입 위치 추론(output/gap-inference-agent.js formatGapLine)의 후보 틈 줄. 트리거 뒤(+) 틈만 고른다.
 const FORWARD_GAP_LINE_PATTERN = /^\[(\d+)\] \+/;
