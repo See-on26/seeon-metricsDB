@@ -105,6 +105,21 @@ test('전환을 확정하면 고지가 정해질 때까지 진행 중으로 두�
   assert.deepEqual(harness.warnList, []);
 });
 
+test('확정 중에 온 첫 장 표시는 버리지 않고 기억했다가, 확정이 끝난 뒤 다음 표본에서 지금 화면을 첫 장으로 확정한다', async () => {
+  const harness = setupSlides({ frameAt: () => RED });
+  const verdictList = [{ isTransition: false, isFirst: true }, { isTransition: false, isFirst: false }];
+  harness.ctx.core.histogramGate.sample = () => verdictList.shift();
+  harness.ctx.state.isConfirmingSlide = true;
+  harness.slideGlue.detectSlideTransition({ imageData: RED, ts: harness.clock.nowPerf() });
+  assert.equal(callsOf(harness.bridge, 'embed-frame').length, 0, '확정 중에는 새로 확정하지 않는다');
+  harness.ctx.state.isConfirmingSlide = false;
+  harness.slideGlue.detectSlideTransition({ imageData: RED, ts: harness.clock.nowPerf() + 400 });
+  await harness.clock.runUntil({ isDone: () => harness.ctx.core.slideRegistry.currentLabel() !== null, deadlineElapsedMs: 1000 });
+  assert.equal(harness.ctx.core.slideRegistry.currentLabel(), '1');
+  assert.ok(harness.bridge.sendList.some(({ payload }) => payload.reason === '첫 슬라이드 확정'));
+  assert.deepEqual(harness.warnList, []);
+});
+
 test('GPU 임베딩이 실패하면 로컬 그리드 임베딩(임계 0.02)으로 이어 간다', async () => {
   const harness = setupSlides({ frameAt: () => RED, embedHandler: async () => ({ isOk: false, message: 'EMBED HTTP 502' }) });
   harness.slideGlue.start();
@@ -126,6 +141,27 @@ test('작은 영역 움직임은 대기 중인 발화 후보에 포인팅 영역
   assert.ok(region && region.x <= 0.13 && region.x + region.w >= 0.25, JSON.stringify(region));
   assert.equal(harness.ctx.state.lastPointingMotionAt, harness.clock.nowPerf(), '디바운스 기준 시각을 남긴다');
   assert.deepEqual(harness.warnList, []);
+});
+
+// 400ms 표본마다 45px 씩 오른쪽으로 가는 점(펜·레이저)과, 같은 자리에서 나타났다 사라지는 깜빡임.
+const POINTER_SIZE = 30;
+const movingPointerAt = (timeMs) => solidFrame([200, 200, 200], { x: 30 + (timeMs / 400) * 45, y: 120, w: POINTER_SIZE, h: POINTER_SIZE });
+const blinkingPointerAt = (timeMs) => solidFrame([200, 200, 200], (timeMs / 400) % 2 ? { x: 120, y: 120, w: POINTER_SIZE, h: POINTER_SIZE } : null);
+
+test('점이 여러 칸을 지나며 움직이면 그 영역을 지금 슬라이드·가상 벽시계 시각과 함께 기억하고, 같은 자리 깜빡임은 기억하지 않는다', async () => {
+  for (const [frameAt, isMoving] of [[movingPointerAt, true], [blinkingPointerAt, false]]) {
+    const harness = setupSlides({ frameAt });
+    harness.slideGlue.start();
+    await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 2000 });
+    harness.slideGlue.stop();
+    const { recentPointingMemory, slideRegistry } = harness.ctx.core;
+    assert.equal(slideRegistry.currentLabel(), '1');
+    // 지시 발화 끝(가상 벽시계로 찍힌 조각 끝)과 견주므로 기억 시각도 가상 벽시계여야 꺼낼 수 있다.
+    const recalled = recentPointingMemory.recall({ eventWallTs: harness.clock.nowWall(), slideLabel: '1' });
+    assert.equal(Boolean(recalled?.region), isMoving, `움직임=${isMoving} 기억=${JSON.stringify(recalled)}`);
+    assert.equal(recentPointingMemory.recall({ eventWallTs: harness.clock.nowWall(), slideLabel: '2' }), null, '다른 슬라이드로는 꺼내지 않는다');
+    assert.deepEqual(harness.warnList, []);
+  }
 });
 
 test('돌아온 슬라이드는 재방문으로 고지하고 글자 전사·base 프레임은 다시 하지 않는다', async () => {

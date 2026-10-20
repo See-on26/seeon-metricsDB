@@ -4,9 +4,9 @@ import {
 import { FakeDelaySource, FakeAudioContext, createFakeCaptureStream } from './fake-media.mjs';
 
 // 교차 모드의 재생 사슬을 세운다: 지연 재생(DelayBuffer) → 삽입 시점 감시(NarrationScheduler) → 보류 게이트 → CaptionNarrator.
-// main.js 의 startDelayBufferIfNeeded(295-348)·startNarrationPlayer(272-288)·모듈 범위 CaptionNarrator(133-141)·narrationGate(146-149) 를 옮긴다.
+// main.js 의 startDelayBufferIfNeeded(328-381)·startNarrationPlayer(304-321)·모듈 범위 CaptionNarrator(170-182)·narrationGate(187-190) 를 옮긴다.
 // 브라우저 쪽(StreamDelaySource·<audio>·AudioContext·캡처 스트림)만 대역이고 클래스는 제품 그대로다.
-// prepareAudio 는 재생 차례가 온 해설의 소리를 주는 함수다(main.js:134 narrationAudio.take). 기본은 출력 연결 코드가 core 에 둔 prefetcher 다.
+// prepareAudio 는 재생 차례가 온 해설의 소리를 주는 함수다(main.js:171 narrationAudio.take). 기본은 출력 연결 코드가 core 에 둔 prefetcher 다.
 export function startPlaybackChain({
   ctx, recorder, onAdStart = () => {}, onAdStop = () => {}, onNarrationDrop = () => {}, prepareAudio = (entry) => ctx.core.narrationAudio.take(entry),
 }) {
@@ -27,9 +27,15 @@ export function startPlaybackChain({
     onDrop: onNarrationDrop,
     isEntryEnabled: (entry) => ctx.featureToggleStore.isClassOn(entry.narrationClass),
     getRateRange: () => getCatchupRateRange({ mode }),
-    // 교차 모드는 따라잡기를 DelayBuffer 가 맡는다(main.js:140). 그래서 CaptionNarrator 의 실제 setTimeout 따라잡기(caption-narrator.js:245)는 돌지 않는다.
+    // 교차 모드는 따라잡기를 DelayBuffer 가 맡는다(main.js:179). 그래서 CaptionNarrator 의 실제 setTimeout 따라잡기(caption-narrator.js:237)는 돌지 않는다.
     isCatchupDelegated: () => true,
+    // 재생 차례가 온 자동 해설이 트리거에서 10초 넘게 멀어졌는지 재는 위치(main.js:181). 교차 모드는 사용자가 듣고 있는 늦춘 위치다.
+    // 공장은 늘 지연 버퍼를 세우므로 제품의 지연 버퍼 없는 갈래(captureSource.videoTimeMs)는 타지 않는다.
+    getPlaybackTimeMs: () => delayBuffer.getDelayedTimeMs(),
     now: () => clock.nowPerf(),
+    // 재생 시작 알림(onPlayStart)은 제품에서 개발자 모드 흐름 창에만 쓰여 공장은 연결하지 않는다. 그래도 재생기는 소리를
+    // 틀 때마다 알림 시각을 wallNow 로 읽고, 그 기본값이 실제 Date.now 라 가상 벽시계를 넘긴다.
+    wallNow: () => clock.nowWall(),
     createAudioContext: () => new FakeAudioContext({
       clock,
       onSourceStart: ({ atElapsedMs, durationMs }) => {
@@ -67,7 +73,7 @@ export function startPlaybackChain({
 
   return {
     ...chain,
-    // stopExperiment(main.js:1954-2015) 의 내레이션 출력기 → 해설 보류 게이트(+ 미리 만들기 비움) → 지연 버퍼(stopDelayBuffer 400-411)
+    // stopExperiment(main.js:2161-2223) 의 내레이션 출력기 → 해설 보류 게이트(+ 미리 만들기 비움) → 지연 버퍼(stopDelayBuffer 433-444)
     // 순서로 정리한다. 재생하지 못한 해설(소리 나기 전 해설·대기 줄·보류·삽입 대기)은 제품처럼 모두 stopped 로 알린다.
     stop() {
       chain.narrator.stop();

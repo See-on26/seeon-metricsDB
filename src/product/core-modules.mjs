@@ -1,11 +1,11 @@
 // src/product/core-modules.mjs
 // 공장이 그대로 쓰는 제품 렌더러 코어 모듈. 경로는 서브모듈 seeon-meet 이다.
 export {
-  NARRATION_TYPE_MAP, NARRATION_CLASS_MAP, PAGE_TRANSITION_KIND_MAP, VISUAL_DESCRIPTION_KIND_MAP,
+  NARRATION_TYPE_MAP, NARRATION_CLASS_MAP, PAGE_TRANSITION_KIND_MAP,
   DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, CROP_JPEG_QUALITY,
 } from '../../seeon-meet/src/renderer/core/constants.js';
 export {
-  MODE_MAP, getModePolicy, computeWordBudget, computeLookaheadMs, computeSentenceWaitMs,
+  MODE_MAP, getModePolicy, computeWordBudget, computeSilenceWordBudget, computeLookaheadMs, computeSentenceWaitMs,
   computeContextHoldMs, resolveBeforeAnchorTs, getCatchupRateRange,
 } from '../../seeon-meet/src/renderer/core/mode/mode-policy.js';
 export {
@@ -28,7 +28,9 @@ export { CaptionNarrator } from '../../seeon-meet/src/renderer/core/audio-render
 export {
   TransitionOrderGate, LEADER_STATUS_MAP, resolveFollowerInsertMs, PendingTransitionTracker, resolveAfterTransitionInsertMs,
 } from '../../seeon-meet/src/renderer/core/audio-renderer/transition-order-gate.js';
-export { isSegmentVoiced, isSegmentCutReady } from '../../seeon-meet/src/renderer/core/trigger/asr-segmenter.js';
+export {
+  isSegmentVoiced, shouldCutSegment, DEFAULT_MAX_EXTEND_MS, DEFAULT_EXTEND_SILENCE_CUT_MS,
+} from '../../seeon-meet/src/renderer/core/trigger/asr-segmenter.js';
 export {
   UtteranceBoundaryDetector, classifyUtteranceEnding, buildSegmentBoundaryList,
 } from '../../seeon-meet/src/renderer/core/trigger/utterance-boundary-detector.js';
@@ -43,7 +45,10 @@ export {
 } from '../../seeon-meet/src/renderer/core/trigger/deixis-candidate-scheduler.js';
 export { judgeScreenDependency, SCREEN_DEPENDENCY_REASON_MAP } from '../../seeon-meet/src/renderer/core/trigger/screen-dependency.js';
 export { PointingLocator, describeDirection } from '../../seeon-meet/src/renderer/core/trigger/pointing-locator.js';
+export { createRecentPointingMemory } from '../../seeon-meet/src/renderer/core/trigger/recent-pointing.js';
+export { createPointingMotionTracker } from '../../seeon-meet/src/renderer/core/trigger/pointing-motion-tracker.js';
 export { SlideHistogramGate } from '../../seeon-meet/src/renderer/core/trigger/slide-histogram-gate.js';
+export { createSlideCandidateGate } from '../../seeon-meet/src/renderer/core/trigger/slide-candidate-gate.js';
 export { SlideEmbeddingRegistry } from '../../seeon-meet/src/renderer/core/trigger/slide-embedding-registry.js';
 export { SlideDwellGate, DWELL_STATE_MAP } from '../../seeon-meet/src/renderer/core/trigger/slide-dwell-gate.js';
 export { computeGridEmbedding } from '../../seeon-meet/src/renderer/core/trigger/frame-embedding.js';

@@ -87,11 +87,15 @@ function installPathsShim({ outDir }) {
   };
 }
 
-// 제품 judge-llm.js 의 label → 기록 키. 판정기는 결과에 source 를 담지만 제품 기록에는 라우터 것만 디버그 문구로 남는다.
-const JUDGE_KEY_BY_LABEL_MAP = { '통합 라우터': 'router', '무발화 판정': 'silence', '지시 판정': 'deixis' };
+// 제품 judge-llm.js 의 label → 기록 키(판정기마다 하나). 판정기는 결과에 source 를 담지만 제품 기록에는 라우터 것만 디버그 문구로 남는다.
+// 통합 라우터는 판단 지시문을 두 묶음(지시 대상·발화 기반)으로 나눠 그 문장에 있는 묶음마다 한 번씩 부르고 label 을 묶음 이름으로 단다
+// (router/unified-router.js judgeGroup). 두 묶음 모두 라우터의 판정 호출이라 router 하나로 센다 — 수는 판정 LLM 호출 수다.
+const JUDGE_KEY_BY_LABEL_MAP = {
+  '지시 대상 판단': 'router', '발화 기반 판단': 'router', '무발화 판정': 'silence', '지시 판정': 'deixis',
+};
 const JUDGE_SOURCE_LIST = ['gpu', 'bedrock', 'error'];
 const JUDGE_ERROR_SOURCE = 'error';
-const judgeSourceCountMap = Object.fromEntries(Object.values(JUDGE_KEY_BY_LABEL_MAP)
+const judgeSourceCountMap = Object.fromEntries([...new Set(Object.values(JUDGE_KEY_BY_LABEL_MAP))]
   .map((judgeKey) => [judgeKey, Object.fromEntries(JUDGE_SOURCE_LIST.map((source) => [source, 0]))]));
 
 function countJudgeSource({ label, source }) {
@@ -100,8 +104,10 @@ function countJudgeSource({ label, source }) {
   judgeSourceCountMap[judgeKey][source] = (judgeSourceCountMap[judgeKey][source] || 0) + 1;
 }
 
-// 판정기(router/*.js)는 읽힐 때 createJudgeLlm 을 꺼내 두므로 그보다 먼저 감싼 것으로 바꿔, 판정마다 답한 곳(gpu·bedrock)과
-// GPU·Bedrock 이 모두 실패한 경우(error)를 센다. 판정 결과는 그대로 돌려준다.
+// 판정기(router/*.js)는 읽힐 때 createJudgeLlm 을 꺼내 두므로 그보다 먼저 감싼 것으로 바꿔, 판정 호출마다 답한 곳(gpu·bedrock)과
+// 실패(error)를 센다. 제품은 판정 백엔드(gpu·bedrock) 하나만 부르고 실패해도 다른 쪽으로 넘기지 않으므로 error 는 그 백엔드의 실패다.
+// 판정 결과는 그대로 돌려준다. 삽입 위치 추론(output/gap-inference-agent.js)은 같은 GPU 판정 LLM 을 부르지만 이 모듈을 거치지 않아
+// 여기서 세지 않는다(서비스 호출 기록 judge 와 AD 의 gap.source 에 남는다).
 function installJudgeCounterShim() {
   const judgeLlmFile = require.resolve(resolveProductPath('src/main/caption-pipeline/agents/shared/judge-llm.js'));
   const realJudgeLlm = require(judgeLlmFile);

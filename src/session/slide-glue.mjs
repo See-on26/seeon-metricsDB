@@ -9,10 +9,11 @@ import {
 
 const LOCAL_EMBEDDING_WARNING = '[slide] GPU 임베딩 서버 미연결 — 로컬 그리드 임베딩으로 폴백(정확도 낮음, 고지는 유지)';
 
-// main.js 의 slideDwellGate 콜백(566-594)·samplePointingFrame(671-689)·detectSlideTransition(691-707)·
-// confirmSlideCandidate(709-755)·releasePendingTransition(758-760)·requestPageTransitionNarration(762-799)·
-// attachPointingMotion(963-976)·saveSlideFrameWithMark(979-986)·saveAnnotationSnapshot(988-1000).
-// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:576, 754).
+// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
+// main.js 의 slideDwellGate 콜백(602-630)·samplePointingFrame(728-746)·detectSlideTransition(748-765)·
+// confirmSlideCandidate(767-813)·releasePendingTransition(815-818)·requestPageTransitionNarration(820-855)·
+// attachPointingMotion(1033-1053)·saveSlideFrameWithMark(1055-1063)·saveAnnotationSnapshot(1065-1077).
+// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:612, 812).
 // 전환을 확정한 순간부터 고지의 삽입 시각이 정해질 때까지는 진행 중인 전환(pendingTransitions)이다. 화자 안내가 그 고지 뒤로 미뤄진다.
 export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   const { clock, bridge, state, core } = ctx;
@@ -117,13 +118,14 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     core.slideDwellGate.enter({ label: decision.label, isRevisit });
   }
 
-  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:655-669, 700)는 없다.
+  // 확정 중에 온 첫 장 표시는 후보 게이트가 기억했다가 확정이 끝난 뒤 다음 표본에서 첫 장으로 확정한다.
+  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:705-726)는 없다. 억제 끝 시각은 제품 초기값 0 그대로다.
   function detectSlideTransition({ imageData, ts }) {
     const verdict = core.histogramGate.sample({ imageData, ts });
-    if (!verdict.isTransition && !verdict.isFirst) return;
-    if (state.isConfirmingSlide) return;
+    const candidate = core.slideCandidateGate.decide({ verdict, ts, suppressUntil: 0, isConfirming: state.isConfirmingSlide });
+    if (!candidate.shouldConfirm) return;
     state.isConfirmingSlide = true;
-    ctx.trackTask(confirmSlideCandidate({ isFirst: verdict.isFirst, imageData }).finally(() => { state.isConfirmingSlide = false; }), 'slide-confirm');
+    ctx.trackTask(confirmSlideCandidate({ isFirst: candidate.isFirst, imageData }).finally(() => { state.isConfirmingSlide = false; }), 'slide-confirm');
   }
 
   // saveAnnotationSnapshot 의 동기 부분(레지스트리 필기 번호·간격 기준 시각)만 따른다. 필기 이미지는 AD 에 영향이 없어 저장하지 않는다.
@@ -139,9 +141,17 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
     const now = clock.nowPerf();
     const motion = core.pointingLocator.locate({ nowTs: now });
     if (!motion.hasRegion) return;
+    core.pointingMotionTracker.add({ ts: now, rect: motion.rect, changedRatio: motion.changedRatio });
     if (now - state.lastPointingMotionAt < POINTING_MOTION_DEBOUNCE_MS) return;
     state.lastPointingMotionAt = now;
     const { region, pointingOrderHint } = ctx.getPointingSequence();
+    // 잡음(같은 자리 깜빡임·이웃 칸 오감)까지 기억하면 펜 없는 장면 발화에도 영역이 붙는다. 점이 움직일 때만 기억한다.
+    // 지시 발화 끝(가상 벽시계로 찍힌 조각 시각)과 견주므로 기억 시각도 가상 벽시계로 찍는다.
+    if (core.pointingMotionTracker.isMoving({ nowTs: now })) {
+      core.recentPointingMemory.remember({
+        region: region || motion.rect, pointingOrderHint, wallTs: clock.nowWall(), slideLabel: core.slideRegistry.currentLabel(),
+      });
+    }
     noteAnnotation();
     const isAttached = core.candidateScheduler.attachPointing({ region: region || motion.rect, pointingOrderHint });
     ctx.log.log(`[deixis] ✍ 포인팅 모션 changedRatio=${(motion.changedRatio ?? 0).toFixed(3)}`
@@ -207,7 +217,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   }
 
   return {
-    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:1919).
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:2125).
     start() {
       isStopped = false;
       samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);

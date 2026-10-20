@@ -9,21 +9,23 @@ const { createUnifiedRouter } = require(resolveProductPath('src/main/caption-pip
 const { createSilenceJudge } = require(resolveProductPath('src/main/caption-pipeline/router/silence-judge.js'));
 const { createDeixisJudgeClient } = require(resolveProductPath('src/main/caption-pipeline/router/deixis-judge.js'));
 const { requestVlmContent } = require(resolveProductPath('src/main/caption-pipeline/agents/shared/vlm-gateway.js'));
+const { createGapInferenceAgent } = require(resolveProductPath('src/main/caption-pipeline/output/gap-inference-agent.js'));
+const { readPipelineConfig } = require(resolveProductPath('src/main/caption-pipeline/config.js'));
 
 const mock = await startMockServices();
 after(() => mock.close());
-// 제품 기본값처럼 판정 LLM 주소를 VLM 과 따로 두고 Bedrock 키는 비운다(폴백 없이 GPU 답만 쓴다).
-const config = {
-  vlmUrl: mock.urlEnv.SEEON_VLM_URL, vlmModel: 'qwen', judgeBackend: 'gpu', judgeGpuUrl: mock.urlEnv.SEEON_JUDGE_GPU_URL, judgeGpuModel: 'qwen3.5-9b',
-  bedrockApiKey: '', isVlmFallbackEnabled: false,
-};
+// 제품 설정을 mock 주소로 읽는다. 판정 백엔드는 기본 gpu 이고 판정 LLM 주소는 VLM 과 따로다. Bedrock 키는 없다.
+const config = readPipelineConfig(mock.urlEnv);
 const snapshotCount = () => ({ ...mock.state.callCountMap });
+const snapshotJudgeKind = () => ({ ...mock.state.judgeKindCountMap });
+const diffCount = (before, after) => Object.fromEntries(Object.keys(after).map((key) => [key, after[key] - (before[key] || 0)]));
 const candidateList = [
   { type: 'demonstrative', phrase: '이 그래프', start: 0, end: 5 }, { type: 'change', phrase: '크게 늘었습니다', start: 15, end: 23 },
 ];
 
-test('mock 판정 LLM 주소로 온 제품 판정 요청에 판정기마다 맞는 JSON 으로 답한다(라우터는 후보마다 O/X)', async () => {
+test('mock 판정 LLM 주소로 온 제품 판정 요청에 판정기마다 맞는 JSON 으로 답한다(라우터는 판단 묶음마다 따로 묻고 후보마다 O/X)', async () => {
   const before = snapshotCount();
+  const kindBefore = snapshotJudgeKind();
   const routed = await createUnifiedRouter({ config }).route({ utterance: '이 그래프를 보시면 매출이 크게 늘었습니다.', before: '매출입니다.', after: '', candidateList });
   assert.equal(routed.source, 'gpu');
   assert.deepEqual(routed.judgeList.map((entry) => [entry.id, entry.isGap]), [[1, true], [2, true]]);
@@ -35,7 +37,9 @@ test('mock 판정 LLM 주소로 온 제품 판정 요청에 판정기마다 맞�
   assert.deepEqual(await createDeixisJudgeClient({ config }).judge({ utterance: '여기 이 부분', before: '', after: '' }),
     { shouldCaption: true, reason: 'visual_referent', source: 'gpu' });
   const after = snapshotCount();
-  assert.equal(after.judge - before.judge, 3);
+  // 라우터는 지시대명사('지시 대상 판단')와 변화('발화 기반 판단')를 묶음마다 따로 물어 2번, 무발화·지시 판정이 1번씩이다.
+  assert.equal(after.judge - before.judge, 4);
+  assert.deepEqual(diffCount(kindBefore, snapshotJudgeKind()), { router: 2, silence: 1, deixis: 1, gap: 0 });
   assert.equal(after.vlm - before.vlm, 0);
 });
 
@@ -50,7 +54,21 @@ test('mock 판단 LLM 이 X 로 답하면 라우터는 해설 후보를 내지 �
   assert.deepEqual(unverified.candidateList.map((candidate) => candidate.type), ['interpretation']);
   const empty = await createUnifiedRouter({ config }).route({ utterance: '감사합니다.', candidateList: [] });
   assert.deepEqual([empty.source, empty.blockedReason], ['none', 'no_candidate']);
-  assert.equal(snapshotCount().judge - before.judge, 2);
+  // 지시대명사만 있는 판단 1번 + 지시대명사·변화가 함께 있는 판단 2번(묶음마다), 후보가 없는 판단은 0번.
+  assert.equal(snapshotCount().judge - before.judge, 3);
+});
+
+test('mock 판정 LLM 은 제품 삽입 위치 추론 요청에 트리거 뒤 첫 틈을 고른 JSON 으로 답하고, 제품은 그것을 GPU 답으로 쓴다', async () => {
+  const before = snapshotCount();
+  const kindBefore = snapshotJudgeKind();
+  const gap = (offsetMs, kind) => ({ offsetMs, kind, silenceMs: 400, beforeText: '이 그래프를 보시면', afterText: '다음 자료로 넘어가겠습니다.' });
+  // 규칙 폴백이면 첫 완결 경계(2번)를 고르므로, 1번이 나오면 GPU 답을 쓴 것이다.
+  const result = await createGapInferenceAgent({ config }).infer({
+    mode: 'delayed', narrationText: '막대 그래프 상승', narrationType: 'deixis', gapList: [gap(-500, 'complete'), gap(800, 'pause'), gap(2000, 'complete')],
+  });
+  assert.deepEqual([result.gapIndex, result.source, result.modelId], [1, 'gpu', config.judgeGpuModel]);
+  assert.deepEqual([snapshotCount().judge - before.judge, snapshotCount().vlm - before.vlm], [1, 0]);
+  assert.deepEqual(diffCount(kindBefore, snapshotJudgeKind()), { router: 0, silence: 0, deixis: 0, gap: 1 });
 });
 
 test('판정 주소를 VLM 주소로 둔 설정도 mock VLM 이 몸통으로 갈라 판정으로 답한다', async () => {

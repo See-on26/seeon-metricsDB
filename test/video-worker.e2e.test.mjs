@@ -11,6 +11,7 @@ import { resolveFfmpegPaths } from '../src/media/ffmpeg.mjs';
 import { inspectVideoResult } from '../src/runner/manifest.mjs';
 import { readResultIdentity } from '../src/runner/result-identity.mjs';
 import { loadPipelineConfig } from '../src/product/product-loader.mjs';
+import { readPipelineRecordList } from '../src/output/ad-report.mjs';
 import { makeTempDir } from './helpers/temp-dir.mjs';
 
 const { ffprobePath } = resolveFfmpegPaths({ env: process.env });
@@ -20,8 +21,12 @@ after(() => mock.close());
 
 const WORKER_ENV = { PATH: process.env.PATH, HOME: process.env.HOME, ...mock.urlEnv };
 const RUN_CONCURRENCY = 2;
+// 화면 글자 근거(제품 기본 on)는 슬라이드 전사 백엔드와 상관없이 단순 수치·변화 후보가 있는 판단 요청마다 그 프레임을 같은 /ocr 로 읽는다
+// (orchestrator/screen-text-grounding.js). 슬라이드 전사가 부른 OCR 수만 견주는 시험은 이것을 끈다. 근거 호출은 첫 시험이 기본 설정으로 본다.
+const GROUNDING_OFF_ENV = { SEEON_SCREEN_TEXT_GROUNDING: 'off' };
 
-// Bedrock 토큰 없이 돌린다: 탐지 판정(라우터·무발화·지시)은 mock 판정 LLM 주소의 GPU 판정, 틈 추론은 규칙 폴백(제품 동작). 실서비스 포트는 쓰지 않는다.
+// Bedrock 토큰 없이 돌린다: 탐지 판정(판단 LLM 두 묶음·무발화·지시)과 삽입 위치 추론은 mock 판정 LLM 주소의 GPU 판정 LLM 으로 간다
+// (제품은 실패해도 Bedrock 으로 넘기지 않는다). 실서비스 포트는 쓰지 않는다.
 function runWorker({ job, outDir, extraEnv = {} }) {
   return new Promise((resolve, reject) => {
     const child = fork(WORKER_PATH, [], {
@@ -52,8 +57,10 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   });
   const outDir = path.join(dirPath, 'out');
   const countBefore = { ...mock.state.callCountMap };
+  const judgeKindBefore = { ...mock.state.judgeKindCountMap };
   const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir });
   const countAfter = { ...mock.state.callCountMap };
+  const judgeKindDelta = Object.fromEntries(Object.entries(mock.state.judgeKindCountMap).map(([kind, count]) => [kind, count - judgeKindBefore[kind]]));
   assert.equal(result.status, 'done', result.logText.slice(-2000));
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
   assert.equal(report.isComplete, true);
@@ -66,17 +73,26 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(Math.abs(mp3Ms - expectedMs) <= 1000);
   assert.ok(Math.abs(report.output.sourceMediaMs - 24000) < 100, '원음을 끝까지 다 틀었다');
   assert.ok(report.stats.serviceMap.asr.count >= 3);
-  // 판정 요청은 VLM 과 따로 띄운 판정 LLM 주소로 간다. mock 이 받은 수와 기록이 같아야 한다.
+  // 판정 요청은 VLM 과 따로 띄운 판정 LLM 주소로 간다. 그 주소에는 탐지 판정과 삽입 위치 추론이 함께 간다. mock 이 받은 수와 기록이 같아야 한다.
   const { serviceMap, judgeSourceCountMap } = report.stats;
+  const { modelConfig } = report.config;
   assert.ok(serviceMap.judge.count >= 1, JSON.stringify(serviceMap));
   assert.equal(serviceMap.judge.count, countAfter.judge - countBefore.judge);
   assert.equal(serviceMap.vlm.count, countAfter.vlm - countBefore.vlm);
-  const judgeGpuCount = Object.values(judgeSourceCountMap).reduce((sum, countMap) => sum + countMap.gpu, 0);
-  assert.equal(judgeGpuCount, serviceMap.judge.count, JSON.stringify(judgeSourceCountMap));
-  assert.ok(judgeSourceCountMap.router.gpu >= 1, '지시 해설은 통합 라우터 GPU 판정을 거친다');
+  // 탐지 판정은 판정기마다 센다. 판단 LLM 은 그 문장에 있는 묶음(지시 대상·발화 기반)마다 한 번씩 불려 router 로 모인다.
+  const judgeGpuCountMap = Object.fromEntries(Object.entries(judgeSourceCountMap).map(([judgeKey, countMap]) => [judgeKey, countMap.gpu]));
+  assert.deepEqual(judgeGpuCountMap, { router: judgeKindDelta.router, silence: judgeKindDelta.silence, deixis: judgeKindDelta.deixis }, JSON.stringify(judgeSourceCountMap));
+  assert.ok(judgeSourceCountMap.router.gpu >= 1, '발화 트리거 해설은 판단 LLM 의 GPU 판정을 거친다');
   assert.ok(Object.values(judgeSourceCountMap).every((countMap) => countMap.bedrock === 0 && countMap.error === 0));
-  const { modelConfig } = report.config;
-  assert.deepEqual([modelConfig.judgeBackend, modelConfig.judgeGpuUrl, modelConfig.judgeGpuModel], ['gpu', mock.urlEnv.SEEON_JUDGE_GPU_URL, 'qwen3.5-9b']);
+  // 지연 재생(균형 모드)은 해설마다 삽입 위치를 GPU 판정 LLM 에 사고 없이 한 번 묻는다(output/gap-inference-agent.js). 탐지 판정 집계에는
+  // 들지 않고 제품 gap 기록에 GPU 출처·판정 모델로 남는다. 그래서 판정 주소 호출 수 = 탐지 판정 수 + 삽입 위치 추론 수다.
+  const pipelineRecordList = readPipelineRecordList({ recordPath: path.join(outDir, report.session.recordFile) });
+  const gapRecordList = pipelineRecordList.filter((record) => record.kind === 'gap');
+  assert.ok(judgeKindDelta.gap >= 1, JSON.stringify(judgeKindDelta));
+  assert.deepEqual(gapRecordList.map((record) => [record.source, record.modelId]), Array(judgeKindDelta.gap).fill(['gpu', modelConfig.judgeGpuModel]));
+  assert.equal(serviceMap.judge.count, Object.values(judgeGpuCountMap).reduce((sum, count) => sum + count, 0) + gapRecordList.length);
+  assert.deepEqual([modelConfig.judgeBackend, modelConfig.judgeGpuUrl, modelConfig.judgeGpuModel],
+    ['gpu', mock.urlEnv.SEEON_JUDGE_GPU_URL, loadPipelineConfig().readPipelineConfig({}).judgeGpuModel], '판정 모델은 제품 기본값');
   assert.equal(modelConfig.isScaleEnabled, true, '척도 해설은 제품 기본으로 켠다');
   // 캡션에는 소리가 없고 렌더러가 pipeline-tts 로 합성한다. 재생된 AD 는 모두 합성한 소리다.
   const { tts } = report.stats;
@@ -86,13 +102,18 @@ test('합성 발표 영상 하나를 워커로 끝까지 돌리면 mp3·json 이
   assert.ok(report.adList.every((ad) => ad.tts && ad.serviceCallList.some((call) => call.service === 'tts')));
   assert.ok(report.stats.triggerAnalyzerCountMap.kiwi >= 1, JSON.stringify(report.stats.triggerAnalyzerCountMap));
   assert.equal(report.stats.triggerAnalyzerCountMap.rule, undefined, '세션 전에 Kiwi 준비를 기다려 대체 규칙을 쓰지 않는다');
-  assert.ok(modelConfig.judgeModelId, 'GPU 가 실패하면 넘어갈 Bedrock 판정 모델');
-  // 슬라이드 전사는 기본 VLM 이다. 제품 기록에서 센 출처가 VLM 이고 OCR 호출은 없다.
+  assert.ok(modelConfig.judgeModelId, '판정 백엔드를 bedrock 으로 고르면 쓰는 Bedrock 판정 모델');
+  // 슬라이드 전사는 기본 VLM 이다. 제품 기록에서 센 출처가 VLM 이다.
   assert.deepEqual([report.config.resultConfig.slideTextBackend, report.config.resultConfig.gapSource], ['vlm', 'asr']);
   assert.ok(report.stats.slideText.count >= 1, JSON.stringify(report.stats.slideText));
   assert.deepEqual(report.stats.slideText.sourceCountMap, { ocr: 0, vlm: report.stats.slideText.count });
-  assert.equal(serviceMap.ocr, undefined);
-  assert.equal(countAfter.ocr, countBefore.ocr);
+  // 그래도 OCR 은 불린다: 화면 글자 근거(기본 on)가 단순 수치·변화 후보가 있는 판단 요청마다 그 프레임을 읽어 수치 해설에 넣는다(GROUNDING_OFF_ENV 참고).
+  // 그 호출도 ocr 로 세고, 수치 해설 기록에 근거 요약(screenText)이 남는다.
+  const ocrCallCount = countAfter.ocr - countBefore.ocr;
+  assert.ok(ocrCallCount >= 1);
+  assert.equal(serviceMap.ocr.count, ocrCallCount);
+  const screenTextCount = pipelineRecordList.filter((record) => record.kind === 'deixis' && record.screenText).length;
+  assert.ok(screenTextCount >= 1 && screenTextCount <= ocrCallCount, JSON.stringify({ screenTextCount, ocrCallCount }));
   assert.deepEqual(result.slideText, report.stats.slideText, '워커 결과(summary 용)에도 싣는다');
   assert.equal(result.serviceCountMap.vlm, serviceMap.vlm.count);
   assert.ok(fs.readdirSync(path.join(outDir, 'deck')).some((name) => /^pipeline-\d+\.jsonl$/.test(name)));
@@ -116,7 +137,7 @@ test('슬라이드 전사 백엔드 ocr: /ocr 호출을 임베딩이 아닌 ocr 
   });
   const outDir = path.join(dirPath, 'out');
   const countBefore = { ...mock.state.callCountMap };
-  const extraEnv = { SEEON_SLIDE_TEXT_BACKEND: 'ocr' };
+  const extraEnv = { SEEON_SLIDE_TEXT_BACKEND: 'ocr', ...GROUNDING_OFF_ENV };
   const result = await runWorker({ job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir, extraEnv });
   assert.equal(result.status, 'done', result.logText.slice(-2000));
   const report = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8'));
@@ -138,7 +159,7 @@ test('슬라이드 전사 백엔드 ocr: /ocr 호출을 임베딩이 아닌 ocr 
     identity: readResultIdentity({ pipelineConfig: loadPipelineConfig().readPipelineConfig(env) }),
   });
   assert.equal(inspectWith({ ...WORKER_ENV, ...extraEnv }).status, 'done');
-  assert.deepEqual(inspectWith(WORKER_ENV), { status: 'mismatch', mismatchList: ['결과 설정 slideTextBackend ocr → vlm'] }, '백엔드를 바꿔 같은 --out 으로 돌리면 다시 만든다');
+  assert.deepEqual(inspectWith({ ...WORKER_ENV, ...GROUNDING_OFF_ENV }), { status: 'mismatch', mismatchList: ['결과 설정 slideTextBackend ocr → vlm'] }, '백엔드를 바꿔 같은 --out 으로 돌리면 다시 만든다');
 });
 
 test('슬라이드 전사 백엔드 ocr: OCR 평균 점수가 낮은 장은 제품이 VLM 으로 다시 전사하고, 출처 vlm·이유 low_score 로 남는다', { timeout: 180000 }, async () => {
@@ -151,7 +172,8 @@ test('슬라이드 전사 백엔드 ocr: OCR 평균 점수가 낮은 장은 제�
   mock.setOcrMeanScoreList([0.4]);
   try {
     const result = await runWorker({
-      job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir, extraEnv: { SEEON_SLIDE_TEXT_BACKEND: 'ocr' },
+      job: { videoId: 'deck', filePath, outStem: 'deck', language: 'ko', isPageTransitionIncluded: false }, outDir,
+      extraEnv: { SEEON_SLIDE_TEXT_BACKEND: 'ocr', ...GROUNDING_OFF_ENV },
     });
     assert.equal(result.status, 'done', result.logText.slice(-2000));
     const { slideText, serviceMap } = JSON.parse(fs.readFileSync(path.join(outDir, 'deck_SEEON_AD.json'), 'utf8')).stats;

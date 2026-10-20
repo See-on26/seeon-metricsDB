@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { runBinary } from '../media/ffmpeg.mjs';
 import { resolveProductPath } from '../product/product-paths.mjs';
 import { checkKiwiSetup } from '../product/kiwi-setup.mjs';
-import { GAP_CANDIDATE_SOURCE_MAP } from '../product/core-modules.mjs';
+import { GAP_CANDIDATE_SOURCE_MAP, MODE_MAP, getModePolicy } from '../product/core-modules.mjs';
 
 const require = createRequire(import.meta.url);
 const TUNNEL_POLL_MS = 200;
@@ -138,29 +138,37 @@ export function probeOcrService({ url, timeoutMs = OCR_PROBE_TIMEOUT_MS }) {
 
 // 제품 config.js SLIDE_TEXT_BACKEND_LIST 의 ocr.
 const SLIDE_TEXT_BACKEND_OCR = 'ocr';
+// 제품 unified-router.js ROUTER_MODE_MAP 의 unified.
+const ROUTER_MODE_UNIFIED = 'unified';
 
-// 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함). 탐지 판정 GPU 주소(judgeGpuUrl)는
-// 판정 백엔드가 gpu 일 때만 쓰므로 따로 둔다(listServiceUrlKeyList).
+// 제품 tunnel-config.js 의 FORWARD_URL_KEY_LIST 와 같은 GPU 서비스 주소들(긴 문장 TTS 포함). GPU 판정 LLM 주소(judgeGpuUrl)는
+// 그 LLM 을 부를 때만 보므로 따로 둔다(listServiceUrlKeyList).
 const GPU_SERVICE_URL_KEY_LIST = [['VLM', 'vlmUrl'], ['ASR', 'asrUrl'], ['TTS', 'ttsUrl'], ['TTS_LONG', 'ttsLongUrl'], ['EMBED', 'embedUrl']];
 const JUDGE_URL_KEY = ['JUDGE', 'judgeGpuUrl'];
 // 제품 judge-llm.js JUDGE_BACKEND_MAP 과 같은 값.
 const JUDGE_BACKEND_MAP = { gpu: 'gpu', bedrock: 'bedrock' };
-// Bedrock 토큰이 없을 때 제품과 달라지는 곳. gpu 판정은 토큰 없이도 돌지만 GPU 가 실패하면 Bedrock 으로 넘기지 못한다.
-const MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP = {
-  [JUDGE_BACKEND_MAP.gpu]: '틈 추론이 규칙 폴백으로 떨어지고 GPU 판정이 실패해도 Bedrock 으로 넘기지 못해',
-  [JUDGE_BACKEND_MAP.bedrock]: 'SEEON_JUDGE_BACKEND=bedrock 이라 판단 LLM(라우터·무발화 판정)을 쓸 수 없어 발화 기반·무발화 해설이 나오지 않고 틈 추론이 규칙 폴백으로 떨어져',
-};
+// 판정 백엔드가 bedrock 인데 토큰이 없을 때 제품과 달라지는 곳. 판정 LLM 을 쓸 수 없으면 통합 라우터는 후보를 모두 막고
+// 무발화 판정은 단서 없음으로 본다. 삽입 위치 추론은 판정 백엔드와 상관없이 GPU 판정 LLM 이라 토큰과 상관없다.
+const MISSING_BEDROCK_KEY_IMPACT = 'SEEON_JUDGE_BACKEND=bedrock 이라 판단 LLM(라우터·무발화 판정)을 쓸 수 없어 지시 대상·발화 기반·무발화 해설이 나오지 않아';
 
 function readHostPort(url) {
   const { hostname, port, protocol } = new URL(url);
   return { hostname, portNumber: Number(port) || DEFAULT_PORT_BY_PROTOCOL_MAP[protocol] };
 }
 
-// 제품 기본 판정 GPU 주소는 VLM(8801)과 따로 띄운 판정 LLM(127.0.0.1:8805)이라 판정 백엔드가 gpu 면 그 주소(JUDGE)도 본다.
+// GPU 판정 LLM(judgeGpuUrl·judgeGpuModel)을 부르는지. 탐지 판정은 판정 백엔드가 gpu 일 때만 부르지만, 삽입 위치 추론은 판정 백엔드와
+// 상관없이 이 LLM 을 쓴다(제품 gap-inference-agent.js). 삽입 위치 추론은 지연이 있는 모드(delayMs > 0)에서만 부르고, 공장은 균형 모드로 돈다.
+function isJudgeGpuUsed({ pipelineConfig, mode }) {
+  const { judgeBackend, judgeGpuUrl } = pipelineConfig;
+  if (!judgeGpuUrl) return false;
+  return judgeBackend === JUDGE_BACKEND_MAP.gpu || getModePolicy({ mode }).delayMs > 0;
+}
+
+// 제품 기본 판정 GPU 주소는 VLM(8801)과 따로 띄운 판정 LLM(127.0.0.1:8805)이라 그 LLM 을 부르면 그 주소(JUDGE)도 본다.
 // SEEON_JUDGE_GPU_URL 로 VLM 과 같은 호스트·포트를 주면 VLM 점검이 판정도 덮는다. 제품 터널은 판정 주소도 넘긴다(tunnel-config.js).
-function listServiceUrlKeyList({ pipelineConfig }) {
-  const { judgeBackend, judgeGpuUrl, vlmUrl } = pipelineConfig;
-  if (judgeBackend !== JUDGE_BACKEND_MAP.gpu || !judgeGpuUrl) return GPU_SERVICE_URL_KEY_LIST;
+function listServiceUrlKeyList({ pipelineConfig, mode }) {
+  const { judgeGpuUrl, vlmUrl } = pipelineConfig;
+  if (!isJudgeGpuUsed({ pipelineConfig, mode })) return GPU_SERVICE_URL_KEY_LIST;
   const judgeHostPort = readHostPort(judgeGpuUrl);
   const vlmHostPort = vlmUrl ? readHostPort(vlmUrl) : null;
   const isSameHostPort = vlmHostPort?.hostname === judgeHostPort.hostname && vlmHostPort?.portNumber === judgeHostPort.portNumber;
@@ -168,10 +176,10 @@ function listServiceUrlKeyList({ pipelineConfig }) {
 }
 
 // GPU 서비스 주소마다 HTTP 로 답하는지 보고, 답하지 않는 것만 '<이름> <호스트>:<포트> <이유>' 로 돌려준다.
-// 포트를 적지 않은 주소는 프로토콜 기본 포트로 적는다. 설정에 없는 주소는 건너뛴다.
-export async function listDownServices({ pipelineConfig, checkService = probeHttpService }) {
+// 포트를 적지 않은 주소는 프로토콜 기본 포트로 적는다. 설정에 없는 주소는 건너뛴다. mode 는 판정 주소를 볼지 정한다(isJudgeGpuUsed).
+export async function listDownServices({ pipelineConfig, mode = MODE_MAP.delayed, checkService = probeHttpService }) {
   const downServiceList = [];
-  for (const [label, key] of listServiceUrlKeyList({ pipelineConfig })) {
+  for (const [label, key] of listServiceUrlKeyList({ pipelineConfig, mode })) {
     const url = pipelineConfig[key];
     if (!url) continue;
     const { isUp, detail } = await checkService({ url });
@@ -182,10 +190,23 @@ export async function listDownServices({ pipelineConfig, checkService = probeHtt
   return downServiceList;
 }
 
-// 슬라이드 전사 백엔드가 ocr 이면 OCR 주소(제품 터널도 넘긴다)가 실제로 전사하는지 본다. 닿지 않으면(연결 거부·끊김·응답 없음)
+// OCR(/ocr)을 부르는 설정마다 그것을 끄는 값. 슬라이드 전사 백엔드가 ocr 이면 새 슬라이드마다, 화면 글자 근거가 켜져 있으면
+// 통합 라우터의 수치 해설 요청마다 전사 백엔드와 상관없이 부른다(제품 index.js screenTextGrounding — 다른 라우터 모드는 부르지 않는다).
+// 비어 있으면 OCR 을 부르지 않는다.
+function listOcrOffSettingList({ pipelineConfig }) {
+  const { slideTextBackend, isScreenTextGroundingEnabled, routerMode } = pipelineConfig;
+  return [
+    slideTextBackend === SLIDE_TEXT_BACKEND_OCR ? 'SEEON_SLIDE_TEXT_BACKEND=vlm' : null,
+    isScreenTextGroundingEnabled && routerMode === ROUTER_MODE_UNIFIED ? 'SEEON_SCREEN_TEXT_GROUNDING=off' : null,
+  ].filter(Boolean);
+}
+
+// OCR 을 부르는 설정이면 OCR 주소(제품 터널도 넘긴다)가 실제로 전사하는지 본다. 닿지 않으면(연결 거부·끊김·응답 없음)
 // 터널로 고쳐질 수 있어 downServiceList 로, 닿았지만 실패하면(HTTP 404·503·모양 다름) 터널로 고칠 수 없어 problemList 로 바로 낸다.
+// 화면 글자 근거는 OCR 이 실패해도 근거 없이 해설을 만들어 결과가 조용히 달라지므로 슬라이드 전사와 같이 본다.
 async function inspectOcrBackend({ pipelineConfig, checkOcrService }) {
-  if (pipelineConfig.slideTextBackend !== SLIDE_TEXT_BACKEND_OCR) return { downServiceList: [], problemList: [] };
+  const offSettingList = listOcrOffSettingList({ pipelineConfig });
+  if (!offSettingList.length) return { downServiceList: [], problemList: [] };
   const { ocrUrl } = pipelineConfig;
   if (!ocrUrl) return { downServiceList: [], problemList: ['OCR 주소가 없다(SEEON_OCR_URL 또는 SEEON_EMBED_URL 확인)'] };
   const { isUp, isReachable, detail } = await checkOcrService({ url: ocrUrl });
@@ -195,7 +216,7 @@ async function inspectOcrBackend({ pipelineConfig, checkOcrService }) {
   if (!isReachable) return { downServiceList: [`${label} ${detail}`], problemList: [] };
   return {
     downServiceList: [],
-    problemList: [`${label} 에 닿았지만 실패했다(${detail}) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 SEEON_SLIDE_TEXT_BACKEND 를 지운다`],
+    problemList: [`${label} 에 닿았지만 실패했다(${detail}) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 OCR 을 끈다(${offSettingList.join('·')})`],
   };
 }
 
@@ -259,11 +280,11 @@ export function fetchServedModelIdList({ url, timeoutMs = PROBE_TIMEOUT_MS }) {
   });
 }
 
-// 이름을 볼 자리. 판정 주소는 listServiceUrlKeyList 처럼 판정 백엔드가 gpu 이고 주소가 있을 때만 쓴다. 주소·이름이 빈 자리는 볼 수 없어 뺀다.
-function listModelNameTargetList({ pipelineConfig }) {
-  const { vlmUrl, vlmModel, judgeBackend, judgeGpuUrl, judgeGpuModel } = pipelineConfig;
+// 이름을 볼 자리. 판정 주소는 listServiceUrlKeyList 처럼 GPU 판정 LLM 을 부를 때만 쓴다(isJudgeGpuUsed). 주소·이름이 빈 자리는 볼 수 없어 뺀다.
+function listModelNameTargetList({ pipelineConfig, mode }) {
+  const { vlmUrl, vlmModel, judgeGpuUrl, judgeGpuModel } = pipelineConfig;
   const targetList = [{ label: 'VLM', url: vlmUrl, modelName: vlmModel }];
-  if (judgeBackend === JUDGE_BACKEND_MAP.gpu && judgeGpuUrl) targetList.push({ label: '판정', url: judgeGpuUrl, modelName: judgeGpuModel });
+  if (isJudgeGpuUsed({ pipelineConfig, mode })) targetList.push({ label: '판정', url: judgeGpuUrl, modelName: judgeGpuModel });
   return targetList.filter(({ url, modelName }) => url && modelName);
 }
 
@@ -278,12 +299,12 @@ async function readModelIdList({ url, fetchModelIdList }) {
 }
 
 // GPU 서버가 설정한 모델 이름(VLM·판정)을 서빙하는지 본다. HTTP 로 답하는지만 보면 .env 에 옛 이름이 남아도 통과하고,
-// 실제 요청이 404 로 실패해 AD 가 빠지거나 Bedrock 으로 넘어간다. 같은 호스트·포트는 목록을 한 번만 받아 두 이름을 함께 본다.
+// 실제 요청이 404 로 실패해 AD 가 빠진다. 같은 호스트·포트는 목록을 한 번만 받아 두 이름을 함께 본다.
 // 목록을 받지 못한 자리는 건너뛴다 — 닿지 않는 것은 listDownServices 가 잡는다.
-export async function listModelNameProblems({ pipelineConfig, fetchModelIdList = fetchServedModelIdList }) {
+export async function listModelNameProblems({ pipelineConfig, mode = MODE_MAP.delayed, fetchModelIdList = fetchServedModelIdList }) {
   const modelIdListByHostPortMap = new Map();
   const problemList = [];
-  for (const { label, url, modelName } of listModelNameTargetList({ pipelineConfig })) {
+  for (const { label, url, modelName } of listModelNameTargetList({ pipelineConfig, mode })) {
     const { hostname, portNumber } = readHostPort(url);
     const hostPort = `${hostname}:${portNumber}`;
     if (!modelIdListByHostPortMap.has(hostPort)) modelIdListByHostPortMap.set(hostPort, await readModelIdList({ url, fetchModelIdList }));
@@ -298,26 +319,28 @@ export async function listModelNameProblems({ pipelineConfig, fetchModelIdList =
 // 그대로 두면 대역으로 돌린 점검이 열린 터널 너머 실제 GPU 서버에 묻고, 그 서버가 서빙하는 이름에 따라 결과가 바뀐다.
 const pickDefaultModelIdListFetcher = (checkService) => (checkService === probeHttpService ? fetchServedModelIdList : null);
 
-// GPU 서비스와 (ocr 백엔드면) OCR, 서빙 모델 이름을 함께 본다. 시작 전 점검과 터널을 연 뒤 다시 볼 때 같이 쓴다.
+// GPU 서비스와 (OCR 을 부르는 설정이면) OCR, 서빙 모델 이름을 함께 본다. 시작 전 점검과 터널을 연 뒤 다시 볼 때 같이 쓴다.
 // downServiceList 는 닿지 않는 것(터널 대상), problemList 는 닿았지만 OCR 이 실패했거나 설정한 모델 이름을 서빙하지 않는 것이다.
-// 터널을 열기 전에 닿지 않던 서버의 이름은 터널을 연 뒤 다시 볼 때 확인된다.
+// 터널을 열기 전에 닿지 않던 서버의 이름은 터널을 연 뒤 다시 볼 때 확인된다. mode 는 공장이 돌리는 모드(균형)다.
 export async function inspectGpuServices({
-  pipelineConfig, checkService = probeHttpService, checkOcrService = probeOcrService,
+  pipelineConfig, mode = MODE_MAP.delayed, checkService = probeHttpService, checkOcrService = probeOcrService,
   fetchModelIdList = pickDefaultModelIdListFetcher(checkService),
 }) {
-  const downServiceList = await listDownServices({ pipelineConfig, checkService });
+  const downServiceList = await listDownServices({ pipelineConfig, mode, checkService });
   const ocr = await inspectOcrBackend({ pipelineConfig, checkOcrService });
-  const modelNameProblemList = fetchModelIdList ? await listModelNameProblems({ pipelineConfig, fetchModelIdList }) : [];
+  const modelNameProblemList = fetchModelIdList ? await listModelNameProblems({ pipelineConfig, mode, fetchModelIdList }) : [];
   return { downServiceList: [...downServiceList, ...ocr.downServiceList], problemList: [...ocr.problemList, ...modelNameProblemList] };
 }
 
-// Bedrock 은 호출마다 돈이 들어 점검하지 않는다(토큰이 있는지만 본다). 토큰 만료는 영상 결과의 불완전 사유(bedrock_auth_failed)로 잡힌다.
+// Bedrock 은 판정 백엔드가 bedrock 일 때만 부른다(탐지 판정). gpu 백엔드는 탐지 판정·삽입 위치 추론 모두 GPU 판정 LLM 이고,
+// 제품의 다른 Bedrock 호출(회의 요약)은 공장이 돌리지 않는다. 호출마다 돈이 들어 실제로 부르지 않고 토큰이 있는지만 본다.
+// 토큰 만료는 영상 결과의 불완전 사유(bedrock_auth_failed)로 잡힌다.
 // 한국어 트리거 형태소 분석기(Kiwi)의 의존성·모델이 seeon-meet 에 있는지도 본다(checkTriggerAnalyzer, 테스트는 대역).
 // 틈 후보를 잰 무음에서 고르는 audio(SEEON_GAP_SOURCE=audio)는 공장이 아직 옮기지 않았다. 그대로 돌리면 결과 설정에 audio 라고
 // 적힌 채 ASR 끝 시각 후보로 돌므로 시작 전에 멈춘다.
 // GPU 서버가 설정한 모델 이름(SEEON_VLM_MODEL·SEEON_JUDGE_GPU_MODEL)을 서빙하지 않아도 멈춘다(inspectGpuServices, fetchModelIdList 는 시험이 바꿔 끼운다).
 export async function runPreflight({
-  pipelineConfig, ffmpegPath, ffprobePath, checkService = probeHttpService, checkOcrService = probeOcrService,
+  pipelineConfig, mode = MODE_MAP.delayed, ffmpegPath, ffprobePath, checkService = probeHttpService, checkOcrService = probeOcrService,
   fetchModelIdList = pickDefaultModelIdListFetcher(checkService),
   runVersion = (binaryPath) => runBinary({ binaryPath, argList: ['-version'] }), checkTriggerAnalyzer = checkKiwiSetup,
 }) {
@@ -334,13 +357,11 @@ export async function runPreflight({
     }
   }
   problemList.push(...await checkTriggerAnalyzer());
-  const { downServiceList, problemList: serviceProblemList } = await inspectGpuServices({ pipelineConfig, checkService, checkOcrService, fetchModelIdList });
+  const { downServiceList, problemList: serviceProblemList } = await inspectGpuServices({ pipelineConfig, mode, checkService, checkOcrService, fetchModelIdList });
   problemList.push(...serviceProblemList);
-  if (!pipelineConfig.bedrockApiKey) {
-    // 백엔드가 없는 설정은 제품 judge-llm.js 처럼 Bedrock 판정으로 본다.
-    const impact = MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP[pipelineConfig.judgeBackend]
-      ?? MISSING_BEDROCK_KEY_IMPACT_BY_BACKEND_MAP[JUDGE_BACKEND_MAP.bedrock];
-    problemList.push(`AWS_BEARER_TOKEN_BEDROCK 이 없다 — ${impact} 제품과 다르게 돈다(.env 확인)`);
+  // 백엔드가 없는 설정은 제품 judge-llm.js 처럼 Bedrock 판정으로 본다.
+  if (pipelineConfig.judgeBackend !== JUDGE_BACKEND_MAP.gpu && !pipelineConfig.bedrockApiKey) {
+    problemList.push(`AWS_BEARER_TOKEN_BEDROCK 이 없다 — ${MISSING_BEDROCK_KEY_IMPACT} 제품과 다르게 돈다(.env 확인)`);
   }
   return { problemList, downServiceList };
 }

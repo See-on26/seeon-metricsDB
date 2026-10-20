@@ -22,8 +22,12 @@ const BASE_ENV = {
 const GIB = 1024 ** 3;
 const SERVICE_UP = { isUp: true, detail: 'HTTP 405' };
 const SERVICE_DOWN = { isUp: false, detail: '연결 거부(ECONNREFUSED)' };
+// 제품 기본 설정은 화면 글자 근거가 켜져 있어 시작 전 점검이 OCR(임베딩 origin + /ocr)도 본다. OCR 점검도 대역으로 바꾼다.
+const OCR_UP = { isUp: true, isReachable: true, detail: 'HTTP 200' };
+const OCR_DOWN = { isUp: false, isReachable: false, detail: '연결 거부(ECONNREFUSED)' };
 const PASSING_PREFLIGHT = {
   checkService: async () => SERVICE_UP,
+  checkOcrService: async () => OCR_UP,
   runVersion: async () => Buffer.from('ok'),
   checkTriggerAnalyzer: async () => [],
   readFreeMemoryBytes: () => 64 * GIB,
@@ -153,6 +157,7 @@ test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이�
   const exitCode = await runFactoryCli({
     argList: ['--input', inputDir, '--out', outDir], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
     checkService: async ({ url }) => (url.startsWith('http://127.0.0.1:9/') ? SERVICE_DOWN : SERVICE_UP),
+    checkOcrService: async ({ url }) => (url.startsWith('http://127.0.0.1:9/') ? OCR_DOWN : OCR_UP),
     runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
     readFreeMemoryBytes: () => 64 * GIB,
@@ -160,7 +165,8 @@ test('CLI: GPU 서비스가 HTTP 로 답하지 않고 터널도 못 열면 이�
   });
   assert.equal(exitCode, 1);
   assert.equal(tunnelCallCount, 1);
-  const downText = ['VLM', 'ASR', 'TTS', 'TTS_LONG', 'EMBED'].map((label) => `${label} 127.0.0.1:9 연결 거부(ECONNREFUSED)`).join(', ');
+  // 화면 글자 근거(기본 on)가 OCR 을 부르므로 전사 백엔드가 vlm 이어도 OCR 주소를 본다.
+  const downText = ['VLM', 'ASR', 'TTS', 'TTS_LONG', 'EMBED', 'OCR'].map((label) => `${label} 127.0.0.1:9 연결 거부(ECONNREFUSED)`).join(', ');
   assert.ok(lineList.includes(`[factory] GPU 서비스 응답 없음(${downText}) — 제품 터널 모듈로 연결을 시도한다`), lineList.join('\n'));
   assert.ok(lineList.includes(`[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: ${downText}`), lineList.join('\n'));
   assert.equal(fs.existsSync(outDir), false, '점검에 실패하면 출력 폴더를 만들지 않는다');
@@ -188,7 +194,7 @@ test('CLI: 틈 후보 출처 audio(공장 미지원)·닿았지만 실패한 OCR
     },
   }), 1);
   assert.deepEqual(checkedOcrList, ['http://127.0.0.1:9/ocr']);
-  assert.ok(ocr.lineList.includes('[factory] 시작 전 점검 실패: OCR 127.0.0.1:9 에 닿았지만 실패했다(HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 SEEON_SLIDE_TEXT_BACKEND 를 지운다'), ocr.lineList.join('\n'));
+  assert.ok(ocr.lineList.includes('[factory] 시작 전 점검 실패: OCR 127.0.0.1:9 에 닿았지만 실패했다(HTTP 404 — /ocr 경로가 없다(OCR 이 없는 GPU 서버)) — 터널로 고칠 수 없다. GPU 서버의 OCR 을 확인하거나 OCR 을 끈다(SEEON_SLIDE_TEXT_BACKEND=vlm·SEEON_SCREEN_TEXT_GROUNDING=off)'), ocr.lineList.join('\n'));
   assert.equal(ocr.lineList.some((line) => line.includes('터널 모듈로 연결을 시도한다') || line.includes('닿지 못했다')), false, ocr.lineList.join('\n'));
 
   // OCR 에 닿지 않으면(연결 거부) 터널 대상이다. 터널을 연 뒤 다시 보고 통과하면 돈다.
@@ -216,7 +222,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
   const { lineList, log } = createLogCollector();
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-error'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
-    checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
+    checkService: async () => SERVICE_DOWN, checkOcrService: async () => OCR_DOWN, runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
     readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => { throw new Error('GPU 터널이 제때 연결되지 않았다'); },
@@ -227,7 +233,7 @@ test('CLI: 터널이 열리다 실패하면 그 이유도 점검 실패로 찍�
   const secret = createLogCollector();
   assert.equal(await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-secret'), 'run')], env: BASE_ENV, log: secret.log, workerPath: FAKE_WORKER_PATH,
-    checkService: async () => SERVICE_DOWN, runVersion: async () => Buffer.from('ok'),
+    checkService: async () => SERVICE_DOWN, checkOcrService: async () => OCR_DOWN, runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
     readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => { throw new Error('원격 주소 http://user:secretpw@gpu.local:8801 로 터널을 열지 못했다'); },
@@ -244,7 +250,8 @@ test('CLI: 닫힌 포트를 제품 터널로 열면 다시 점검해 돌리고, 
   let tunnelEnv = null;
   const exitCode = await runFactoryCli({
     argList: ['--input', inputDir, '--out', outDir], env: { ...BASE_ENV, SEEON_GPU_SSH_KEY: '/keys/app' }, log: createLogCollector().log, workerPath: FAKE_WORKER_PATH,
-    checkService: async () => (isTunnelOpen ? SERVICE_UP : SERVICE_DOWN), runVersion: async () => Buffer.from('ok'),
+    checkService: async () => (isTunnelOpen ? SERVICE_UP : SERVICE_DOWN), checkOcrService: async () => (isTunnelOpen ? OCR_UP : OCR_DOWN),
+    runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
     readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async ({ env, pipelineConfig }) => {
@@ -264,7 +271,8 @@ test('CLI: 터널이 열렸는데도 서비스가 답하지 않으면(원격 주
   const { lineList, log } = createLogCollector();
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('tunnel-still-closed'), 'run')], env: BASE_ENV, log, workerPath: FAKE_WORKER_PATH,
-    checkService: async ({ url }) => (url.includes(':9/') ? { isUp: false, detail: '연결이 끊김(ECONNRESET)' } : SERVICE_UP), runVersion: async () => Buffer.from('ok'),
+    checkService: async ({ url }) => (url.includes(':9/') ? { isUp: false, detail: '연결이 끊김(ECONNRESET)' } : SERVICE_UP),
+    checkOcrService: async () => OCR_UP, runVersion: async () => Buffer.from('ok'),
     checkTriggerAnalyzer: async () => [],
     readFreeMemoryBytes: () => 64 * GIB,
     startTunnel: async () => ({ stop: async () => { stopCount += 1; } }),
@@ -274,20 +282,28 @@ test('CLI: 터널이 열렸는데도 서비스가 답하지 않으면(원격 주
   assert.ok(lineList.some((line) => line.startsWith('[factory] 시작 전 점검 실패: GPU 서비스에 닿지 못했다: VLM 127.0.0.1:9 연결이 끊김(ECONNRESET)')), lineList.join('\n'));
 });
 
-test('CLI: Bedrock 토큰이 없거나 ffmpeg 를 못 돌리면 종료 코드 1', async () => {
+test('CLI: 판정 백엔드가 bedrock 인데 Bedrock 토큰이 없거나 ffmpeg 를 못 돌리면 종료 코드 1', async () => {
   const { lineList, log } = createLogCollector();
   const { AWS_BEARER_TOKEN_BEDROCK: _unused, ...envWithoutToken } = BASE_ENV;
   const exitCode = await runFactoryCli({
     argList: ['--input', makeInputDir(['a.mp4']), '--out', path.join(makeDir('no-token'), 'run')],
-    env: { ...envWithoutToken, SEEON_FACTORY_FFMPEG: '/없는/ffmpeg' }, log, workerPath: FAKE_WORKER_PATH,
-    checkService: async () => SERVICE_UP, runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
-    checkTriggerAnalyzer: async () => [],
-    readFreeMemoryBytes: () => 64 * GIB,
-    startTunnel: PASSING_PREFLIGHT.startTunnel,
+    env: { ...envWithoutToken, SEEON_JUDGE_BACKEND: 'bedrock', SEEON_FACTORY_FFMPEG: '/없는/ffmpeg' }, log, workerPath: FAKE_WORKER_PATH,
+    ...PASSING_PREFLIGHT, runVersion: async (binaryPath) => { if (binaryPath.includes('없는')) throw new Error('ENOENT'); return Buffer.from('ok'); },
   });
   assert.equal(exitCode, 1);
   assert.ok(lineList.some((line) => line.includes('AWS_BEARER_TOKEN_BEDROCK 이 없다')), lineList.join('\n'));
   assert.ok(lineList.some((line) => line.includes('ffmpeg 를 실행하지 못했다(/없는/ffmpeg)')), lineList.join('\n'));
+});
+
+test('CLI: 판정 백엔드가 gpu(제품 기본)면 Bedrock 토큰 없이도 시작 전 점검을 통과해 돈다', async () => {
+  const { lineList, log } = createLogCollector();
+  const { AWS_BEARER_TOKEN_BEDROCK: _unused, ...envWithoutToken } = BASE_ENV;
+  const outDir = path.join(makeDir('no-token-gpu'), 'run');
+  assert.equal(await runFactoryCli({
+    argList: ['--input', makeInputDir(['a.mp4']), '--out', outDir], env: envWithoutToken, log, workerPath: FAKE_WORKER_PATH, ...PASSING_PREFLIGHT,
+  }), 0, lineList.join('\n'));
+  assert.equal(lineList.some((line) => line.includes('AWS_BEARER_TOKEN_BEDROCK')), false, lineList.join('\n'));
+  assert.equal(readJson(path.join(outDir, 'manifest.json')).counts.done, 1);
 });
 
 test('CLI: 처리할 영상이 없으면 종료 코드 1, 잘못된 인자는 Error', async () => {
@@ -478,7 +494,9 @@ test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모
   const manifest = readJson(path.join(outDir, 'manifest.json'));
   assert.match(manifest.factory.commit, /^[0-9a-f]{40}$/);
   assert.equal(typeof manifest.factory.isDirty, 'boolean');
-  assert.equal(manifest.resultConfig.vlmModel, 'qwen3.5-35b-a3b');
+  // BASE_ENV 는 모델 이름을 주지 않으므로 결과 설정의 VLM 모델은 제품 기본값이다.
+  const defaultVlmModel = loadPipelineConfig().readPipelineConfig({}).vlmModel;
+  assert.equal(manifest.resultConfig.vlmModel, defaultVlmModel);
   assert.equal(manifest.runOptions.concurrency, 1);
   assert.match(fs.readFileSync(path.join(outDir, 'summary.txt'), 'utf8'), new RegExp(`공장 ${manifest.factory.commit.slice(0, 7)}`));
   const aReport = readJson(path.join(outDir, 'a_SEEON_AD.json'));
@@ -491,9 +509,9 @@ test('CLI: 끝난 결과라도 seeon-meet·공장 버전이나 결과 설정(모
   assert.deepEqual(countStartPair(), [2, 1]);
 
   const modelEnv = { ...BASE_ENV, SEEON_VLM_MODEL: 'other-vlm' };
-  // 판정 LLM 은 VLM 과 따로 띄운 모델(제품 기본 qwen3.5-9b)이라 VLM 모델만 다르다.
+  // 판정 LLM 모델은 VLM 모델과 따로 정하므로(SEEON_JUDGE_GPU_MODEL) VLM 모델만 다르다.
   assert.deepEqual(await runOnce(modelEnv), ['a', 'b'].map((videoId) => `[factory] ↻ ${videoId} 이전 완료 결과와 달라 다시 만든다 — `
-    + '결과 설정 vlmModel qwen3.5-35b-a3b → other-vlm'));
+    + `결과 설정 vlmModel ${defaultVlmModel} → other-vlm`));
   assert.deepEqual(countStartPair(), [3, 2]);
   assert.deepEqual(await runOnce({ ...modelEnv, SEEON_ASR_URL: 'http://127.0.0.1:10/asr' }), [], '서비스 주소(터널·직접 연결)는 결과 설정이 아니다');
   assert.deepEqual(countStartPair(), [3, 2]);

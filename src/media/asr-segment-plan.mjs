@@ -1,9 +1,15 @@
-import { isSegmentVoiced, isSegmentCutReady } from '../product/core-modules.mjs';
+import {
+  isSegmentVoiced, shouldCutSegment, DEFAULT_MAX_EXTEND_MS, DEFAULT_EXTEND_SILENCE_CUT_MS,
+} from '../product/core-modules.mjs';
 import { readLevelAt } from './audio-levels.mjs';
 import { VAD_SAMPLE_MS, ASR_VOICE_LEVEL_THRESHOLD, ASR_MIN_VOICED_MS, ASR_SILENCE_CUT_MS } from '../session/renderer-constants.mjs';
 
-// AsrSegmenter 를 그대로 따른다: 조각 시작부터 100ms 마다 레벨을 보고, 2.5초가 지난 뒤 끝 무음이 400ms 쌓이면 자르고,
-// 아니면 segmentMs 에 자른다. 말이 200ms 미만인 조각은 보내지 않는다. 레벨만으로 정해지므로 미리 계산한다.
+// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
+// AsrSegmenter(코어 trigger/asr-segmenter.js:87-141)를 그대로 따른다. 제품은 미터 레벨을 getVoiceLevel 로 넘겨(main.js:961-972)
+// 말소리 측정 갈래를 탄다. 공장의 레벨 목록은 같은 미터 레벨(AnalyserNode 바이트 RMS)을 100ms 격자로 미리 잰 것이다.
+// 조각 시작부터 100ms 마다 레벨을 보고, 무음 tick 마다 shouldCutSegment 로 자를지 정한다: 2.5초가 지난 뒤 끝 무음 400ms 면 자르고,
+// 조각 길이(segmentMs)가 찼을 때 말하는 중이면 낱말 사이 쉼 200ms 까지 기다린다. 쉼이 없으면 조각 길이 + 1.5초 타이머에 자른다.
+// 말이 200ms 미만인 조각은 보내지 않는다. 레벨만으로 정해지므로 미리 계산한다.
 export function planAsrSegmentList({
   levelList, durationMs, segmentMs, minSegmentMs, tickMs = VAD_SAMPLE_MS,
   voiceThreshold = ASR_VOICE_LEVEL_THRESHOLD, minVoicedMs = ASR_MIN_VOICED_MS, silenceCutMs = ASR_SILENCE_CUT_MS,
@@ -16,7 +22,8 @@ export function planAsrSegmentList({
   const segmentList = [];
   let startMs = 0;
   while (startMs < durationMs) {
-    const limitMs = Math.min(startMs + segmentMs, durationMs);
+    // 말소리 측정이 있으면 타이머는 늘린 상한에서만 자른다(asr-segmenter.js:137-140).
+    const limitMs = Math.min(startMs + segmentMs + DEFAULT_MAX_EXTEND_MS, durationMs);
     let voicedMs = 0;
     let silenceMs = 0;
     let endMs = limitMs;
@@ -28,8 +35,10 @@ export function planAsrSegmentList({
         continue;
       }
       silenceMs += tickMs;
-      const isCutReady = voicedMs >= minVoicedMs
-        && isSegmentCutReady({ elapsedMs, silenceMs, minSegmentMs: effectiveMinSegmentMs, silenceCutMs });
+      const isCutReady = shouldCutSegment({
+        elapsedMs, silenceMs, voicedMs, segmentMs, minSegmentMs: effectiveMinSegmentMs, silenceCutMs, minVoicedMs,
+        maxExtendMs: DEFAULT_MAX_EXTEND_MS, extendSilenceCutMs: DEFAULT_EXTEND_SILENCE_CUT_MS,
+      });
       if (isCutReady) {
         endMs = startMs + elapsedMs;
         break;

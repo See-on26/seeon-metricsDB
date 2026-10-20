@@ -41,13 +41,21 @@ function computeMockEmbedding(jpegBuffer) {
   return vector.map((value) => value / norm);
 }
 
-// 제품 판정기(router/*.js)가 parse 하는 모양 그대로의 답. 통합 라우터(판단 LLM)는 트리거 후보마다 공백 O/X 를 낸다(기본 O).
-// 무발화는 차단, 지시 판정(judge 모드에서만 씀)은 통과로 둔다.
+// 제품 판정기(router/*.js)가 parse 하는 모양 그대로의 답. 통합 라우터(판단 LLM)는 판단 묶음(지시 대상·발화 기반)마다 따로 묻고,
+// 답은 묶음과 상관없이 받은 후보마다 공백 O/X 다(기본 O). 무발화는 차단, 지시 판정(라우터 모드가 unified 가 아닐 때 씀)은 통과로 둔다.
 const CANDIDATE_LINE_PATTERN = /^(\d+)\) \[/;
+// 삽입 위치 추론(output/gap-inference-agent.js formatGapLine)의 후보 틈 줄. 트리거 뒤(+) 틈만 고른다.
+const FORWARD_GAP_LINE_PATTERN = /^\[(\d+)\] \+/;
 
 function buildRouterReply({ input, gapVerdict }) {
   const idList = input.split('\n').map((line) => CANDIDATE_LINE_PATTERN.exec(line)?.[1]).filter(Boolean).map(Number);
   return { judgeList: idList.map((id) => ({ id, gap: gapVerdict, reason: 'mock 판단' })) };
+}
+
+// 트리거 뒤 첫 틈을 고른다. 뒤 틈이 없으면 고르지 않는다(제품은 트리거 자리에 넣는다).
+function buildGapReply({ input }) {
+  const gapIndex = input.split('\n').map((line) => FORWARD_GAP_LINE_PATTERN.exec(line)?.[1]).find(Boolean);
+  return gapIndex === undefined ? { gapIndex: null, reason: 'mock: 뒤 틈 없음' } : { gapIndex: Number(gapIndex), reason: 'mock 선택' };
 }
 
 const STATIC_JUDGE_REPLY_MAP = {
@@ -55,16 +63,24 @@ const STATIC_JUDGE_REPLY_MAP = {
   deixis: { caption: true, reason: 'visual_referent' },
 };
 
-// 판정 요청은 system 메시지를 앞에 두고 content 를 문자열로 보낸다(judge-llm.js). VLM 요청은 system 없이 content 가 배열이다.
-// 판정기 종류는 마지막 user 입력의 틀(prompts/unified-router·silence-judge·deixis-judge 의 build*Input)로 가린다.
+// 판정 요청은 system 메시지를 앞에 두고 content 를 문자열로 보낸다(judge-llm.js, 삽입 위치 추론 gap-inference-agent.js 도 같다).
+// VLM 요청은 system 없이 content 가 배열이다. 요청 종류는 마지막 user 입력의 틀(prompts/unified-router·silence-judge·deixis-judge 의
+// build*Input, gap-inference-agent.js buildGapInput)로 가린다.
 function readJudgeInput(parsedBody) {
   const messageList = Array.isArray(parsedBody?.messages) ? parsedBody.messages : [];
   if (messageList[0]?.role !== 'system' || typeof messageList[0].content !== 'string') return null;
   const input = String(messageList.findLast((message) => message.role === 'user')?.content || '');
   if (input.includes('침묵 직전 발화:')) return { kind: 'silence', input };
   if (input.includes('지시 발화:')) return { kind: 'deixis', input };
+  if (input.includes('선택(JSON 한 줄):')) return { kind: 'gap', input };
   if (input.includes('판단(JSON 한 줄):')) return { kind: 'router', input };
   return { kind: 'unknown', input };
+}
+
+function buildJudgeReply({ judge, gapVerdict }) {
+  if (judge.kind === 'router') return buildRouterReply({ input: judge.input, gapVerdict });
+  if (judge.kind === 'gap') return buildGapReply({ input: judge.input });
+  return STATIC_JUDGE_REPLY_MAP[judge.kind];
 }
 
 function parseJsonOrNull(text) {
@@ -80,6 +96,8 @@ export async function startMockServices({
 } = {}) {
   const state = {
     asrIndex: 0, asrStatus: 200, ttsStatus: 200, routerGapVerdict: 'O', callCountMap: { vlm: 0, judge: 0, asr: 0, tts: 0, embed: 0, ocr: 0 },
+    // 판정 LLM 주소로 온 요청(callCountMap.judge)을 종류별로 나눈 수. router 는 판단 묶음마다 한 번, gap 은 삽입 위치 추론이다.
+    judgeKindCountMap: { router: 0, silence: 0, deixis: 0, gap: 0 },
     ocrMeanScoreList: [0.95], ocrStatus: 200,
   };
   const serverList = [];
@@ -94,7 +112,8 @@ export async function startMockServices({
     const judge = readJudgeInput(parseJsonOrNull(prompt));
     if (!judge) return false;
     state.callCountMap.judge += 1;
-    const reply = judge.kind === 'router' ? buildRouterReply({ input: judge.input, gapVerdict: state.routerGapVerdict }) : STATIC_JUDGE_REPLY_MAP[judge.kind];
+    state.judgeKindCountMap[judge.kind] = (state.judgeKindCountMap[judge.kind] || 0) + 1;
+    const reply = buildJudgeReply({ judge, gapVerdict: state.routerGapVerdict });
     if (!reply) { sendJson(response, 500, { error: `모르는 판정 요청(${judge.kind})` }); return true; }
     sendJson(response, 200, { choices: [{ message: { content: JSON.stringify(reply) } }] });
     return true;
@@ -155,7 +174,6 @@ export async function startMockServices({
       SEEON_TTS_URL: `${ttsOrigin}/tts`,
       SEEON_TTS_LONG_URL: `${ttsOrigin}/tts-long`,
       SEEON_EMBED_URL: `${embedOrigin}/embed`,
-      SEEON_VLM_FALLBACK_ENABLED: 'false',
     },
     state,
     setAsrStatus: (status) => { state.asrStatus = status; },

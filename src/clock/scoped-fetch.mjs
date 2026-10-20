@@ -1,7 +1,7 @@
 import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 
-// judge 는 탐지 단계 LLM 판정(통합 라우터·무발화·지시 판정)이 GPU 서버로 보낸 호출이다. Bedrock 으로 넘어간 판정은 bedrock 에 든다.
-// ocr 은 슬라이드 전사 OCR(SEEON_SLIDE_TEXT_BACKEND=ocr)이 임베딩 서비스의 /ocr 로 보낸 호출이다.
+// judge 는 GPU 판정 LLM 으로 보낸 호출이다(탐지 판정: 통합 라우터·무발화·지시 판정, 삽입 위치 추론). 판정 백엔드를 bedrock 으로 고른
+// 판정은 bedrock 에 든다. ocr 은 임베딩 서비스의 /ocr 로 보낸 호출이다(슬라이드 전사 백엔드 ocr, 수치 해설의 화면 글자 근거).
 export const SERVICE_MAP = { vlm: 'vlm', judge: 'judge', asr: 'asr', tts: 'tts', embed: 'embed', ocr: 'ocr', bedrock: 'bedrock', other: 'other' };
 
 const BEDROCK_HOST_PATTERN = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
@@ -22,8 +22,6 @@ function toOriginPath(urlText) {
   return `${url.origin}${url.pathname}`;
 }
 
-const stripUsPrefix = (modelId) => String(modelId || '').replace(/^us\./, '');
-
 const MODEL_KEY_BY_SERVICE_MAP = { [SERVICE_MAP.vlm]: 'vlmModel', [SERVICE_MAP.judge]: 'judgeGpuModel' };
 
 export function classifyServiceUrl({ url, pipelineConfig }) {
@@ -41,16 +39,13 @@ export function classifyServiceUrl({ url, pipelineConfig }) {
   if (matched) {
     const service = matched[1];
     const modelKey = MODEL_KEY_BY_SERVICE_MAP[service];
-    return { service, modelId: modelKey ? pipelineConfig[modelKey] ?? null : null, isVlmFallback: false };
+    return { service, modelId: modelKey ? pipelineConfig[modelKey] ?? null : null };
   }
   if (BEDROCK_HOST_PATTERN.test(target.hostname)) {
     const rawModelId = target.pathname.match(BEDROCK_MODEL_PATH_PATTERN)?.[1];
-    const modelId = rawModelId ? decodeURIComponent(rawModelId) : null;
-    const isVlmFallback = Boolean(modelId && pipelineConfig.vlmFallbackModelId
-      && stripUsPrefix(modelId) === stripUsPrefix(pipelineConfig.vlmFallbackModelId));
-    return { service: SERVICE_MAP.bedrock, modelId, isVlmFallback };
+    return { service: SERVICE_MAP.bedrock, modelId: rawModelId ? decodeURIComponent(rawModelId) : null };
   }
-  return { service: SERVICE_MAP.other, modelId: null, isVlmFallback: false };
+  return { service: SERVICE_MAP.other, modelId: null };
 }
 
 // 제품 judge-llm.js 는 OpenAI chat 메시지의 content 를 모두 글 한 덩어리(문자열)로 보내고, vlm-gateway.js 는 이미지가 없는
@@ -73,7 +68,7 @@ export function classifyServiceRequest({ url, body, pipelineConfig }) {
   const isSharedJudgeUrl = classified.service === SERVICE_MAP.vlm && Boolean(pipelineConfig.judgeGpuUrl)
     && toOriginPath(pipelineConfig.judgeGpuUrl) === toOriginPath(url);
   if (!isSharedJudgeUrl || !isJudgeRequestBody(body)) return classified;
-  return { service: SERVICE_MAP.judge, modelId: pipelineConfig.judgeGpuModel ?? null, isVlmFallback: false };
+  return { service: SERVICE_MAP.judge, modelId: pipelineConfig.judgeGpuModel ?? null };
 }
 
 function computePercentile(sortedList, percent) {
@@ -119,11 +114,11 @@ export function createScopedFetch({
   const callLog = [];
 
   async function scopedFetch(input, init) {
-    const { service, modelId, isVlmFallback } = classifyServiceRequest({ url: input, body: init?.body, pipelineConfig });
+    const { service, modelId } = classifyServiceRequest({ url: input, body: init?.body, pipelineConfig });
     const requestContext = requestContextStorage.getStore() || null;
     // errorName 은 시간 초과(TimeoutError)를 가르고, errorCode 는 연결 실패 원인(ECONNREFUSED 등)이다.
     const record = {
-      service, modelId, isVlmFallback, status: null, errorMessage: null, errorName: null, errorCode: null,
+      service, modelId, status: null, errorMessage: null, errorName: null, errorCode: null,
       startedAtElapsedMs: Math.round(clock.elapsedMs()), elapsedMs: null,
       channel: requestContext?.channel ?? null, requestSeq: requestContext?.seq ?? null,
     };

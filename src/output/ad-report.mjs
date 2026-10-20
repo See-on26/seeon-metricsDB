@@ -17,9 +17,8 @@ const buildCaptionKey = ({ ts, text }) => `${ts}|${text}`;
 // 새 필드를 더해도 여기에 넣기 전에는 기록에 실리지 않는다(Bedrock 토큰 bedrockApiKey 는 넣지 않는다).
 export const REPORT_MODEL_CONFIG_KEY_LIST = [
   'vlmUrl', 'vlmModel', 'asrUrl', 'asrLanguage', 'questionAsrLanguage', 'ttsUrl', 'ttsLongUrl', 'embedUrl',
-  'slideTextBackend', 'ocrUrl', 'gapSource', 'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend', 'judgeGpuUrl', 'judgeGpuModel',
-  'summaryModelId', 'summaryRewriteModelId', 'gapModelByModeMap', 'routerMode', 'isScaleEnabled',
-  'isVlmFallbackEnabled', 'vlmFallbackModelId', 'hasBedrockCredentials',
+  'slideTextBackend', 'isScreenTextGroundingEnabled', 'ocrUrl', 'gapSource', 'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend',
+  'judgeGpuUrl', 'judgeGpuModel', 'summaryModelId', 'summaryRewriteModelId', 'routerMode', 'isScaleEnabled', 'hasBedrockCredentials',
 ];
 
 // 제품 모델 설정에서 허용 목록의 이름만 골라 기록용으로 만든다. 서비스 주소에 넣은 사용자 정보(user:pass@)는 지운다.
@@ -115,7 +114,7 @@ export function buildAdReport({
     const type = normalizeType(record.source);
     const deixis = deixisByKey.get(buildCaptionKey(record)) || null;
     const serviceCallList = [...(record.callList || []), ...(record.gap?.callList || []), ...(record.tts?.callList || [])]
-      .map(({ service, modelId, isVlmFallback, status, elapsedMs }) => ({ service, modelId, isVlmFallback, status, elapsedMs }));
+      .map(({ service, modelId, status, elapsedMs }) => ({ service, modelId, status, elapsedMs }));
     const eventMediaMs = toEventMediaMs(record);
     const playedMediaMs = roundOrNull(adPlay.playedMediaMs);
     return {
@@ -134,8 +133,7 @@ export function buildAdReport({
       gap: record.gap ? { source: record.gap.source, reason: record.gap.reason, gapIndex: record.gap.gapIndex, candidateCount: record.gap.candidateCount } : null,
       // isPrefetched: 재생 차례 전에 미리 합성했는지, synthMs: 합성에 걸린 시간, waitMs: 차례가 온 뒤 소리를 기다린 시간(그만큼 무음).
       tts: record.tts ? { isPrefetched: !record.tts.isOnDemand, synthMs: roundOrNull(record.tts.elapsedMs), waitMs: roundOrNull(record.ttsWaitMs) } : null,
-      serviceCallList, isVlmFallback: serviceCallList.some((call) => call.isVlmFallback),
-      wavFile: adFileByRef.get(adPlay.captionSeq) ?? null,
+      serviceCallList, wavFile: adFileByRef.get(adPlay.captionSeq) ?? null,
     };
   });
 
@@ -167,7 +165,8 @@ export function buildAdReport({
     },
     adList, droppedList,
     timeline: pieceList.map((piece) => ({ ...piece, outStartMs: Math.round(piece.outStartMs), outEndMs: Math.round(piece.outEndMs) })),
-    // judgeSourceCountMap: 탐지 판정기(router·silence·deixis)마다 답한 곳(gpu·bedrock)·실패(error) 수. GPU 판정 호출의 지연은 serviceMap.judge 에 있다.
+    // judgeSourceCountMap: 탐지 판정기(router·silence·deixis)마다 판정 호출을 답한 곳(gpu·bedrock)·실패(error) 수(router 는 판단 묶음마다 부른 호출의 합).
+    // GPU 판정 LLM 호출(탐지 판정·삽입 위치 추론)의 수·지연은 serviceMap.judge 에 있다.
     // triggerAnalyzerCountMap: main 트리거가 전사마다 쓴 분석기(kiwi·english, 한국어를 Kiwi 없이 뽑으면 rule) 수.
     // slideText: 슬라이드 전사 출처(ocr·vlm)와 VLM 으로 넘긴 이유 수(summarizeSlideTextRecordList).
     stats: {

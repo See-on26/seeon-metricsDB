@@ -32,7 +32,7 @@ export function buildReportConfig({ job, pipelineConfig, runConcurrency = null }
 
 // 영상 하나: 준비(ffprobe·레벨·조각·프레임 스트림) → 제품 부팅(Kiwi 준비까지) → 세션(가상 시계) → AD wav 저장 → mp3 합성 → JSON(마지막에 써서 완료 표시).
 // 기반 문제(화면 입력 실패·서비스 장애·세션 종료 실패)로 불완전한 결과는 mp3·JSON(isComplete=false, 사유) 을 남긴 뒤 실패로 던진다.
-// 다시 돌리면 그 영상을 다시 처리한다. 부하로 생기는 품질 저하(시간 초과·판정 대체 등)는 완료로 두고 warningList 에 남긴다.
+// 다시 돌리면 그 영상을 다시 처리한다. 부하로 생기는 품질 저하(시간 초과·판정 실패 등)는 완료로 두고 warningList 에 남긴다.
 // runConcurrency 는 이번 실행의 동시 수로, 결과 JSON 에 남긴다.
 export async function runVideoJob({ job, outDir, runConcurrency = null, onProgress = () => {}, log = console, openFrameReader = openSampleFrameReader }) {
   const realStartedAt = performance.now();
@@ -108,7 +108,7 @@ export async function runVideoJob({ job, outDir, runConcurrency = null, onProgre
   const slideTextHealth = { slideTextBackend: pipelineConfig.slideTextBackend, slideText: report.stats.slideText };
   const incompleteReasonList = buildIncompleteReasonList({ sessionResult, callLog, ...slideTextHealth });
   const warningList = buildWarningList({
-    callLog, judgeSourceCountMap, judgeBackend: pipelineConfig.judgeBackend, sessionResult, swallowedErrorCountMap, incompleteReasonList, ...slideTextHealth,
+    callLog, judgeSourceCountMap, sessionResult, swallowedErrorCountMap, incompleteReasonList, ...slideTextHealth,
   });
   // 공장 버전·반복 회차는 제품 버전 바로 뒤에 둔다(재실행 때 건너뛸지 견주는 값).
   const finalReport = {

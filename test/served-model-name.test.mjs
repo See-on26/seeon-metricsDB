@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { listModelNameProblems, fetchServedModelIdList, inspectGpuServices, runPreflight } from '../src/runner/preflight.mjs';
+import { MODE_MAP } from '../src/product/core-modules.mjs';
 
 // GPU 실서비스 포트(8801–8805)는 쓰지 않는다. 가짜 목록을 주는 대역이나 빈 포트에 띄운 로컬 서버만 쓴다.
 const GEMMA = 'gemma-4-26b-a4b-qat';
@@ -40,13 +41,31 @@ test('서빙 이름: 설정 이름이 서버 목록에 있으면 문제가 없�
   assert.match(noVlmModel[0], /^판정 /);
 });
 
-test('서빙 이름: 판정 백엔드가 bedrock 이거나 판정 GPU 주소가 없으면 판정 주소는 보지 않는다', async () => {
-  for (const judgeConfig of [{ judgeBackend: 'bedrock' }, { judgeGpuUrl: '' }]) {
+test('서빙 이름: 판정 백엔드가 bedrock 이어도 삽입 위치 추론을 부르는 모드(지연 있음, 기본 균형 모드)면 판정 주소의 이름을 본다', async () => {
+  for (const mode of [undefined, MODE_MAP.delayed, MODE_MAP.listening]) {
     const { fetchedUrlList, fetchModelIdList } = recordFetch(['qwen3.5-9b']);
-    const problemList = await listModelNameProblems({ pipelineConfig: { ...GPU_JUDGE_CONFIG, ...judgeConfig }, fetchModelIdList });
+    const problemList = await listModelNameProblems({ pipelineConfig: { ...GPU_JUDGE_CONFIG, judgeBackend: 'bedrock' }, mode, fetchModelIdList });
+    assert.deepEqual(fetchedUrlList, [VLM_URL, JUDGE_URL], `mode=${mode}`);
+    assert.equal(problemList.length, 2);
+    assert.match(problemList[1], /^판정 127\.0\.0\.1:18805 에 모델 /);
+  }
+});
+
+test('서빙 이름: 판정 GPU 주소가 없거나, 지연이 없는 모드(삽입 위치 추론 없음)에서 판정 백엔드가 bedrock 이면 판정 주소는 보지 않는다', async () => {
+  const caseList = [
+    { judgeConfig: { judgeGpuUrl: '' }, mode: MODE_MAP.delayed },
+    { judgeConfig: { judgeBackend: 'bedrock' }, mode: MODE_MAP.realtimeSic },
+    { judgeConfig: { judgeBackend: 'bedrock' }, mode: MODE_MAP.realtimeMix },
+  ];
+  for (const { judgeConfig, mode } of caseList) {
+    const { fetchedUrlList, fetchModelIdList } = recordFetch(['qwen3.5-9b']);
+    const problemList = await listModelNameProblems({ pipelineConfig: { ...GPU_JUDGE_CONFIG, ...judgeConfig }, mode, fetchModelIdList });
     assert.deepEqual(fetchedUrlList, [VLM_URL]);
     assert.deepEqual(problemList, [`VLM 127.0.0.1:18801 에 모델 ${GEMMA} 이 없다(서버: qwen3.5-9b) — ${ENV_HINT}`]);
   }
+  const gpuRealtime = recordFetch(['qwen3.5-9b']);
+  await listModelNameProblems({ pipelineConfig: GPU_JUDGE_CONFIG, mode: MODE_MAP.realtimeSic, fetchModelIdList: gpuRealtime.fetchModelIdList });
+  assert.deepEqual(gpuRealtime.fetchedUrlList, [VLM_URL, JUDGE_URL], 'gpu 판정 백엔드는 탐지 판정에 판정 주소를 쓴다');
 });
 
 test('서빙 이름: VLM 과 판정이 같은 호스트·포트면 목록은 한 번만 받고 두 이름을 모두 본다', async () => {

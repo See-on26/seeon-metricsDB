@@ -50,7 +50,7 @@ function buildCaption(harness, { text, eventVideoTimeMs, narrationClass = 'deixi
     rationale: { utterance: '이 그래프를 보시면', subKind: null, summary: '근거 표현=이 그래프' },
   };
 }
-const requestContext = { seq: 9, channel: 'pipeline-deixis', callList: [{ service: 'vlm', modelId: 'qwen', isVlmFallback: false }] };
+const requestContext = { seq: 9, channel: 'pipeline-deixis', callList: [{ service: 'vlm', modelId: 'gemma' }] };
 const deliverAt = (harness, atMs, captionOption) => {
   const payload = buildCaption(harness, captionOption);
   harness.clock.setTimeout(() => harness.outputGlue.handleCaptionEvent({ payload, requestContext }), atMs);
@@ -61,8 +61,8 @@ const dropReportList = (harness) => harness.bridge.sendList.filter(({ channel })
 const ttsCallList = (harness) => harness.bridge.invokeList.filter(({ channel }) => channel === 'pipeline-tts');
 const listDrop = (harness) => harness.outputGlue.getDropRecordList().map(({ text, reason, factoryReason }) => [text, reason, factoryReason]);
 
-test('지시 해설은 틈 후보 중 Bedrock 이 고른 자리에 넣고, 재생헤드가 닿으면 원음을 멈추고 튼다', async () => {
-  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '문장 끝' }) } });
+test('지시 해설은 틈 후보 중 GPU 판정 LLM 이 고른 자리에 넣고, 재생헤드가 닿으면 원음을 멈추고 튼다', async () => {
+  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'gpu', reason: '문장 끝' }) } });
   harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '매출이 늘었습니다.' });
   harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 14000, kind: 'pause', silenceMs: 600, text: '그리고' });
   deliverAt(harness, 16000, { text: '막대 그래프 상승 구간', eventVideoTimeMs: 12000 });
@@ -73,7 +73,7 @@ test('지시 해설은 틈 후보 중 Bedrock 이 고른 자리에 넣고, 재�
   assert.equal(gapCall.payload.narrationType, 'deixis');
   const [record] = harness.outputGlue.getCaptionRecordList();
   assert.equal(record.insertVideoTimeMs, 12500);
-  assert.equal(record.gap.source, 'bedrock');
+  assert.equal(record.gap.source, 'gpu');
   assert.equal(record.callList[0].service, 'vlm');
   assert.equal(record.audioDurationMs, 1500);
   const [adPlay] = harness.outputGlue.getAdPlayList();
@@ -111,6 +111,22 @@ test('꺼진 분류(화자 식별)는 대기 줄에서 feature_off 로 버리고
   const report = harness.bridge.sendList.find(({ channel }) => channel === 'pipeline-narration-dropped');
   assert.equal(report.payload.reason, 'feature_off');
   assert.equal(report.payload.text, '발표자 홍길동');
+});
+
+test('재생 차례가 온 자동 해설이 트리거에서 10초 넘게 지났으면 듣고 있는 지연 재생 위치로 재어 stale 로 버리고 main 에 알린다', async () => {
+  const harness = setupOutput();
+  // 지연 모드는 10초 늦게 듣는다. 22초에 도착한 두 해설은 자리가 이미 지나 바로 차례가 오고, 그때 재생 위치는 약 12초다.
+  // 트리거 1초는 11초 지나 버리고, 트리거 3초는 9초라 튼다(라이브 위치 22초로 재면 둘 다 10초를 넘는다).
+  deliverAt(harness, 22000, { text: '트리거 11초 지난 해설', eventVideoTimeMs: 1000, narrationClass: 'silence_based', source: 'visual_description' });
+  deliverAt(harness, 22000, { text: '트리거 9초 지난 해설', eventVideoTimeMs: 3000, narrationClass: 'silence_based', source: 'visual_description' });
+  await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length + harness.outputGlue.getDropRecordList().length === 2 });
+  assert.deepEqual(listDrop(harness), [['트리거 11초 지난 해설', 'stale', null]]);
+  assert.deepEqual(dropReportList(harness).map(({ text, reason }) => [text, reason]), [['트리거 11초 지난 해설', 'stale']]);
+  const [adPlay] = harness.outputGlue.getAdPlayList();
+  const recordByText = new Map(harness.outputGlue.getCaptionRecordList().map((record) => [record.text, record]));
+  assert.equal(adPlay.captionSeq, recordByText.get('트리거 9초 지난 해설').captionSeq);
+  assert.ok(harness.bridge.sendList.some(({ channel, payload }) => channel === 'pipeline-debug' && payload.reason === '트리거 뒤 10초 지남 — 지나간 내용이라 버림'));
+  assert.deepEqual(harness.warnList, []);
 });
 
 test('TTS 가 실패하면 재생기가 소리 없이 건너뛰고 tts_failed 로 main 에 알리며, 멈췄던 지연 재생은 다시 흐른다', async () => {
@@ -165,7 +181,7 @@ const WATCH_STACK_TRACE_LIMIT = 50;
 // 지연 버퍼·대기 줄·체류·지시 후보·진행 중 전환(10초 상한)·TTS 미리 만들기를 모두 쓰는 장면.
 // 해설이 끝난 뒤 따라잡기 갈래(caption-narrator.js _startCatchup)까지 지난다.
 async function runWatchedScenario() {
-  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '' }) } });
+  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'gpu', reason: '' }) } });
   harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '끝.' });
   deliverAt(harness, 16000, { text: '해설', eventVideoTimeMs: 12000 });
   harness.ctx.core.candidateScheduler.submit({ source: 'speech', utterance: '이것', trigger: '이것', captureTs: harness.clock.nowPerf(), videoTimeMs: 0 });
@@ -271,7 +287,7 @@ test('전환 고지는 체류 판정을 기다리고, 미달이면 고지와 딸
 });
 
 test('체류를 채운 전환 고지가 틈을 고르면 딸린 사진 묘사는 그 바로 뒤(+1ms)에 붙어 고지 다음에 재생된다', async () => {
-  const harness = setupOutput({ isPageTransitionIncluded: true, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '전환 뒤 첫 쉼' }) } });
+  const harness = setupOutput({ isPageTransitionIncluded: true, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'gpu', reason: '전환 뒤 첫 쉼' }) } });
   harness.ctx.core.slideDwellGate.enter({ label: '2' });
   harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 2500, kind: 'complete', silenceMs: 500, text: '넘어가겠습니다.' });
   deliverAt(harness, 3500, { text: '2번 슬라이드, 매출 추이', eventVideoTimeMs: 400, narrationClass: 'page_transition', source: 'page-transition', slideLabel: '2' });
@@ -290,7 +306,7 @@ test('체류를 채운 전환 고지가 틈을 고르면 딸린 사진 묘사는
 });
 
 test('전환 고지의 삽입 시각이 정해지면 진행 중인 전환을 풀고, 그동안 기다린 화자 안내는 그 고지 바로 뒤(+1ms)로 미룬다', async () => {
-  const harness = setupOutput({ isPageTransitionIncluded: true, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '전환 뒤 첫 쉼' }) } });
+  const harness = setupOutput({ isPageTransitionIncluded: true, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'gpu', reason: '전환 뒤 첫 쉼' }) } });
   const { core } = harness.ctx;
   core.slideDwellGate.enter({ label: '2' });
   core.pendingTransitions.open({ slideLabel: '2' });
@@ -307,7 +323,7 @@ test('전환 고지의 삽입 시각이 정해지면 진행 중인 전환을 풀
 });
 
 test('틈 추론이 실패하면 트리거 지점에 넣고 실패한 추론 결과를 기록에 남긴다', async () => {
-  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => { throw new Error('bedrock 끊김'); } } });
+  const harness = setupOutput({ handlerMap: { 'pipeline-gap': async () => { throw new Error('GPU 판정 LLM 끊김'); } } });
   harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '매출이 늘었습니다.' });
   deliverAt(harness, 16000, { text: '막대 그래프 상승 구간', eventVideoTimeMs: 12000 });
   await harness.clock.runUntil({ isDone: () => harness.outputGlue.getAdPlayList().length === 1 });
@@ -465,8 +481,8 @@ test('재생한 캡션은 wav 를 복사 없이 참조로 두고, 버린 캡션�
   assert.equal(harness.outputGlue.getDropRecordList()[0].reason, 'feature_off');
 });
 
-test('배수 상한으로 멈춘 뒤 늦게 온 캡션은 틈 추론(Bedrock)을 부르지 않고 트리거 자리 기준으로 버린다(제품은 정지 때 지연 버퍼를 비운다)', async () => {
-  const harness = setupOutput({ mediaDurationMs: 20000, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'bedrock', reason: '문장 끝' }) } });
+test('배수 상한으로 멈춘 뒤 늦게 온 캡션은 틈 추론(GPU 판정 LLM)을 부르지 않고 트리거 자리 기준으로 버린다(제품은 정지 때 지연 버퍼를 비운다)', async () => {
+  const harness = setupOutput({ mediaDurationMs: 20000, handlerMap: { 'pipeline-gap': async () => ({ isOk: true, gapIndex: 0, source: 'gpu', reason: '문장 끝' }) } });
   harness.ctx.core.gapCandidateStore.add({ videoTimeMs: 12500, kind: 'complete', silenceMs: 400, text: '매출이 늘었습니다.' });
   await harness.clock.runUntil({ isDone: () => harness.clock.elapsedMs() >= 16000 });
   harness.outputGlue.noteSessionEnd({ isDrainTimedOut: true });
