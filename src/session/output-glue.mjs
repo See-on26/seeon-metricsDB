@@ -258,7 +258,7 @@ export function createOutputGlue({ ctx }) {
     const captionCaptureMs = handleCaption(payload);
     const entry = { ...toNarrationEntry(payload, record), eventTimeMs: captionCaptureMs };
     // 소리는 아직 없다. 재생 차례가 가까우면 미리 만들고, 아니면 대기 줄이 고를 때 만든다.
-    // 세션을 멈춘 뒤 온 캡션은 어차피 버리므로 합성을 시작하지 않는다(제품은 합성을 시작했다가 버린다 — logic-map 편차).
+    // 세션을 멈춘 뒤 온 캡션은 어차피 버리므로 합성을 시작하지 않는다(제품은 합성을 시작했다가 버린다).
     if (!isEnded) narrationAudio.register(entry);
     if (isImmediateCaption(payload)) {
       leaderHandle?.settle({ status: LEADER_STATUS_MAP.unscheduled });

@@ -243,7 +243,7 @@ export function createSessionSimulator({ clock, bridge, video, prep, options, wo
     outputGlue.noteSessionEnd({ isDrainTimedOut: isTimedOut });
     // stopExperiment 정리. 세션은 배수가 끝나야(연결 작업이 다 빠져야) 닫히고, 상한에 닿으면 실험실처럼 그 자리에서 닫힌다.
     // 재생하지 못한 해설은 재생 사슬 정리(playbackChain.stop)가 제품처럼 stopped 로 main 에 알린다. 제품은 재생기 정지가 맨 앞이지만
-    // 아래는 모두 동기 구간이라 결과는 같고 버린 기록·알림의 순서만 다를 수 있다(logic-map 편차 17).
+    // 아래는 모두 동기 구간이라 결과는 같고 버린 기록·알림의 순서만 다를 수 있다.
     const { core, state } = ctx;
     stopFrameCapture();
     silenceGlue.stop();
