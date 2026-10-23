@@ -8,7 +8,7 @@ import { readWavInfo } from '../media/wav.mjs';
 import { redactUrlCredential } from '../util/redact-url-credential.mjs';
 import { GAP_SAFETY_MS, CAPTION_SOURCE_TRANSITION } from './renderer-constants.mjs';
 
-// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
+// 행 번호는 seeon-meet origin/production 0a17718 기준이다.
 
 // 버린 해설의 사유(reason)는 늘 제품 사유(QUEUE_DROP_REASON_MAP)이고 main 에도 그 사유로 알린다.
 // 공장은 세션을 멈춰 버린 해설(stopped)만 영상 끝(D) 기준으로 더 나눠 factoryReason 에 남긴다.
@@ -16,20 +16,20 @@ import { GAP_SAFETY_MS, CAPTION_SOURCE_TRANSITION } from './renderer-constants.m
 // drainTimeout: 배수 상한에 닿아 멈출 때 영상 안 자리(삽입 시각 ≤ D)였던 해설 — 더 기다렸으면 들렸을 것이다.
 export const FACTORY_END_REASON_MAP = { afterEnd: 'after_end', drainTimeout: 'drain_timeout' };
 
-// main.js:1692-1694 toNarrationType
+// main.js:1720-1722 toNarrationType
 const toNarrationType = ({ source }) => (source === CAPTION_SOURCE_TRANSITION ? NARRATION_TYPE_MAP.pageTransition : source);
 
-// main.js:1777-1782 isTransitionFollower. 사진 단독 묘사처럼 전환 고지에 딸려 오는 캡션.
+// main.js:1805-1810 isTransitionFollower. 사진 단독 묘사처럼 전환 고지에 딸려 오는 캡션.
 const isTransitionFollower = (payload) => payload.source !== CAPTION_SOURCE_TRANSITION
   && payload.narrationClass === NARRATION_CLASS_MAP.pageTransition && Boolean(payload.slideLabel);
 
-// main.js:1784-1786 isSpeakerCaption
+// main.js:1812-1814 isSpeakerCaption
 const isSpeakerCaption = (payload) => payload.narrationClass === NARRATION_CLASS_MAP.speakerIdentity;
 
-// 재생기에 넘길 소리. 제품처럼 응답 버퍼에서 그 구간만 잘라 낸 ArrayBuffer 다(main.js:165).
+// 재생기에 넘길 소리. 제품처럼 응답 버퍼에서 그 구간만 잘라 낸 ArrayBuffer 다(main.js:167).
 const toWavArrayBuffer = (wavData) => (wavData ? wavData.buffer.slice(wavData.byteOffset, wavData.byteOffset + wavData.byteLength) : null);
 
-// main.js:1900-1905 toNarrationEntry. 공장은 기록과 잇는 captionSeq 를 더 싣는다(main 에 보내는 알림에는 넣지 않는다).
+// main.js:1928-1933 toNarrationEntry. 공장은 기록과 잇는 captionSeq 를 더 싣는다(main 에 보내는 알림에는 넣지 않는다).
 const toNarrationEntry = (payload, record) => ({
   narrationClass: payload.narrationClass, slideLabel: payload.slideLabel ?? null, source: payload.source, text: payload.text, ts: payload.ts,
   captionSeq: record.captionSeq,
@@ -67,7 +67,7 @@ export function createOutputGlue({ ctx }) {
     return record;
   }
 
-  // main.js:160-166 synthesizeEntryAudio. 합성 실패는 null 로 받아 재생기가 tts_failed 로 버린다.
+  // main.js:162-168 synthesizeEntryAudio. 합성 실패는 null 로 받아 재생기가 tts_failed 로 버린다.
   // 공장은 결과를 기록에 붙인다: mp3 에 넣을 wav(복사 없이 참조), 성공 여부, 재생 차례가 와서 만든 것인지, 걸린 시간, 외부 호출.
   // 합성은 렌더러 작업으로 세어 배수가 그 끝을 기다린다. 세션을 멈춘 뒤 시작된 합성(정지 정리 중 미리 만들기 자리가 넘어간 것)은
   // 제품처럼 부르되 처음부터 끝나지 않은 합성(isPendingAtStop)으로 두고 결과를 기록하지 않는다.
@@ -102,11 +102,11 @@ export function createOutputGlue({ ctx }) {
     return promise;
   }
 
-  // main.js:168 narrationAudio. 재생 차례가 가까운 2개는 미리 합성하고, 그보다 뒤는 앞 해설이 재생·버려질 때 차례로 만든다.
+  // main.js:170 narrationAudio. 재생 차례가 가까운 2개는 미리 합성하고, 그보다 뒤는 앞 해설이 재생·버려질 때 차례로 만든다.
   const narrationAudio = new NarrationAudioPrefetcher({ synthesize: synthesizeEntryAudio });
   core.narrationAudio = narrationAudio;
 
-  // main.js:171 prepareAudio. 재생 차례가 온 해설의 소리를 받는다. 미리 만든 것이 없으면 지금 만들고, 그동안 지연 재생은 멈춰 있다
+  // main.js:173 prepareAudio. 재생 차례가 온 해설의 소리를 받는다. 미리 만든 것이 없으면 지금 만들고, 그동안 지연 재생은 멈춰 있다
   // (caption-narrator.js 가 합성 전에 회의를 멈춘다). 공장은 차례가 온 뒤 소리를 기다린 시간(그만큼 무음)을 기록에 남긴다.
   function prepareNarrationAudio(entry) {
     const record = recordBySeq.get(entry.captionSeq) ?? null;
@@ -134,7 +134,7 @@ export function createOutputGlue({ ctx }) {
     return isDrainTimedOut && isInsideVideo ? FACTORY_END_REASON_MAP.drainTimeout : FACTORY_END_REASON_MAP.afterEnd;
   }
 
-  // main.js:1907-1925 reportUnplayedNarration. 사용자가 듣지 못한 해설은 모든 경로가 여기로 와 main 이 "말했음" 기록
+  // main.js:1935-1953 reportUnplayedNarration. 사용자가 듣지 못한 해설은 모든 경로가 여기로 와 main 이 "말했음" 기록
   // (간격 억제·중복·재설명 금지·맥락 저장소·무발화 게이트)을 되돌리게 알리고, 미리 만들던 소리 자리를 다음 해설에 넘긴다.
   function reportUnplayedNarration({ entry, reason, waitedMs = null, detailSuffix = '', insertVideoTimeMs = null }) {
     narrationAudio.discard(entry);
@@ -156,22 +156,22 @@ export function createOutputGlue({ ctx }) {
     });
   }
 
-  // main.js:1927-1930 handleNarrationDrop. 재생 대기 줄에서 버려지거나 멈춘 재생기가 버린 해설.
+  // main.js:1955-1958 handleNarrationDrop. 재생 대기 줄에서 버려지거나 멈춘 재생기가 버린 해설.
   function handleNarrationDrop({ entry, reason, waitedMs = null }) {
     reportUnplayedNarration({ entry, reason, waitedMs });
   }
 
-  // main.js:1254-1258 handleCaption. 로그 카드는 없고(narrationClass 는 카드에만 쓰여 받지 않는다), 전환 고지 문장 보관과 삽입 기준 시각만 남는다.
+  // main.js:1270-1274 handleCaption. 로그 카드는 없고(narrationClass 는 카드에만 쓰여 받지 않는다), 전환 고지 문장 보관과 삽입 기준 시각만 남는다.
   function handleCaption({ text, source, eventVideoTimeMs = null }) {
     if (source === CAPTION_SOURCE_TRANSITION) state.lastScreenNarration = text;
     return Number.isFinite(eventVideoTimeMs) ? eventVideoTimeMs : ctx.videoTimeMs();
   }
 
-  // main.js:1735-1775 resolveInsertionTimeMs
-  // 제품은 틈 후보를 collectInsertionGapList(1702-1711)로 모으고 고른 자리를 snapInsertionToSilence(1718-1733)로 맞추는데,
+  // main.js:1763-1803 resolveInsertionTimeMs
+  // 제품은 틈 후보를 collectInsertionGapList(1730-1739)로 모으고 고른 자리를 snapInsertionToSilence(1746-1761)로 맞추는데,
   // 틈 후보 출처가 asr 이면 둘 다 ASR 후보 목록·목표 자리를 그대로 돌려준다(audio-gap-candidates.js isAudioGapActive).
   // 공장은 asr 만 옮겼다(audio 는 세션 시작 전에 막는다). 그래서 여기서는 ASR 후보 저장소를 바로 읽고 고른 자리를 그대로 쓴다.
-  // 제품은 정지 때 지연 버퍼를 비워(main.js:433-444) 그 뒤 캡션은 틈 추론 없이 트리거 자리로 돌아간다.
+  // 제품은 정지 때 지연 버퍼를 비워(main.js:435-446) 그 뒤 캡션은 틈 추론 없이 트리거 자리로 돌아간다.
   // 공장은 멈춘 버퍼 객체가 남으므로 정지 여부(isEnded)로 같은 길을 타 어차피 버릴 캡션에 판정 LLM(삽입 위치 추론)을 부르지 않는다.
   async function resolveInsertionTimeMs({ payload, captionCaptureMs, record }) {
     const { delayBuffer } = core;
@@ -210,7 +210,7 @@ export function createOutputGlue({ ctx }) {
     return chosen.videoTimeMs;
   }
 
-  // main.js:1877-1898 scheduleNarration
+  // main.js:1905-1926 scheduleNarration
   function scheduleNarration({ entry, captionCaptureMs }) {
     // 세션을 멈춘 뒤 도착한 해설. 제품은 정지 때 지연 버퍼·삽입 감시를 비우므로 이 해설은 보류 게이트 → 멈춘 재생기로 가
     // stopped 로 버려진다(caption-narrator.js queueCaptionList). 공장은 같은 사유로 바로 알린다.
@@ -239,7 +239,7 @@ export function createOutputGlue({ ctx }) {
     narrationScheduler.schedule({ entry, captionCaptureMs });
   }
 
-  // main.js:1788-1828 emitCaption. entry 에 captionSeq 를 실어 합성·대기 줄 드롭·재생 시작을 기록과 잇는다.
+  // main.js:1816-1856 emitCaption. entry 에 captionSeq 를 실어 합성·대기 줄 드롭·재생 시작을 기록과 잇는다.
   async function emitCaption(payload, { leaderHandle = null, record }) {
     const isFollower = isTransitionFollower(payload);
     const isSpeaker = isSpeakerCaption(payload);
@@ -280,7 +280,7 @@ export function createOutputGlue({ ctx }) {
     scheduleNarration({ entry, captionCaptureMs: insertVideoTimeMs });
   }
 
-  // main.js:1830-1836 emitCaptionSafely. 제품의 console.warn 대신 trackTask 가 경고를 남기고 배수 판정용으로 센다.
+  // main.js:1858-1864 emitCaptionSafely. 제품의 console.warn 대신 trackTask 가 경고를 남기고 배수 판정용으로 센다.
   function emitCaptionSafely(payload, options) {
     ctx.trackTask(emitCaption(payload, options).catch((error) => {
       options.leaderHandle?.settle({ status: LEADER_STATUS_MAP.unscheduled });
@@ -289,7 +289,7 @@ export function createOutputGlue({ ctx }) {
     }), 'caption');
   }
 
-  // main.js:1838-1860 applyCaption. 전환 고지의 삽입 시각이 정해지면 딸린 사진 묘사(transitionOrderGate)와
+  // main.js:1866-1888 applyCaption. 전환 고지의 삽입 시각이 정해지면 딸린 사진 묘사(transitionOrderGate)와
   // 기다리던 화자 안내(pendingTransitions)를 함께 풀어 준다.
   function applyCaption(payload, { record }) {
     const isTransition = payload.source === CAPTION_SOURCE_TRANSITION;
@@ -315,7 +315,7 @@ export function createOutputGlue({ ctx }) {
   }
 
   return {
-    // main.js:1862-1867 onPipelineEvent 의 caption 갈래
+    // main.js:1890-1895 onPipelineEvent 의 caption 갈래
     handleCaptionEvent({ payload, requestContext }) {
       if (payload?.type !== 'caption') return;
       applyCaption(payload, { record: registerCaption(payload, requestContext) });

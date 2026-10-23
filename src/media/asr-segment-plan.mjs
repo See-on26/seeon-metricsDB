@@ -4,8 +4,8 @@ import {
 import { readLevelAt } from './audio-levels.mjs';
 import { VAD_SAMPLE_MS, ASR_VOICE_LEVEL_THRESHOLD, ASR_MIN_VOICED_MS, ASR_SILENCE_CUT_MS } from '../session/renderer-constants.mjs';
 
-// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
-// AsrSegmenter(코어 trigger/asr-segmenter.js:87-141)를 그대로 따른다. 제품은 미터 레벨을 getVoiceLevel 로 넘겨(main.js:961-972)
+// 행 번호는 seeon-meet origin/production 0a17718 기준이다.
+// AsrSegmenter(코어 trigger/asr-segmenter.js:87-141)를 그대로 따른다. 제품은 미터 레벨을 getVoiceLevel 로 넘겨(main.js:977-988)
 // 말소리 측정 갈래를 탄다. 공장의 레벨 목록은 같은 미터 레벨(AnalyserNode 바이트 RMS)을 100ms 격자로 미리 잰 것이다.
 // 조각 시작부터 100ms 마다 레벨을 보고, 무음 tick 마다 shouldCutSegment 로 자를지 정한다: 2.5초가 지난 뒤 끝 무음 400ms 면 자르고,
 // 조각 길이(segmentMs)가 찼을 때 말하는 중이면 낱말 사이 쉼 200ms 까지 기다린다. 쉼이 없으면 조각 길이 + 1.5초 타이머에 자른다.
