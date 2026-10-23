@@ -802,7 +802,7 @@ test('결과 설정: 결과를 바꾸는 모델·판정 백엔드·라우터·�
   });
   assert.deepEqual(Object.keys(resultConfig).sort(), [
     'bedrockModelId', 'delayMs', 'gapModelId', 'gapSource', 'isScaleEnabled', 'isScreenTextGroundingEnabled', 'judgeBackend', 'judgeGpuModel', 'judgeModelId',
-    'mode', 'routerMode', 'slideTextBackend', 'vlmModel',
+    'mode', 'routerMode', 'slideTextBackend', 'vlmMaxSoftTokens', 'vlmModel',
   ]);
   assert.deepEqual([resultConfig.mode, resultConfig.delayMs, resultConfig.vlmModel, resultConfig.judgeBackend], ['delayed', 10000, 'vlm-x', 'bedrock']);
   assert.equal(JSON.stringify(resultConfig).includes('secret'), false);
@@ -839,7 +839,7 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
   assert.equal(JSON.stringify(recordedConfig).includes('secret'), false);
   // 견주는 모델 항목은 기록된 modelConfig(허용 목록 모양)에 있고 값도 같다.
   const comparedModelKeyList = [
-    'vlmModel', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled', 'isScreenTextGroundingEnabled',
+    'vlmModel', 'vlmMaxSoftTokens', 'judgeBackend', 'judgeGpuModel', 'judgeModelId', 'bedrockModelId', 'routerMode', 'isScaleEnabled', 'isScreenTextGroundingEnabled',
     'slideTextBackend', 'gapSource',
   ];
   for (const key of comparedModelKeyList) {
@@ -864,6 +864,10 @@ test('재실행: 워커와 같은 기록 생성기(buildReportConfig·buildAdRep
     status: 'mismatch',
     mismatchList: [`결과 설정 judgeGpuModel ${recordedJudgeGpuModel} → judge-next`, `결과 설정 gapModelId ${recordedJudgeGpuModel} → judge-next`],
   });
+  // VLM 이미지 토큰 상한(해상도)을 정하면 그림을 읽는 해상도가 달라지므로 다른 결과다. 비운 기본은 서버 값이라 null 로 남는다.
+  assert.equal(recordedConfig.resultConfig.vlmMaxSoftTokens, null);
+  assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_VLM_MAX_SOFT_TOKENS: '1120' }).mismatchList,
+    ['결과 설정 vlmMaxSoftTokens null → 1120']);
   // 수치 해설의 화면 글자 근거를 끄면 해설 내용이 달라지므로 다른 결과다.
   assert.equal(recordedConfig.resultConfig.isScreenTextGroundingEnabled, true);
   assert.deepEqual(inspectWith({ AWS_BEARER_TOKEN_BEDROCK: 'other-token', SEEON_SCREEN_TEXT_GROUNDING: 'off' }).mismatchList,

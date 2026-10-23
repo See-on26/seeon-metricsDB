@@ -15,6 +15,8 @@ export function buildResultConfig({ pipelineConfig, mode = MODE_MAP.delayed }) {
     mode,
     delayMs,
     vlmModel: modelConfig.vlmModel ?? null,
+    // VLM 그림 한 장의 이미지 토큰 상한(해상도, SEEON_VLM_MAX_SOFT_TOKENS). 비우면 null 이고 서버에 띄운 값을 쓴다.
+    vlmMaxSoftTokens: modelConfig.vlmMaxSoftTokens ?? null,
     judgeBackend: modelConfig.judgeBackend ?? null,
     judgeGpuModel: modelConfig.judgeGpuModel ?? null,
     judgeModelId: modelConfig.judgeModelId ?? null,

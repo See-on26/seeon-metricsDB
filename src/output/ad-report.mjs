@@ -16,7 +16,7 @@ const buildCaptionKey = ({ ts, text }) => `${ts}|${text}`;
 // 기록에 남기는 모델·서비스 설정 이름. 제품 설정(readPipelineConfig)에서 비밀이 아닌 것만 고른 허용 목록이라, 제품이 키·토큰 같은
 // 새 필드를 더해도 여기에 넣기 전에는 기록에 실리지 않는다(Bedrock 토큰 bedrockApiKey 는 넣지 않는다).
 export const REPORT_MODEL_CONFIG_KEY_LIST = [
-  'vlmUrl', 'vlmModel', 'asrUrl', 'asrLanguage', 'questionAsrLanguage', 'ttsUrl', 'ttsLongUrl', 'embedUrl',
+  'vlmUrl', 'vlmModel', 'vlmMaxSoftTokens', 'asrUrl', 'asrLanguage', 'questionAsrLanguage', 'ttsUrl', 'ttsLongUrl', 'embedUrl',
   'slideTextBackend', 'isScreenTextGroundingEnabled', 'ocrUrl', 'gapSource', 'bedrockRegion', 'bedrockModelId', 'judgeModelId', 'judgeBackend',
   'judgeGpuUrl', 'judgeGpuModel', 'summaryModelId', 'summaryRewriteModelId', 'routerMode', 'isScaleEnabled', 'hasBedrockCredentials',
 ];
