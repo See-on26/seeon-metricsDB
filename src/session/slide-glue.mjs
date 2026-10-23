@@ -9,11 +9,11 @@ import {
 
 const LOCAL_EMBEDDING_WARNING = '[slide] GPU 임베딩 서버 미연결 — 로컬 그리드 임베딩으로 폴백(정확도 낮음, 고지는 유지)';
 
-// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
-// main.js 의 slideDwellGate 콜백(602-630)·samplePointingFrame(728-746)·detectSlideTransition(748-765)·
-// confirmSlideCandidate(767-813)·releasePendingTransition(815-818)·requestPageTransitionNarration(820-855)·
-// attachPointingMotion(1033-1053)·saveSlideFrameWithMark(1055-1063)·saveAnnotationSnapshot(1065-1077).
-// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:612, 812).
+// 행 번호는 seeon-meet origin/production 0a17718 기준이다.
+// main.js 의 slideDwellGate 콜백(604-632)·samplePointingFrame(740-758)·detectSlideTransition(760-777)·
+// confirmSlideCandidate(779-826)·releasePendingTransition(828-831)·requestPageTransitionNarration(833-871)·
+// attachPointingMotion(1049-1069)·saveSlideFrameWithMark(1071-1079)·saveAnnotationSnapshot(1081-1093).
+// 균형 모드는 선판정(isSpeculative)이 없어 체류를 채운 뒤에만 전환 고지를 만든다(main.js:614, 825).
 // 전환을 확정한 순간부터 고지의 삽입 시각이 정해질 때까지는 진행 중인 전환(pendingTransitions)이다. 화자 안내가 그 고지 뒤로 미뤄진다.
 export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   const { clock, bridge, state, core } = ctx;
@@ -101,6 +101,8 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
       return;
     }
     if (!decision.isNew && !decision.isRevisit) return;
+    // 슬라이드가 바뀌면 늘 변하는 칸도 달라지므로 가리킴 위치 찾기의 칸 변화 기록을 비워 15초 창을 다시 채운다.
+    core.pointingLocator.resetChangeHistory();
     const isRevisit = Boolean(decision.isRevisit);
     if (decision.isNew && buffer) {
       ctx.trackTask(bridge.invoke('pipeline-slide-text', { slideLabel: decision.label, buffer: new Uint8Array(buffer) }), 'slide-text');
@@ -119,7 +121,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   }
 
   // 확정 중에 온 첫 장 표시는 후보 게이트가 기억했다가 확정이 끝난 뒤 다음 표본에서 첫 장으로 확정한다.
-  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:705-726)는 없다. 억제 끝 시각은 제품 초기값 0 그대로다.
+  // ROI 가 전체 프레임으로 고정이라 ROI 세대 리셋·변경 억제(main.js:717-738)는 없다. 억제 끝 시각은 제품 초기값 0 그대로다.
   function detectSlideTransition({ imageData, ts }) {
     const verdict = core.histogramGate.sample({ imageData, ts });
     const candidate = core.slideCandidateGate.decide({ verdict, ts, suppressUntil: 0, isConfirming: state.isConfirmingSlide });
@@ -217,7 +219,7 @@ export function createSlideGlue({ ctx, readFrameAt, slideFrameDir }) {
   }
 
   return {
-    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:2125).
+    // 제품 setInterval(samplePointingFrame, 400) 과 같다(main.js:2153).
     start() {
       isStopped = false;
       samplerTimer = clock.setInterval(tickSampler, POINTING_SAMPLE_MS);

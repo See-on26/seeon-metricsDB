@@ -189,6 +189,40 @@ test('돌아온 슬라이드는 재방문으로 고지하고 글자 전사·base
   assert.deepEqual(harness.warnList, []);
 });
 
+// 가리킴 위치 찾기의 칸 변화 기록을 비운 영상 시각을 모은다.
+function spyChangeHistoryReset(harness) {
+  const resetAtList = [];
+  const { pointingLocator } = harness.ctx.core;
+  const resetChangeHistory = pointingLocator.resetChangeHistory.bind(pointingLocator);
+  pointingLocator.resetChangeHistory = () => {
+    resetAtList.push(harness.ctx.videoTimeMs());
+    resetChangeHistory();
+  };
+  return resetAtList;
+}
+
+test('새 슬라이드·재방문을 확정할 때마다 가리킴 위치 찾기의 칸 변화 기록(늘 변하는 칸 15초 창)을 비운다', async () => {
+  const embeddingAt = (timeMs) => (timeMs < 4000 || timeMs >= 8000 ? [1, 0, 0] : [0, 1, 0]);
+  const harness = setupSlides({
+    frameAt: (timeMs) => (timeMs < 4000 || timeMs >= 8000 ? RED : BLUE),
+    embedHandler: async () => ({ isOk: true, embedding: embeddingAt(harness.ctx.videoTimeMs()) }),
+  });
+  const resetAtList = spyChangeHistoryReset(harness);
+  harness.slideGlue.start();
+  await harness.clock.runUntil({ isDone: () => sendsOf(harness.bridge, 'pipeline-slide-mark').length >= 3 });
+  assert.deepEqual(resetAtList, [400, 4400, 8400], '새 슬라이드 1·2, 재방문 1 을 확정한 시각');
+  assert.deepEqual(harness.warnList, []);
+});
+
+test('화면이 바뀌었어도 같은 슬라이드로 판정되면 칸 변화 기록을 그대로 둔다', async () => {
+  const harness = setupSlides({ frameAt: (timeMs) => (timeMs < 4000 ? RED : BLUE) });
+  const resetAtList = spyChangeHistoryReset(harness);
+  harness.slideGlue.start();
+  await harness.clock.runUntil({ isDone: () => harness.bridge.sendList.some(({ payload }) => payload?.reason === '동일 슬라이드 — 전환 아님') });
+  assert.deepEqual(resetAtList, [400], '첫 장 확정 때만 비운다');
+  assert.deepEqual(harness.warnList, []);
+});
+
 test('400ms 격자 시각마다 차례로 프레임을 읽고, stop 뒤나 캡처가 끝난 뒤에는 읽지 않는다', async () => {
   const readTimeList = [];
   const harness = setupSlides({ frameAt: (timeMs) => { readTimeList.push(timeMs); return RED; } });
