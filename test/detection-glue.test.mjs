@@ -73,6 +73,8 @@ test('트리거 후보가 실린 조각이 오면 lookahead 2.5초 뒤 판정, �
   assert.equal(call.payload.utterance, text);
   assert.equal(call.payload.eventVideoTimeMs, 3000 + 2400, '트리거 세그먼트 끝 = 조각 시작 + endSec');
   assert.equal(call.payload.hasPointingRegion, false);
+  assert.equal(Buffer.from(call.payload.buffer).toString(), 'jpeg');
+  assert.equal(call.payload.fullBuffer, null, '영역이 없으면 전체 화면 한 장만 보내고 main 이 그 한 장을 함께 쓴다');
   assert.equal(call.payload.slideLabel, null);
   assert.deepEqual(Object.keys(call.payload.wordBudgetMap).sort(), ['deixis', 'interpretation', 'visual_description']);
   assert.equal(call.payload.wordBudgetMap.deixis.isDroppable, false);
@@ -192,7 +194,12 @@ async function runRememberedPointing({ rememberAtMs, slideLabel }) {
 test('직전 창에 포인팅 영역이 없으면, 트리거 발화 끝 6초 안에 같은 슬라이드에서 움직이며 가리킨 영역을 지시 후보에 붙인다', async () => {
   const { harness, call } = await runRememberedPointing({ rememberAtMs: 3000, slideLabel: '1' });
   assert.equal(call.payload.hasPointingRegion, true);
-  assert.deepEqual(harness.captureList.map(({ normRect }) => normRect), [narrowToPointingRegion({ sub: REMEMBERED_REGION })], '화면은 기억한 영역 둘레만 뜬다');
+  const [regionCapture, fullCapture] = harness.captureList;
+  assert.deepEqual(harness.captureList.map(({ normRect }) => normRect), [narrowToPointingRegion({ sub: REMEMBERED_REGION }), null],
+    '기억한 영역 둘레(지시 해설용)와 전체 화면(수치·척도 해설용)을 함께 뜬다');
+  assert.equal(regionCapture.videoTimeMs, fullCapture.videoTimeMs, '두 그림은 같은 영상 시각에서 뜬다');
+  assert.equal(Buffer.from(call.payload.buffer).toString(), 'jpeg-region');
+  assert.equal(Buffer.from(call.payload.fullBuffer).toString(), 'jpeg');
   assert.deepEqual(findDebug(harness, '발화 전에 움직이며 가리킨 영역을 붙임').map(({ payload }) => payload.detail), ['트리거="이 그래프" 슬라이드=1']);
   assert.deepEqual(harness.warnList, []);
 });
@@ -202,6 +209,7 @@ test('기억한 가리킴이 다른 슬라이드이거나 트리거 발화 끝�
     const { harness, call } = await runRememberedPointing(option);
     assert.equal(call.payload.hasPointingRegion, false, JSON.stringify(option));
     assert.deepEqual(harness.captureList.map(({ normRect }) => normRect), [null]);
+    assert.equal(call.payload.fullBuffer, null);
     assert.deepEqual(findDebug(harness, '발화 전에 움직이며 가리킨 영역을 붙임'), []);
   }
 });

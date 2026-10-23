@@ -42,9 +42,10 @@ export function createTestContext({ levelList = new Float32Array(600), mediaDura
   const ctx = createSessionContext({
     clock, bridge, mode: MODE_MAP.delayed, featureToggleStore: buildFeatureToggleStore({ isPageTransitionIncluded }),
     mediaDurationMs, levelList, log: { log() {}, warn: (message) => warnList.push(message) },
+    // 잘린 그림과 전체 화면을 가를 수 있게 영역을 준 캡처는 다른 바이트를 돌려준다.
     captureFrameJpeg: async ({ normRect = null } = {}) => {
       captureList.push({ videoTimeMs: ctx.videoTimeMs(), normRect });
-      return Buffer.from('jpeg');
+      return Buffer.from(normRect ? 'jpeg-region' : 'jpeg');
     },
   });
   ctx.markSessionStart();

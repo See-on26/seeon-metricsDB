@@ -1,26 +1,29 @@
 import {
   DEBUG_STAGE_MAP, DEBUG_VERDICT_MAP, NARRATION_TYPE_MAP, CANDIDATE_SOURCE_MAP, SUBMIT_RESULT_MAP, SCREEN_DEPENDENCY_REASON_MAP,
-  wallToVideoTimeMs, resolveBeforeAnchorTs, judgeScreenDependency,
+  wallToVideoTimeMs, resolveBeforeAnchorTs, judgeScreenDependency, captureDeixisFrameSet,
 } from '../product/core-modules.mjs';
 import { narrowToPointingRegion } from '../media/frame-source.mjs';
 import { DEIXIS_FALLBACK_BEFORE_MS, DEIXIS_FALLBACK_AFTER_MS } from './renderer-constants.mjs';
 
-// 행 번호는 seeon-meet origin/production 8ee7958 기준이다.
+// 행 번호는 seeon-meet origin/production 0a17718 기준이다.
 
-// main.js:996-1000
+// main.js:1012-1016
 const SUBMIT_RESULT_LABEL_MAP = {
   [SUBMIT_RESULT_MAP.started]: 'look-ahead 대기',
   [SUBMIT_RESULT_MAP.absorbed]: 'look-ahead 중인 후보에 합침',
   [SUBMIT_RESULT_MAP.merged]: '판단 전 보류 중인 결정에 합침',
 };
 
-// main.js:1093-1096
+// main.js:1109-1112
 const SCREEN_DEPENDENCY_LABEL_MAP = {
   [SCREEN_DEPENDENCY_REASON_MAP.speechTrigger]: '발화 지시가 트리거',
   [SCREEN_DEPENDENCY_REASON_MAP.unsupportedSource]: '발화가 아닌 출처 — 트리거로 쓰지 않는다',
 };
 
-// main.js 의 deixisDetector onDeixis(1003-1017)·resolveDeixisPointing(1019-1031)·runDeixisDecision(1098-1189).
+// 제품 frame(Meet 화면 영역 화소) 자리에 넣는 전체 프레임. ROI 가 전체 프레임이라 이 자리는 normRect 없이 통째로 뜬다.
+const FULL_FRAME_RECT = Object.freeze({ x: 0, y: 0, w: 1, h: 1 });
+
+// main.js 의 deixisDetector onDeixis(1019-1033)·resolveDeixisPointing(1035-1047)·runDeixisDecision(1114-1205).
 // 지시 후보는 main 트리거가 뽑은 후보 구(candidateList)를 실어 오고, 공백(O/X)은 main 의 판단 LLM 이 후보마다 가린다.
 export function createDeixisGlue({ ctx }) {
   const { clock, bridge, state, core } = ctx;
@@ -56,15 +59,19 @@ export function createDeixisGlue({ ctx }) {
     ctx.log.log(`[deixis] 발화 지시 "${trigger}" → ${SUBMIT_RESULT_LABEL_MAP[submitResult] || submitResult}`);
   }
 
-  // 화면은 판정이 난 지금 뜨고(포인팅 영역이 있으면 여백을 둔 그 부분만, main.js:662-682), 판단 LLM 에는 보류(균형 2.5초)가 끝난
-  // 결정(whenSealed)을 보낸다. 보류 중에 들어온 뒤 조각과 그 후보도 이 결정에 합쳐져 함께 판단을 받는다. 세션을 멈춰 후보
-  // 스케줄러가 reset 되면 결정은 null 로 온다.
+  // 화면은 판정이 난 지금 뜨고, 판단 LLM 에는 보류(균형 2.5초)가 끝난 결정(whenSealed)을 보낸다. 보류 중에 들어온 뒤 조각과
+  // 그 후보도 이 결정에 합쳐져 함께 판단을 받는다. 세션을 멈춰 후보 스케줄러가 reset 되면 결정은 null 로 온다.
+  // 화면은 제품 captureDeixisFrameSet 으로 뜬다: 포인팅 영역이 있으면 여백을 둔 그 부분(지시 해설용)과 같은 순간의 전체 화면
+  // (수치·척도 해설·OCR 근거·값 검사 재전사용, fullBuffer)을, 없으면 전체 화면 한 장만(main.js:672-694). 두 캡처는 같은 영상 시각을 읽는다.
   async function runDeixisDecision(firedDecision) {
     state.lastDeixisDecidedAt = clock.nowPerf();
     const sessionSeq = state.experimentSeq;
-    const firedRegion = firedDecision.region;
-    const [buffer, decision] = await Promise.all([
-      ctx.captureFrameJpeg({ normRect: firedRegion ? narrowToPointingRegion({ sub: firedRegion }) : null }),
+    const [{ buffer, fullBuffer }, decision] = await Promise.all([
+      captureDeixisFrameSet({
+        frame: FULL_FRAME_RECT, subRegion: firedDecision.region,
+        narrowRegion: (_frame, sub) => narrowToPointingRegion({ sub }),
+        captureRegion: (normRect) => ctx.captureFrameJpeg({ normRect: normRect === FULL_FRAME_RECT ? null : normRect }),
+      }),
       firedDecision.whenSealed ?? firedDecision,
     ]);
     if (!buffer || !decision) return;
@@ -104,11 +111,11 @@ export function createDeixisGlue({ ctx }) {
     }
     ctx.markDebug({ stage: DEBUG_STAGE_MAP.budget, verdict: DEBUG_VERDICT_MAP.pass, reason: '지시 후보 발행', detail: `트리거="${label}" 발화="${utterance || '(없음)'}" 영역=${region ? '포인팅' : '프레임 전체'} 슬라이드=${core.slideRegistry.currentLabel() || '-'}` });
     await bridge.invoke('pipeline-deixis', {
-      ts, buffer: new Uint8Array(buffer), utterance, recentTranscript, beforeTranscript: before, afterTranscript: after,
+      ts, buffer: new Uint8Array(buffer), fullBuffer: fullBuffer ? new Uint8Array(fullBuffer) : null, utterance, recentTranscript, beforeTranscript: before, afterTranscript: after,
       hasPointingRegion: Boolean(region), pointingOrderHint, slideLabel: core.slideRegistry.currentLabel(), wordBudgetMap, eventVideoTimeMs,
       triggerCandidateList: candidateList,
     }).catch(() => null);
-    // saveDeixisFrame(main.js:1180-1184)은 화면 확인용 저장이라 공장은 하지 않는다.
+    // saveDeixisFrame(main.js:1196-1200)은 화면 확인용 저장이라 공장은 하지 않는다.
   }
 
   ctx.hooks.onDeixis = handleDeixis;

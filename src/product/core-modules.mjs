@@ -56,3 +56,4 @@ export {
   wallToVideoTimeMs, resolveSpeechEndWallTs, attachCandidateEventVideoTime,
 } from '../../seeon-meet/src/renderer/core/capture/video-time.js';
 export { fitWithinLongEdge, MAX_FRAME_LONG_EDGE_PX } from '../../seeon-meet/src/renderer/core/capture/frame-scale.js';
+export { captureDeixisFrameSet } from '../../seeon-meet/src/renderer/core/capture/deixis-frame-set.js';
